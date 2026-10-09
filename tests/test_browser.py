@@ -14,6 +14,7 @@ from app import create_app
 @pytest.fixture
 def live(tmp_path):
     app = create_app({"TESTING": True, "SECRET_KEY": "browser-test-secret",
+                       "DATABASE_URL": "", "STORAGE_UPLOAD_URL": "",
                        "DATABASE_PATH": str(tmp_path / "browser.sqlite3"),
                        "UPLOAD_DIR": str(tmp_path / "uploads"), "RATE_LIMIT_ENABLED": False, "PUBLIC_URL": ""})
     result = app.test_cli_runner().invoke(args=["seed-demo", "--email", "demo@example.com", "--password", "senha-de-teste-segura"])

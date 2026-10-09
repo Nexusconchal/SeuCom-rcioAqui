@@ -54,7 +54,7 @@ O comando pede seu e-mail e senha (mínimo 10 caracteres). Cria **Bistrô da Vil
 
 ## Hospedar
 
-O GitHub contém o código, não um servidor publicado. Use hospedagem Python/Gunicorn ou Docker com **disco persistente**. GitHub Pages e hospedagem exclusivamente estática não executam o backend.
+O GitHub contém o código, não um servidor publicado. Use hospedagem Python/Gunicorn ou Docker com PostgreSQL remoto e Storage, ou **disco persistente** para SQLite. GitHub Pages e hospedagem exclusivamente estática não executam o backend.
 
 | Variável | Produção |
 | --- | --- |
@@ -82,7 +82,7 @@ Comando de produção (Linux):
 gunicorn 'app:create_app()' --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 4 --timeout 60 --access-logfile -
 ~~~
 
-Esta configuração usa uma instância com SQLite em WAL. Para várias réplicas, migre para PostgreSQL e armazenamento compartilhado de fotos. Não coloque SQLite em filesystem de rede e não use disco efêmero para dados de produção.
+Sem DATABASE_URL, esta configuração usa SQLite em WAL. Com DATABASE_URL, usa PostgreSQL e pode compartilhar dados entre instâncias; configure também o Storage remoto. Não coloque SQLite em filesystem de rede e não use disco efêmero para dados de produção.
 
 ### Docker
 
@@ -118,6 +118,22 @@ python -m flask --app app:create_app reset-password --email pessoa@exemplo.com
 ~~~
 
 O comando pede uma senha nova e invalida sessões anteriores. Recuperação e verificação por e-mail exigem integrar um serviço de envio.
+
+### Render gratuito + Supabase gratuito
+
+A aplicação aceita PostgreSQL remoto em DATABASE_URL e fotos em Storage. Assim os dados sobrevivem a reinicializações do Render sem contratar disco.
+
+Use um projeto Supabase Free, um usuário PostgreSQL exclusivo do backend e o schema privado seucomercio (fora de public). As tabelas habilitam RLS e não concedem acesso público. O usuário do servidor é proprietário das tabelas; o Flask autentica cada lojista e restringe o acesso à sua loja.
+
+Configure no Render: APP_ENV=production, SECRET_KEY aleatória, TRUST_PROXY=1, DATABASE_URL com o **pooler de sessão IPv4 na porta 5432**, DATABASE_SCHEMA=seucomercio, STORAGE_UPLOAD_URL, STORAGE_UPLOAD_TOKEN e STORAGE_PUBLIC_URL. O app usa automaticamente RENDER_EXTERNAL_URL. Inicializa o banco sem apagar dados existentes.
+
+As fotos passam por validação/reprocessamento no Flask, depois são enviadas à função commerce-upload. Ela verifica um token exclusivo do servidor pelo hash SHA-256 antes de acessar o Storage. A chave administrativa do Supabase fica na própria função; não é enviada ao navegador. Crie o bucket commerce-photos público, somente para fotos do cardápio, sem políticas públicas de escrita. Publique a função em supabase/functions/commerce-upload, configurando UPLOAD_TOKEN_SHA256; a verificação JWT da plataforma é substituída por essa autenticação própria. Documentos e dados de clientes não devem ser enviados a esse bucket.
+
+Build: pip install -r requirements.txt. Start: gunicorn 'app:create_app()' --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 60. Health check: /health.
+
+O Render Free adormece após inatividade e pode demorar a abrir novamente. O Supabase Free possui limites de banco/armazenamento e pode pausar projetos inativos. Não há garantia de operação contínua nesse conjunto gratuito. Referências: [Render Free](https://render.com/docs/free), [Supabase Free](https://supabase.com/pricing).
+
+Para backups PostgreSQL, use pg_dump com a conexão da sua conta e copie as fotos separadamente. O script backup.py atende somente SQLite.
 
 ## Testes
 

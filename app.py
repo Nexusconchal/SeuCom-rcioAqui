@@ -16,6 +16,8 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import click
+from database import connect, initialize
+from storage import put_image
 from flask import Flask, abort, g, jsonify, request, send_from_directory, session
 from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException
@@ -43,11 +45,14 @@ def create_app(test_config=None):
         raise RuntimeError("SECRET_KEY precisa ter ao menos 32 caracteres em produção.")
     app.config.update(
         SECRET_KEY=key or secrets.token_hex(32), DATABASE_PATH=os.getenv("DATABASE_PATH", str(BASE / "instance" / "seucomercio.sqlite3")),
+        DATABASE_URL=os.getenv("DATABASE_URL", ""), DATABASE_SCHEMA=os.getenv("DATABASE_SCHEMA", "seucomercio"),
+        STORAGE_UPLOAD_URL=os.getenv("STORAGE_UPLOAD_URL", ""), STORAGE_UPLOAD_TOKEN=os.getenv("STORAGE_UPLOAD_TOKEN", ""),
+        STORAGE_PUBLIC_URL=os.getenv("STORAGE_PUBLIC_URL", ""),
         UPLOAD_DIR=os.getenv("UPLOAD_DIR", str(BASE / "instance" / "uploads")),
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=production,
         PERMANENT_SESSION_LIFETIME=timedelta(hours=12), MAX_CONTENT_LENGTH=8 * 1024 * 1024,
         MAX_FORM_PARTS=20, ALLOW_REGISTRATION=os.getenv("ALLOW_REGISTRATION", "1") == "1",
-        PUBLIC_URL=os.getenv("PUBLIC_URL", "").rstrip("/"), RATE_LIMIT_ENABLED=True,
+        PUBLIC_URL=(os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/"), RATE_LIMIT_ENABLED=True,
     )
     if test_config:
         app.config.update(test_config)
@@ -56,18 +61,14 @@ def create_app(test_config=None):
         app.config["TRUSTED_HOSTS"] = [h.strip() for h in hosts.split(",") if h.strip()]
     if os.getenv("TRUST_PROXY") == "1":
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=0, x_port=0)
-    Path(app.config["DATABASE_PATH"]).parent.mkdir(parents=True, exist_ok=True)
+    if production and os.getenv("RENDER") and not app.config["DATABASE_URL"]:
+        raise RuntimeError("Render exige DATABASE_URL para preservar os dados.")
     Path(app.config["UPLOAD_DIR"]).mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript((BASE / "schema.sql").read_text(encoding="utf-8"))
+    initialize(app.config)
 
     def db():
         if "db" not in g:
-            g.db = sqlite3.connect(app.config["DATABASE_PATH"], timeout=15, isolation_level=None)
-            g.db.row_factory = sqlite3.Row
-            g.db.execute("PRAGMA foreign_keys=ON")
-            g.db.execute("PRAGMA busy_timeout=15000")
+            g.db = connect(app.config)
         return g.db
 
     @contextmanager
@@ -138,7 +139,7 @@ def create_app(test_config=None):
                     abort(429, description="Muitas tentativas. Aguarde alguns minutos.")
                 conn.execute("UPDATE rate_limits SET count=count+1 WHERE key=?", (key_hash,))
             else:
-                conn.execute("INSERT OR REPLACE INTO rate_limits VALUES(?,?,?)", (key_hash, 1, stamp + seconds))
+                conn.execute("INSERT INTO rate_limits VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET count=excluded.count,resets_at=excluded.resets_at", (key_hash, 1, stamp + seconds))
             conn.execute("DELETE FROM rate_limits WHERE resets_at<?", (stamp - 600,))
 
     def owner(fn):
@@ -503,10 +504,16 @@ def create_app(test_config=None):
             picture.thumbnail((1800, 1800))
             picture = picture.convert("RGB")
             filename = secrets.token_hex(16) + ".webp"
-            picture.save(Path(app.config["UPLOAD_DIR"]) / filename, "WEBP", quality=85)
+            output = io.BytesIO()
+            picture.save(output, "WEBP", quality=85)
         except (UnidentifiedImageError, OSError, Image.DecompressionBombError, ValueError):
             abort(400, description="Envie uma foto PNG, JPEG ou WebP válida.")
-        return jsonify(url="/media/" + filename), 201
+        if app.config["STORAGE_UPLOAD_URL"]:
+            url = put_image(app.config, g.store["id"], filename, output.getvalue())
+        else:
+            (Path(app.config["UPLOAD_DIR"]) / filename).write_bytes(output.getvalue())
+            url = "/media/" + filename
+        return jsonify(url=url), 201
 
     @app.get("/api/admin/products")
     @owner
@@ -611,7 +618,7 @@ def create_app(test_config=None):
                     for item in conn.execute("SELECT product_id,SUM(quantity) AS qty FROM order_items WHERE order_id=? GROUP BY product_id", (oid,)):
                         conn.execute("UPDATE products SET stock=stock+? WHERE id=? AND stock IS NOT NULL", (item["qty"], item["product_id"]))
                     if order["coupon_id"]:
-                        conn.execute("UPDATE coupons SET uses=MAX(uses-1,0) WHERE id=?", (order["coupon_id"],))
+                        conn.execute("UPDATE coupons SET uses=CASE WHEN uses>0 THEN uses-1 ELSE 0 END WHERE id=?", (order["coupon_id"],))
                 conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, status, now()))
             paid = value.get("paid", bool(order["paid"]))
             if not isinstance(paid, bool):
