@@ -75,7 +75,11 @@ export async function copy(value){
   catch{modal('Copie o link','<input readonly value="'+esc(value)+'" aria-label="Link para copiar"><p class="muted">Selecione o texto e copie.</p>');}
 }
 export function attachFallbacks(root=document){
-  $$('img',root).forEach(el=>el.addEventListener('error',()=>{if(!el.src.endsWith('/static/placeholder.svg'))el.src='/static/placeholder.svg';},{once:true}));
+  $('img',root).forEach(el=>{
+    const fallback=()=>{if(!el.src.endsWith('/static/placeholder.svg'))el.src='/static/placeholder.svg';};
+    el.addEventListener('error',fallback,{once:true});
+    if(el.complete&&el.naturalWidth===0)fallback();
+  });
 }
 export function moneyInput(name,label,value=0,required=true){
  return '<label>'+esc(label)+'<div class="money-input"><span>R$</span><input name="'+esc(name)+'" aria-label="'+esc(label)+'" type="number" step="0.01" min="0" '+(required?'required':'')+' value="'+(value/100).toFixed(2)+'"></div></label>';

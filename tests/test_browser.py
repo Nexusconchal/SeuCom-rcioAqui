@@ -38,6 +38,8 @@ def test_mobile_checkout_and_desktop_management(live):
         page.goto(live + "/loja/bistro-da-vila")
         expect(page.get_by_role("heading", name="Bistrô da Vila", exact=True)).to_be_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        page.evaluate("document.querySelectorAll('img').forEach(img => img.loading='eager')")
+        page.wait_for_function("Array.from(document.images).every(img => img.complete)", timeout=20000)
         page.screenshot(path=str(artifacts / "cardapio-mobile.png"), full_page=True)
         page.get_by_role("button", name="Ver Burger da casa", exact=True).click()
         page.get_by_label("Bacon crocante").check()
@@ -101,6 +103,7 @@ def test_mobile_checkout_and_desktop_management(live):
         admin.get_by_role("button", name="Visão geral", exact=True).click()
         expect(admin.get_by_role("heading", name="Seu dia em um olhar")).to_be_visible()
         assert admin.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        admin.locator("#toast").evaluate("(element) => element.classList.remove('show')")
         admin.screenshot(path=str(artifacts / "painel-mobile.png"), full_page=True)
         assert not errors, errors
         browser.close()

@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 import click
 from flask import Flask, abort, g, jsonify, request, send_from_directory, session
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -494,7 +494,10 @@ def create_app(test_config=None):
         try:
             Image.MAX_IMAGE_PIXELS = 20_000_000
             picture = Image.open(file.stream)
+            if picture.format not in ("PNG", "JPEG", "WEBP") or picture.width * picture.height > 20_000_000:
+                abort(400, description="Use PNG, JPEG ou WebP com até 20 megapixels.")
             picture.load()
+            picture = ImageOps.exif_transpose(picture)
             picture.thumbnail((1800, 1800))
             picture = picture.convert("RGB")
             filename = secrets.token_hex(16) + ".webp"

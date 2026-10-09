@@ -35,6 +35,15 @@ jobs:
           node --check static/dashboard.js
       - name: Testar API e navegador
         run: python -m pytest -v
+      - name: Auditar dependências de produção
+        run: pip-audit -r requirements.txt
+      - name: Construir e testar container de produção
+        run: |
+          docker build -t seucomercio-ci .
+          docker run -d --rm --name seucomercio-smoke -p 8010:8000 -e APP_ENV=production -e SECRET_KEY=ci-only-secret-with-more-than-32-characters -e PUBLIC_URL=https://example.test -e TRUSTED_HOSTS=localhost,127.0.0.1 seucomercio-ci
+          python scripts/smoke.py http://127.0.0.1:8010
+          docker logs seucomercio-smoke
+          docker stop seucomercio-smoke
       - name: Imagens para inspeção visual
         if: always()
         run: python scripts/preview_images.py
