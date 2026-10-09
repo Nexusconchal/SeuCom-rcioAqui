@@ -254,7 +254,7 @@ def create_app(test_config=None):
     def media(filename):
         if not re.fullmatch(r"[a-f0-9]{32}\.webp", filename):
             abort(404)
-        return send_from_directory(app.config["UPLOAD_DIR"], filename, max_age=31536000)
+        return send_from_directory(app.config["UPLOAD_DIR"], filename, mimetype="image/webp", max_age=31536000)
 
     @app.get("/api/session")
     def get_session():

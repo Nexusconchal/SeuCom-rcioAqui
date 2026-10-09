@@ -75,7 +75,7 @@ export async function copy(value){
   catch{modal('Copie o link','<input readonly value="'+esc(value)+'" aria-label="Link para copiar"><p class="muted">Selecione o texto e copie.</p>');}
 }
 export function attachFallbacks(root=document){
-  $('img',root).forEach(el=>{
+  $$('img',root).forEach(el=>{
     const fallback=()=>{if(!el.src.endsWith('/static/placeholder.svg'))el.src='/static/placeholder.svg';};
     el.addEventListener('error',fallback,{once:true});
     if(el.complete&&el.naturalWidth===0)fallback();
