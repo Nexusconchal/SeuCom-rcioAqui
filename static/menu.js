@@ -85,10 +85,12 @@ function checkoutDialog(){
   $('[name=coupon]',form).oninput=()=>{quote=null;$('#checkout-totals',d).textContent='Aplique o cupom para atualizar o total.';};
   bindForm(form,async formData=>{
     if(!quote){await refreshQuote();if(!quote)throw new Error('Confira os itens e o cupom antes de confirmar.');}
-    const body={...Object.fromEntries(formData),items:itemPayload(),mode:mode(),change_for:formData.get('change_for')?cents(formData.get('change_for')):null};
+    const body={...Object.fromEntries(formData),items:itemPayload(),mode:mode(),expected_total:quote.total,change_for:formData.get('change_for')?cents(formData.get('change_for')):null};
     // A new payload gets a fresh key. Network retries of the same payload reuse it.
     const serialized=JSON.stringify(body);if(orderKey.payload!==serialized)orderKey={payload:serialized,key:crypto.randomUUID()};
-    const result=await api('/api/store/'+encodeURIComponent(activeSlug)+'/orders',{method:'POST',headers:{'Idempotency-Key':orderKey.key},body:serialized});
+    let result;
+    try{result=await api('/api/store/'+encodeURIComponent(activeSlug)+'/orders',{method:'POST',headers:{'Idempotency-Key':orderKey.key},body:serialized});}
+    catch(error){if(error.status===409)await refreshQuote();throw error;}
     cart=[];persist();location.href='/pedido/'+result.token;
   });$('[name=payment]',form).dispatchEvent(new Event('change'));refreshQuote();
 }

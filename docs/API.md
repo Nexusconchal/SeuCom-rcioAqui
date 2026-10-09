@@ -82,3 +82,5 @@ paid é confirmação manual do lojista, independente do status. Cancelar não f
 
 Body: 8 MB. Pedido: 50 linhas, 50 unidades por linha. Produto: 12 complementos.
 Rate limits por IP, persistidos no SQLite: login 15/10 min; cadastro 5/h; pedidos 30/10 min; cotação 120/10 min.
+
+O frontend envia expected_total com o total aprovado na cotação. Se preços, descontos ou taxa mudarem antes da gravação, o servidor retorna 409 e a interface atualiza a cotação para nova confirmação.

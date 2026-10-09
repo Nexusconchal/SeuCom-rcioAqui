@@ -223,3 +223,17 @@ def test_rate_limiter(app):
     for _ in range(15):
         assert send(client, "POST", "/api/auth/login", {"email": "none@example.com", "password": "wrong"}).status_code == 401
     assert send(client, "POST", "/api/auth/login", {"email": "none@example.com", "password": "wrong"}).status_code == 429
+
+
+def test_price_change_requires_new_confirmation(shop):
+    client, pid = shop
+    body = payload(pid, expected_total=3900)
+    product = client.get("/api/admin/products").json["products"][0]
+    product["price"] = 3000
+    assert send(client, "PUT", f"/api/admin/products/{pid}", product).status_code == 200
+    rejected = send(client, "POST", "/api/store/minha-loja/orders", body, "changed-price-key-1")
+    assert rejected.status_code == 409 and stock(client) == 5
+    quote = send(client, "POST", "/api/store/minha-loja/quote", body)
+    assert quote.json["total"] == 4000
+    body["expected_total"] = 4000
+    assert send(client, "POST", "/api/store/minha-loja/orders", body, "changed-price-key-2").status_code == 201

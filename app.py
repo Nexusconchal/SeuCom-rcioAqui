@@ -431,6 +431,8 @@ def create_app(test_config=None):
             discount, coupon_id = coupon_discount(conn, store["id"], coupon_code, subtotal)
             fee = store["delivery_fee"] if mode == "delivery" else 0
             total = subtotal - discount + fee
+            if "expected_total" in value and integer(value, "expected_total", maximum=10**14) != total:
+                abort(409, description="O preço mudou. Confira o novo total antes de confirmar.")
             if payment == "cash" and change_for is not None and change_for < total:
                 abort(400, description="O valor para troco deve cobrir o total.")
             token, stamp = secrets.token_urlsafe(32), now()

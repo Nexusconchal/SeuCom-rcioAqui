@@ -133,7 +133,7 @@ Para testar só a API, sem Chromium:
 python -m pytest tests/test_api.py -v
 ~~~
 
-GitHub Actions verifica sintaxe, API e compra/gestão em Chromium. Cobre isolamento entre lojas, preços, estoque concorrente, CSRF, uploads, cupons e fluxo de pedidos. As capturas aparecem no pacote **telas-seucomercio** no resultado da execução.
+GitHub Actions verifica sintaxe, API no Linux e Windows, auditoria de dependências, container de produção e compra/gestão em Chromium. Cobre isolamento entre lojas, preços, estoque concorrente, CSRF, uploads, cupons e fluxo de pedidos. As capturas aparecem no pacote **telas-seucomercio** no resultado da execução.
 
 ## Estrutura
 
