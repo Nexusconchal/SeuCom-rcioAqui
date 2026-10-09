@@ -3,7 +3,7 @@ const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEnco
 Deno.env.set("UPLOAD_TOKEN_SHA256", Array.from(digest, b => b.toString(16).padStart(2, "0")).join(""));
 Deno.env.set("SUPABASE_URL", "https://storage.example.test");
 Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "test-only-secret");
-const { handler } = await import("./index.ts");
+const { handler } = await import("./handler.ts");
 const objectPath = "1/" + "a".repeat(32) + ".webp";
 function request(body: Uint8Array = new TextEncoder().encode("RIFF0000WEBP"), path = objectPath, credential = token) {
   return new Request("https://upload.example.test", { method: "POST",
