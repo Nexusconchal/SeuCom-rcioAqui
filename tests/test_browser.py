@@ -1,5 +1,6 @@
 """Compras e gestão exercitadas num Chromium real, em desktop e celular."""
 import os
+import sqlite3
 import threading
 from pathlib import Path
 
@@ -17,6 +18,8 @@ def live(tmp_path):
                        "UPLOAD_DIR": str(tmp_path / "uploads"), "RATE_LIMIT_ENABLED": False, "PUBLIC_URL": ""})
     result = app.test_cli_runner().invoke(args=["seed-demo", "--email", "demo@example.com", "--password", "senha-de-teste-segura"])
     assert result.exit_code == 0, result.output
+    with sqlite3.connect(app.config["DATABASE_PATH"]) as connection:
+        connection.execute("UPDATE stores SET phone=? WHERE slug=?", ("11999999999", "bistro-da-vila"))
     server = make_server("127.0.0.1", 0, app, threaded=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -39,7 +42,7 @@ def test_mobile_checkout_and_desktop_management(live):
         expect(page.get_by_role("heading", name="Bistrô da Vila", exact=True)).to_be_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         page.evaluate("document.querySelectorAll('img').forEach(img => img.loading='eager')")
-        page.wait_for_function("Array.from(document.images).every(img => img.complete)", timeout=20000)
+        page.wait_for_function("() => Array.from(document.images).every(img => img.complete)", timeout=20000)
         page.screenshot(path=str(artifacts / "cardapio-mobile.png"), full_page=True)
         page.get_by_role("button", name="Ver Burger da casa", exact=True).click()
         page.get_by_label("Bacon crocante").check()
@@ -58,6 +61,7 @@ def test_mobile_checkout_and_desktop_management(live):
         expect(page.get_by_role("heading", name="Seu pedido chegou!")).to_be_visible()
         expect(page.get_by_role("heading", name="Pague com Pix")).to_be_visible()
         page.screenshot(path=str(artifacts / "acompanhamento-mobile.png"), full_page=True)
+        expect(page.get_by_role("link", name="Falar com a loja")).to_have_attribute("href", "https://wa.me/5511999999999?text=Ol%C3%A1!%20Gostaria%20de%20falar%20sobre%20o%20pedido%20%231045")
         tracking = page.url
         desktop = browser.new_context(viewport={"width": 1440, "height": 1000})
         admin = desktop.new_page()

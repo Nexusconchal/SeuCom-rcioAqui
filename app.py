@@ -602,6 +602,8 @@ def create_app(test_config=None):
         with transaction() as conn:
             order = owned("orders", oid)
             status = value.get("status", order["status"])
+            if not isinstance(status, str) or status not in STATUSES:
+                abort(400, description="Status inválido.")
             if status != order["status"]:
                 if status not in STATUSES[order["status"]] or (order["mode"] == "pickup" and status == "delivering") or (order["mode"] == "delivery" and order["status"] == "ready" and status == "completed"):
                     abort(409, description="Esta mudança de status não é permitida.")
@@ -619,7 +621,7 @@ def create_app(test_config=None):
                 if not isinstance(driver, int) or isinstance(driver, bool):
                     abort(400, description="Entregador inválido.")
                 record = owned("drivers", driver)
-                if not record["active"]:
+                if not record["active"] and driver != order["driver_id"]:
                     abort(400, description="Entregador inativo.")
                 if order["mode"] != "delivery":
                     abort(400, description="Retirada não usa entregador.")

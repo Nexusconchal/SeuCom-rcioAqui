@@ -237,3 +237,18 @@ def test_price_change_requires_new_confirmation(shop):
     assert quote.json["total"] == 4000
     body["expected_total"] = 4000
     assert send(client, "POST", "/api/store/minha-loja/orders", body, "changed-price-key-2").status_code == 201
+
+
+def test_paused_assigned_driver_does_not_block_order_progress(shop):
+    client, pid = shop
+    send(client, "POST", "/api/store/minha-loja/orders", payload(pid), "driver-status-key-1")
+    oid = client.get("/api/admin/orders").json["orders"][0]["id"]
+    driver = send(client, "POST", "/api/admin/drivers", {"name": "Entregador Teste"}).json["id"]
+    assert send(client, "PATCH", f"/api/admin/orders/{oid}", {"driver_id": driver}).status_code == 200
+    assert send(client, "PUT", f"/api/admin/drivers/{driver}", {"name": "Entregador Teste", "active": False}).status_code == 200
+    assert send(client, "PATCH", f"/api/admin/orders/{oid}", {"status": "preparing"}).status_code == 200
+    assert send(client, "PATCH", f"/api/admin/orders/{oid}", {"status": {"invalid": True}}).status_code == 400
+    second = send(client, "POST", "/api/store/minha-loja/orders", payload(pid), "driver-status-key-2")
+    assert second.status_code == 201
+    other = client.get("/api/admin/orders").json["orders"][0]["id"]
+    assert send(client, "PATCH", f"/api/admin/orders/{other}", {"driver_id": driver}).status_code == 400
