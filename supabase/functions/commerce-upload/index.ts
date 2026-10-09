@@ -20,7 +20,7 @@ async function authorized(req: Request) {
   return difference === 0;
 }
 
-Deno.serve(async (req: Request) => {
+export async function handler(req: Request) {
   if (req.method !== "POST") return reply(405, { error: "Method not allowed" });
   if (!await authorized(req)) return reply(401, { error: "Unauthorized" });
   const path = req.headers.get("x-object-path") ?? "";
@@ -59,4 +59,6 @@ Deno.serve(async (req: Request) => {
   } catch {
     return reply(503, { error: "Storage unavailable" });
   }
-});
+}
+
+if (import.meta.main) Deno.serve(handler);
