@@ -1,0 +1,22 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: development
+      SECRET_KEY: ${SECRET_KEY:?Defina SECRET_KEY no arquivo .env}
+      DATABASE_PATH: /data/seucomercio.sqlite3
+      UPLOAD_DIR: /data/uploads
+      PUBLIC_URL: http://localhost:8000
+      TRUST_PROXY: "0"
+    volumes:
+      - commerce-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+volumes:
+  commerce-data:
