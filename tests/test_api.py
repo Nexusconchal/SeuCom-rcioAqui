@@ -1,4 +1,9 @@
 import io
+import os
+import uuid
+
+import psycopg
+from psycopg import sql
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -9,9 +14,20 @@ from app import create_app
 
 @pytest.fixture
 def app(tmp_path):
-    return create_app({"TESTING": True, "SECRET_KEY": "test-secret-not-for-production",
+    url = os.getenv("TEST_DATABASE_URL", "")
+    schema = "test_" + uuid.uuid4().hex
+    application = create_app({"TESTING": True, "SECRET_KEY": "test-secret-not-for-production",
+                       "DATABASE_URL": url, "DATABASE_SCHEMA": schema,
+                       "STORAGE_UPLOAD_URL": "", "STORAGE_UPLOAD_TOKEN": "", "STORAGE_PUBLIC_URL": "",
                        "DATABASE_PATH": str(tmp_path / "test.sqlite3"),
                        "UPLOAD_DIR": str(tmp_path / "uploads"), "RATE_LIMIT_ENABLED": False, "PUBLIC_URL": ""})
+    try:
+        yield application
+    finally:
+        if url:
+            with psycopg.connect(url, autocommit=True) as connection:
+                connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
 
 
 def session_token(client):
