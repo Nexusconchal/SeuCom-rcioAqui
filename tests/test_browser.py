@@ -82,7 +82,7 @@ def test_mobile_checkout_and_desktop_management(live):
         card.get_by_role("button", name="Saiu para entrega", exact=True).click()
         expect(card.get_by_role("button", name="Concluir entrega", exact=True)).to_be_visible()
         card.get_by_role("button", name="Concluir entrega", exact=True).click()
-        expect(admin.get_by_text("Cliente Navegador", exact=True)).not_to_be_visible()
+        expect(admin.locator("#orders-area").get_by_text("Cliente Navegador", exact=True)).not_to_be_visible()
         page.goto(tracking)
         expect(page.get_by_role("heading", name="Tudo certo por aqui.")).to_be_visible()
         expect(page.get_by_text("Pagamento confirmado", exact=True)).to_be_visible()

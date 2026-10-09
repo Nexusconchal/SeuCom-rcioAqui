@@ -35,6 +35,9 @@ jobs:
           node --check static/dashboard.js
       - name: Testar API e navegador
         run: python -m pytest -v
+      - name: Imagens para inspeção visual
+        if: always()
+        run: python scripts/preview_images.py
       - name: Guardar capturas de tela
         if: always()
         uses: actions/upload-artifact@v4

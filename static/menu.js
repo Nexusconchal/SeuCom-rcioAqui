@@ -90,7 +90,7 @@ function checkoutDialog(){
     const serialized=JSON.stringify(body);if(orderKey.payload!==serialized)orderKey={payload:serialized,key:crypto.randomUUID()};
     const result=await api('/api/store/'+encodeURIComponent(activeSlug)+'/orders',{method:'POST',headers:{'Idempotency-Key':orderKey.key},body:serialized});
     cart=[];persist();location.href='/pedido/'+result.token;
-  });refreshQuote();
+  });$('[name=payment]',form).dispatchEvent(new Event('change'));refreshQuote();
 }
 export async function renderTracking(token){
   let timer;

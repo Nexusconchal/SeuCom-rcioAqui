@@ -78,7 +78,7 @@ export function attachFallbacks(root=document){
   $$('img',root).forEach(el=>el.addEventListener('error',()=>{if(!el.src.endsWith('/static/placeholder.svg'))el.src='/static/placeholder.svg';},{once:true}));
 }
 export function moneyInput(name,label,value=0,required=true){
- return '<label>'+esc(label)+'<div class="money-input"><span>R$</span><input name="'+esc(name)+'" type="number" step="0.01" min="0" '+(required?'required':'')+' value="'+(value/100).toFixed(2)+'"></div></label>';
+ return '<label>'+esc(label)+'<div class="money-input"><span>R$</span><input name="'+esc(name)+'" aria-label="'+esc(label)+'" type="number" step="0.01" min="0" '+(required?'required':'')+' value="'+(value/100).toFixed(2)+'"></div></label>';
 }
 export function field(name,label,value='',type='text',attrs=''){
  return '<label>'+esc(label)+'<input name="'+esc(name)+'" type="'+type+'" value="'+esc(value)+'" '+attrs+'></label>';
