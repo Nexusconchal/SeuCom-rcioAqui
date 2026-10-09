@@ -7,7 +7,7 @@ const { handler } = await import("./index.ts");
 const objectPath = "1/" + "a".repeat(32) + ".webp";
 function request(body: Uint8Array = new TextEncoder().encode("RIFF0000WEBP"), path = objectPath, credential = token) {
   return new Request("https://upload.example.test", { method: "POST",
-    headers: { Authorization: "Bearer " + credential, "Content-Type": "image/webp", "X-Object-Path": path }, body });
+    headers: { Authorization: "Bearer " + credential, "Content-Type": "image/webp", "X-Object-Path": path }, body: new Uint8Array(body) });
 }
 function equal(actual: unknown, expected: unknown) {
   if (actual !== expected) throw new Error("Expected " + expected + ", got " + actual);
