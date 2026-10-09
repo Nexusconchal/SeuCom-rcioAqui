@@ -82,7 +82,9 @@ def initialize(config):
         with psycopg.connect(config["DATABASE_URL"], autocommit=True, connect_timeout=10) as conn:
             with conn.transaction():
                 conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (schema,))
-                conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
+                exists = conn.execute("SELECT 1 FROM pg_namespace WHERE nspname=%s", (schema,)).fetchone()
+                if not exists:
+                    conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
                 conn.execute(sql.SQL("REVOKE ALL ON SCHEMA {} FROM PUBLIC").format(sql.Identifier(schema)))
                 conn.execute(sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(schema)))
                 for statement in (BASE / "schema.postgres.sql").read_text(encoding="utf-8").split(";"):
