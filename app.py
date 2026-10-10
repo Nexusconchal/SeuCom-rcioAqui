@@ -91,6 +91,8 @@ def create_app(test_config=None):
         PERMANENT_SESSION_LIFETIME=timedelta(hours=12), MAX_CONTENT_LENGTH=8 * 1024 * 1024,
         MAX_FORM_PARTS=20, ALLOW_REGISTRATION=os.getenv("ALLOW_REGISTRATION", "1") == "1",
         PUBLIC_URL=(os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/"), RATE_LIMIT_ENABLED=True,
+        # Arquivos do app sempre revalidados: depois de publicar, o navegador pega a versão nova (304 quando igual).
+        SEND_FILE_MAX_AGE_DEFAULT=0,
     )
     if test_config:
         app.config.update(test_config)
@@ -261,12 +263,51 @@ def create_app(test_config=None):
     def product_dict(product, private=False):
         value = dict(product)
         value["extras"] = json.loads(value["extras"])
+        value["option_groups"] = json.loads(value["option_groups"] or "[]")
         value["active"], value["featured"] = bool(value["active"]), bool(value["featured"])
         if not private:
             value.pop("unit_cost", None)
             value.pop("low_stock", None)
             value["extras"] = [{k:v for k,v in x.items() if k!='unit_cost'} for x in value["extras"]]
+            for group in value["option_groups"]:
+                group["options"] = [{k:v for k,v in x.items() if k!='unit_cost'} for x in group["options"]]
         return value
+
+    def choose_options(product, selected):
+        """Valida as escolhas do cliente e devolve (preço unitário, custo unitário ou None, opções escolhidas)."""
+        if not isinstance(selected, list) or len(selected) > 60 or any(not isinstance(x, str) for x in selected) or len(set(selected)) != len(selected):
+            abort(400, description="Complementos inválidos.")
+        extras = json.loads(product["extras"])
+        groups = json.loads(product["option_groups"] or "[]")
+        available = {x["id"]: (None, x) for x in extras}
+        for group in groups:
+            for option in group["options"]:
+                available[option["id"]] = (group, option)
+        if any(x not in available for x in selected):
+            abort(400, description=f"Uma opção de {product['name']} não está mais disponível. Escolha de novo.")
+        price, costs, chosen = product["price"], [product["unit_cost"]], []
+        for x in selected:
+            group, option = available[x]
+            if group is None:
+                price += option["price"]
+                costs.append(option.get("unit_cost"))
+                chosen.append(option)
+        for group in groups:
+            picked = [available[x][1] for x in selected if available[x][0] is group]
+            if not group["min"] <= len(picked) <= group["max"]:
+                need = (f"escolha {group['min']}" if group["min"] == group["max"] else
+                        f"escolha de {group['min']} a {group['max']}" if group["min"] else f"escolha até {group['max']}")
+                abort(400, description=f"{product['name']}: {need} em {group['name']}.")
+            if picked and group["pricing"] == "max":
+                top = max(picked, key=lambda o: o["price"])
+                price += top["price"]
+                costs.append(top.get("unit_cost"))
+            else:
+                price += sum(o["price"] for o in picked)
+                costs.extend(o.get("unit_cost") for o in picked)
+            chosen.extend({**o, "name": group["name"] + ": " + o["name"]} for o in picked)
+        cost = None if any(c is None for c in costs) else sum(costs)
+        return price, cost, chosen
 
     def order_dict(order, private=True):
         value = dict(order)
@@ -507,17 +548,10 @@ def create_app(test_config=None):
             product = conn.execute("SELECT * FROM products WHERE id=? AND store_id=? AND active=1", (pid, store["id"])).fetchone()
             if not product:
                 abort(400, description="Um produto não está mais disponível.")
-            selected = item.get("option_ids", [])
-            if not isinstance(selected, list) or len(selected) > 12 or any(not isinstance(x, str) for x in selected) or len(set(selected)) != len(selected):
-                abort(400, description="Complementos inválidos.")
-            available = {x["id"]: x for x in json.loads(product["extras"])}
-            if any(x not in available for x in selected):
-                abort(400, description="Um complemento não está mais disponível.")
-            extras = [available[x] for x in selected]
-            unit = product["price"] + sum(x["price"] for x in extras)
+            unit, cost, extras = choose_options(product, item.get("option_ids", []))
             subtotal += quantity * unit
             quantities[pid] = quantities.get(pid, 0) + quantity
-            prepared.append((product, quantity, unit, extras, text(item, "notes", 0, 200)))
+            prepared.append((product, quantity, unit, extras, text(item, "notes", 0, 200), cost))
         return subtotal, quantities, prepared
 
     @app.post("/api/store/<slug>/quote")
@@ -534,7 +568,7 @@ def create_app(test_config=None):
         if mode not in ("delivery", "pickup") or not isinstance(items, list) or not 1 <= len(items) <= 50:
             abort(400, description="Sacola inválida.")
         subtotal, quantities, prepared = price_items(db(), store, items)
-        for product, quantity, unit, extras, notes in prepared:
+        for product, quantity, unit, extras, notes, _ in prepared:
             if product["stock"] is not None and quantities[product["id"]] > product["stock"]:
                 abort(409, description=f"Estoque insuficiente: {product['name']}.")
         if subtotal < store["minimum_order"]:
@@ -609,9 +643,7 @@ def create_app(test_config=None):
                  (total*fees.get(payment,0)+5000)//10000,
                  ((subtotal-discount)*store['commission_bps']+5000)//10000,
                  'counter' if getattr(g,'manual_order',False) else 'web',zone,oid))
-            for product, quantity, unit, extras, item_notes in prepared:
-                known=product['unit_cost'] is not None and all(x.get('unit_cost') is not None for x in extras)
-                cost=product['unit_cost']+sum(x['unit_cost'] for x in extras) if known else None
+            for product, quantity, unit, extras, item_notes, cost in prepared:
                 conn.execute("INSERT INTO order_items(order_id,product_id,name,quantity,unit_price,unit_cost,extras,notes) VALUES(?,?,?,?,?,?,?,?)",
                              (oid, product["id"], product["name"], quantity, unit, cost, json.dumps([{k:v for k,v in x.items() if k!='unit_cost'} for x in extras]), item_notes))
             for pid, quantity in quantities.items():
@@ -747,18 +779,50 @@ def create_app(test_config=None):
             seen.add(eid)
             sanitized.append({"id": eid, "name": text(extra, "name", 1, 80), "price": integer(extra, "price"),
                               "unit_cost":None if extra.get('unit_cost') is None else integer(extra,'unit_cost')})
+        groups = value.get("option_groups", [])
+        if not isinstance(groups, list) or len(groups) > 10:
+            abort(400, description="Use até 10 grupos de escolha.")
+        clean_groups = []
+        for group in groups:
+            if not isinstance(group, dict):
+                abort(400, description="Grupo de escolha inválido.")
+            gid, gname = text(group, "id", 1, 40), text(group, "name", 1, 60)
+            if not re.fullmatch(r"[a-zA-Z0-9_-]+", gid):
+                abort(400, description="Identificador de grupo inválido.")
+            options = group.get("options", [])
+            if not isinstance(options, list) or not 1 <= len(options) <= 30:
+                abort(400, description=f"O grupo {gname} precisa de 1 a 30 opções.")
+            low, high = integer(group, "min", maximum=30), integer(group, "max", minimum=1, maximum=30)
+            if low > high or low > len(options):
+                abort(400, description=f"No grupo {gname}, o mínimo não pode passar do máximo nem da quantidade de opções.")
+            pricing = group.get("pricing", "sum")
+            if pricing not in ("sum", "max"):
+                abort(400, description="Forma de cobrança do grupo inválida.")
+            clean = []
+            for option in options:
+                if not isinstance(option, dict):
+                    abort(400, description="Opção inválida.")
+                oid = text(option, "id", 1, 40)
+                if not re.fullmatch(r"[a-zA-Z0-9_-]+", oid) or oid in seen:
+                    abort(400, description="Identificador de opção inválido ou duplicado.")
+                seen.add(oid)
+                clean.append({"id": oid, "name": text(option, "name", 1, 80), "price": integer(option, "price"),
+                              "unit_cost": None if option.get("unit_cost") is None else integer(option, "unit_cost")})
+            clean_groups.append({"id": gid, "name": gname, "min": low, "max": min(high, len(clean)), "pricing": pricing, "options": clean})
+        required = any(g["min"] > 0 for g in clean_groups)
         return (category, text(value, "name", 2, 120), text(value, "description", 0, 500),
-                integer(value, "price", minimum=1), image_url(value.get("image", "")), boolean(value, "active", True),
+                integer(value, "price", minimum=0 if required else 1), image_url(value.get("image", "")), boolean(value, "active", True),
                 boolean(value, "featured"), stock, json.dumps(sanitized), integer(value, "position"),
-                None if value.get('unit_cost') is None else integer(value,'unit_cost'), integer(value,'low_stock',default=5,maximum=1000000))
+                None if value.get('unit_cost') is None else integer(value,'unit_cost'), integer(value,'low_stock',default=5,maximum=1000000),
+                json.dumps(clean_groups, ensure_ascii=False))
 
     @app.post("/api/admin/products")
     @owner
     def create_product():
         fields = product_fields(data())
         with transaction() as conn:
-            pid = conn.execute("""INSERT INTO products(store_id,category_id,name,description,price,image,active,featured,stock,extras,position,unit_cost,low_stock)
-                              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.store["id"], *fields)).lastrowid
+            pid = conn.execute("""INSERT INTO products(store_id,category_id,name,description,price,image,active,featured,stock,extras,position,unit_cost,low_stock,option_groups)
+                              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.store["id"], *fields)).lastrowid
             if fields[7] is not None:
                 conn.execute('INSERT INTO stock_movements(store_id,product_id,delta,balance,reason,created_at) VALUES(?,?,?,?,?,?)',
                              (g.store['id'],pid,fields[7],fields[7],'Estoque inicial',now()))
@@ -780,7 +844,7 @@ def create_app(test_config=None):
                 elif previous['stock']!=expected:
                     abort(409,description='O estoque mudou enquanto você editava. Atualize o cadastro antes de ajustar a quantidade.')
             conn.execute("""UPDATE products SET category_id=?,name=?,description=?,price=?,image=?,active=?,featured=?,
-                         stock=?,extras=?,position=?,unit_cost=?,low_stock=? WHERE id=? AND store_id=?""", (*fields, pid, g.store["id"]))
+                         stock=?,extras=?,position=?,unit_cost=?,low_stock=?,option_groups=? WHERE id=? AND store_id=?""", (*fields, pid, g.store["id"]))
             if fields[7] is not None and fields[7]!=previous['stock']:
                 conn.execute('INSERT INTO stock_movements(store_id,product_id,delta,balance,reason,created_at) VALUES(?,?,?,?,?,?)',
                              (g.store['id'],pid,fields[7]-(previous['stock'] or 0),fields[7],'Ajuste no cadastro',now()))

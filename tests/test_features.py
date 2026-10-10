@@ -186,3 +186,40 @@ def test_api_keys_rename_rotate_test_and_delete(app, shop):
     assert register(other, "outra-loja", "other@example.com").status_code == 201
     assert send(other, "DELETE", f"/api/admin/integrations/keys/{unused}/permanent", {}).status_code == 404
     assert send(client, "DELETE", f"/api/admin/integrations/keys/{unused}/permanent", {}).status_code == 200
+
+
+def test_option_groups_required_sizes_and_half_and_half(shop):
+    client, _ = shop
+    category = client.get("/api/admin/products").json["categories"][0]["id"]
+    pizza = {"name": "Pizza", "description": "", "price": 0, "category_id": category, "active": True, "unit_cost": 500,
+             "extras": [{"id": "borda", "name": "Borda recheada", "price": 800, "unit_cost": 200}],
+             "option_groups": [
+                 {"id": "tam", "name": "Tamanho", "min": 1, "max": 1, "pricing": "sum",
+                  "options": [{"id": "m", "name": "Média", "price": 3000, "unit_cost": 900}, {"id": "g", "name": "Grande", "price": 4000, "unit_cost": 1200}]},
+                 {"id": "sab", "name": "Sabores", "min": 1, "max": 2, "pricing": "max",
+                  "options": [{"id": "mu", "name": "Mussarela", "price": 0, "unit_cost": 300}, {"id": "ca", "name": "Calabresa", "price": 500, "unit_cost": 400}]}]}
+    # Preço zero só é aceito quando há escolha obrigatória.
+    assert send(client, "POST", "/api/admin/products", {**pizza, "option_groups": []}).status_code == 400
+    bad = {**pizza, "option_groups": [{**pizza["option_groups"][0], "min": 3}]}
+    assert send(client, "POST", "/api/admin/products", bad).status_code == 400
+    pid = send(client, "POST", "/api/admin/products", pizza).json["id"]
+    public = next(p for p in client.get("/api/store/minha-loja").json["products"] if p["id"] == pid)
+    assert "unit_cost" not in public["option_groups"][0]["options"][0]
+
+    def quote(ids):
+        body = payload(pid, mode="pickup")
+        body["items"][0]["option_ids"] = ids
+        return send(client, "POST", "/api/store/minha-loja/quote", body)
+
+    missing = quote(["mu"])
+    assert missing.status_code == 400 and "Tamanho" in missing.json["error"]
+    assert quote(["g", "mu", "ca", "m"]).status_code == 400
+    # Grande (40) + meio a meio cobra o mais caro (5) + borda (8) = 53
+    assert quote(["g", "mu", "ca", "borda"]).json["subtotal"] == 5300
+    assert quote(["m", "mu"]).json["subtotal"] == 3000
+    body = payload(pid, mode="pickup")
+    body["items"][0]["option_ids"] = ["g", "mu", "ca"]
+    assert send(client, "POST", "/api/store/minha-loja/orders", body, uuid.uuid4().hex).status_code == 201
+    item = client.get("/api/admin/orders").json["orders"][0]["items"][0]
+    assert item["unit_price"] == 4500 and item["unit_cost"] == 500 + 1200 + 400
+    assert {x["name"] for x in item["extras"]} == {"Tamanho: Grande", "Sabores: Mussarela", "Sabores: Calabresa"}

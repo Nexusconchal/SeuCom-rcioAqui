@@ -1,4 +1,4 @@
-import { $, $$, icon, brand, money, esc, image, api, modal, closeModal, bindForm, empty, toast, pay, date, attachFallbacks, copy, cents } from './ui.js';
+import { $, $$, icon, brand, money, esc, image, api, modal, closeModal, bindForm, empty, toast, pay, date, attachFallbacks, copy, cents, optionPrice, fromPrice, hasChoices, optionLabels, validIds, optionFields, readOptions, bindOptionLimits } from './ui.js';
 let catalog, cart=[], selected='all', search='', orderKey='', activeSlug='';
 const cartKey=()=> 'sca.cart.'+catalog.store.id;
 const days=['Segunda','Terça','Quarta','Quinta','Sexta','Sábado','Domingo'];
@@ -17,8 +17,8 @@ function loadCart(){
   cart=cart.flatMap(line=>{
     const product=catalog.products.find(x=>x.id===line.product_id);
     if(!product||product.stock===0)return [];
-    const options=product.extras.filter(x=>line.option_ids.includes(x.id));
-    return [{...line,name:product.name,image:product.image,unit:product.price+options.reduce((s,x)=>s+x.price,0),option_ids:options.map(x=>x.id),extras:options}];
+    const ids=validIds(product,line.option_ids);
+    return [{...line,name:product.name,image:product.image,unit:optionPrice(product,ids),option_ids:ids,extras:optionLabels(product,ids).map(name=>({name}))}];
   });persist();
 }
 export async function renderMenu(slug){
@@ -40,7 +40,7 @@ export async function renderMenu(slug){
 function renderList(){
   const list=catalog.products.filter(p=>(selected==='all'||(selected==='other'?!p.category_id:String(p.category_id)===selected))&&(!search||(p.name+' '+p.description).toLocaleLowerCase('pt-BR').includes(search)));
   $('#product-count').textContent=list.length+' opções';
-  $('#product-list').innerHTML=list.length?list.map(p=>'<article class="product-card '+(p.stock===0?'sold-out':'')+'"><button class="product-open" data-product="'+p.id+'" aria-label="Ver '+esc(p.name)+'"><div class="product-photo"><img src="'+esc(image(p.image))+'" alt="'+esc(p.name)+'" loading="lazy">'+(p.featured?'<span class="product-stamp">DA CASA</span>':'')+(p.stock===0?'<span class="sold-stamp">Esgotado</span>':'')+'</div><div class="product-copy"><h3>'+esc(p.name)+'</h3><p>'+esc(p.description)+'</p><div><strong>'+money(p.price)+'</strong><span class="plus-circle">'+icon('plus')+'</span></div></div></button></article>').join(''):empty('Nada por aqui ainda',search?'Tente buscar outro nome.':'A loja está preparando esta parte do cardápio.');
+  $('#product-list').innerHTML=list.length?list.map(p=>'<article class="product-card '+(p.stock===0?'sold-out':'')+'"><button class="product-open" data-product="'+p.id+'" aria-label="Ver '+esc(p.name)+'"><div class="product-photo"><img src="'+esc(image(p.image))+'" alt="'+esc(p.name)+'" loading="lazy">'+(p.featured?'<span class="product-stamp">DA CASA</span>':'')+(p.stock===0?'<span class="sold-stamp">Esgotado</span>':'')+'</div><div class="product-copy"><h3>'+esc(p.name)+'</h3><p>'+esc(p.description)+'</p><div><strong>'+(hasChoices(p)?'<small class="from">a partir de</small> ':'')+money(fromPrice(p))+'</strong><span class="plus-circle">'+icon('plus')+'</span></div></div></button></article>').join(''):empty('Nada por aqui ainda',search?'Tente buscar outro nome.':'A loja está preparando esta parte do cardápio.');
   $$('[data-product]').forEach(button=>button.onclick=()=>productDialog(catalog.products.find(p=>p.id===Number(button.dataset.product))));
   attachFallbacks($('#product-list'));
 }
@@ -51,19 +51,18 @@ function updateBar(){
 }
 function productDialog(product){
   let quantity=1;
-  const d=modal(product.name,'<div class="product-detail"><img src="'+esc(image(product.image))+'" alt="'+esc(product.name)+'"><p>'+esc(product.description)+'</p><strong class="detail-price">'+money(product.price)+'</strong></div><form id="add-form">'+
-  (product.extras.length?'<fieldset><legend>Deixe do seu jeito <small>Opcional</small></legend>'+product.extras.map(x=>'<label class="check-row"><span><input type="checkbox" name="extras" value="'+esc(x.id)+'">'+esc(x.name)+'</span><b>+ '+money(x.price)+'</b></label>').join('')+'</fieldset>':'')+
-  '<label>Alguma observação?<textarea name="notes" maxlength="200" placeholder="Ex.: sem cebola"></textarea></label><div class="quantity-submit"><div class="quantity"><button type="button" id="qty-less" class="icon-btn" aria-label="Diminuir quantidade">'+icon('minus')+'</button><output id="quantity">1</output><button type="button" id="qty-more" class="icon-btn" aria-label="Aumentar quantidade">'+icon('plus')+'</button></div><button class="btn" type="submit" '+(!catalog.store.open_now||product.stock===0?'disabled':'')+'>Adicionar • <span id="add-price">'+money(product.price)+'</span></button></div></form>');
-  const calculate=()=>{const extra=$$('input[name=extras]:checked',d).reduce((s,x)=>s+product.extras.find(o=>o.id===x.value).price,0);$('#quantity').textContent=quantity;$('#add-price').textContent=money((product.price+extra)*quantity);};
+  const d=modal(product.name,'<div class="product-detail"><img src="'+esc(image(product.image))+'" alt="'+esc(product.name)+'"><p>'+esc(product.description)+'</p><strong class="detail-price">'+(hasChoices(product)?'A partir de ':'')+money(fromPrice(product))+'</strong></div><form id="add-form">'+optionFields(product)+
+  '<label>Alguma observação?<textarea name="notes" maxlength="200" placeholder="Ex.: sem cebola"></textarea></label><div class="quantity-submit"><div class="quantity"><button type="button" id="qty-less" class="icon-btn" aria-label="Diminuir quantidade">'+icon('minus')+'</button><output id="quantity">1</output><button type="button" id="qty-more" class="icon-btn" aria-label="Aumentar quantidade">'+icon('plus')+'</button></div><button class="btn" type="submit" '+(!catalog.store.open_now||product.stock===0?'disabled':'')+'>Adicionar • <span id="add-price">'+money(fromPrice(product))+'</span></button></div><p class="form-error" role="alert" hidden></p></form>');
+  const calculate=()=>{const {ids}=readOptions(d,product);$('#quantity').textContent=quantity;$('#add-price').textContent=money((ids.length||!hasChoices(product)?optionPrice(product,ids):fromPrice(product))*quantity);const err=$('#add-form .form-error');err.hidden=true;};
   $('#qty-less').onclick=()=>{quantity=Math.max(1,quantity-1);calculate();};
   $('#qty-more').onclick=()=>{quantity=Math.min(50,product.stock??50,quantity+1);calculate();};
-  $$('input[name=extras]',d).forEach(x=>x.onchange=calculate);
+  bindOptionLimits(d,product,'',calculate);
   $('#add-form').onsubmit=e=>{
     e.preventDefault();
     if(!catalog.store.open_now||product.stock===0)return;
-    const option_ids=$$('input[name=extras]:checked',d).map(x=>x.value);
-    const extras=product.extras.filter(x=>option_ids.includes(x.id));
-    cart.push({id:crypto.randomUUID(),product_id:product.id,name:product.name,image:product.image,quantity,option_ids,extras,notes:$('[name=notes]',d).value,unit:product.price+extras.reduce((s,x)=>s+x.price,0)});
+    const {ids:option_ids,error}=readOptions(d,product);
+    if(error){const err=$('#add-form .form-error');err.textContent=error;err.hidden=false;err.scrollIntoView({block:'nearest',behavior:'smooth'});return;}
+    cart.push({id:crypto.randomUUID(),product_id:product.id,name:product.name,image:product.image,quantity,option_ids,extras:optionLabels(product,option_ids).map(name=>({name})),notes:$('[name=notes]',d).value,unit:optionPrice(product,option_ids)});
     orderKey='';persist();closeModal();toast('Adicionado à sacola!');
   };attachFallbacks(d);
 }

@@ -87,3 +87,54 @@ export function moneyInput(name,label,value=0,required=true){
 export function field(name,label,value='',type='text',attrs=''){
  return '<label>'+esc(label)+'<input name="'+esc(name)+'" type="'+type+'" value="'+esc(value)+'" '+attrs+'></label>';
 }
+
+// Escolhas do produto (variações e complementos). O servidor confere tudo de novo.
+const groupsOf = p => p.option_groups || [];
+export function optionPrice(p, ids){
+  const set = new Set(ids); let price = p.price;
+  p.extras.forEach(x => { if(set.has(x.id)) price += x.price; });
+  groupsOf(p).forEach(g => { const picked = g.options.filter(o => set.has(o.id)); if(!picked.length) return;
+    price += g.pricing === 'max' ? Math.max(...picked.map(o => o.price)) : picked.reduce((s, o) => s + o.price, 0); });
+  return price;
+}
+export function fromPrice(p){
+  let price = p.price;
+  groupsOf(p).forEach(g => { if(!g.min) return; const prices = g.options.map(o => o.price).sort((a, b) => a - b);
+    price += g.pricing === 'max' ? prices[0] : prices.slice(0, g.min).reduce((s, v) => s + v, 0); });
+  return price;
+}
+export const hasChoices = p => groupsOf(p).some(g => g.min > 0);
+export function optionLabels(p, ids){
+  const set = new Set(ids), names = [];
+  groupsOf(p).forEach(g => g.options.forEach(o => { if(set.has(o.id)) names.push(g.name + ': ' + o.name); }));
+  p.extras.forEach(x => { if(set.has(x.id)) names.push(x.name); });
+  return names;
+}
+export function validIds(p, ids){
+  const known = new Set([...p.extras.map(x => x.id), ...groupsOf(p).flatMap(g => g.options.map(o => o.id))]);
+  return ids.filter(id => known.has(id));
+}
+function groupHint(g){
+  const rule = g.min === g.max ? 'Escolha ' + g.min : g.min ? 'Escolha de ' + g.min + ' a ' + g.max : 'Escolha até ' + g.max;
+  return (g.min ? '<span class="req">Obrigatório</span>' : '<span class="opt">Opcional</span>') + rule + (g.pricing === 'max' && g.max > 1 ? ' • cobra o de maior valor' : '');
+}
+export function optionFields(p, prefix=''){
+  return groupsOf(p).map(g => '<fieldset class="option-group" data-group="' + esc(g.id) + '"><legend>' + esc(g.name) + '<small>' + groupHint(g) + '</small></legend>' +
+    g.options.map(o => '<label class="check-row"><span><input type="' + (g.max === 1 ? 'radio' : 'checkbox') + '" name="' + prefix + 'g_' + esc(g.id) + '" value="' + esc(o.id) + '">' + esc(o.name) + '</span>' + (o.price ? '<b>' + (g.pricing === 'max' || (g.min && !p.price) ? '' : '+ ') + money(o.price) + '</b>' : '') + '</label>').join('') + '</fieldset>').join('') +
+    (p.extras.length ? '<fieldset class="option-group"><legend>Adicionais<small><span class="opt">Opcional</span></small></legend>' + p.extras.map(x => '<label class="check-row"><span><input type="checkbox" name="' + prefix + 'extras" value="' + esc(x.id) + '">' + esc(x.name) + '</span><b>+ ' + money(x.price) + '</b></label>').join('') + '</fieldset>' : '');
+}
+export function readOptions(root, p, prefix=''){
+  const ids = []; let error = '';
+  groupsOf(p).forEach(g => { const picked = $$('input[name="' + prefix + 'g_' + g.id + '"]:checked', root).map(x => x.value); ids.push(...picked);
+    if(!error && (picked.length < g.min || picked.length > g.max)) error = g.name + ': ' + (g.min === g.max ? 'escolha ' + g.min : picked.length < g.min ? 'escolha pelo menos ' + g.min : 'escolha até ' + g.max) + '.'; });
+  ids.push(...$$('input[name="' + prefix + 'extras"]:checked', root).map(x => x.value));
+  return {ids, error};
+}
+export function bindOptionLimits(root, p, prefix='', onChange=()=>{}){
+  groupsOf(p).forEach(g => $$('input[name="' + prefix + 'g_' + g.id + '"]', root).forEach(input => input.addEventListener('change', () => {
+    const checked = $$('input[name="' + prefix + 'g_' + g.id + '"]:checked', root);
+    if(g.max > 1 && checked.length > g.max){ input.checked = false; toast('Em ' + g.name + ' você pode escolher até ' + g.max + '.'); }
+    onChange();
+  })));
+  $$('input[name="' + prefix + 'extras"]', root).forEach(x => x.addEventListener('change', onChange));
+}

@@ -7,7 +7,7 @@ ADDITIONS = {
                'auto_hours': 'INTEGER NOT NULL DEFAULT 0', 'delivery_zones': "TEXT NOT NULL DEFAULT '[]'",
                'blocked_reason': "TEXT NOT NULL DEFAULT ''", 'promo_fee': 'INTEGER',
                'promo_until': "TEXT NOT NULL DEFAULT ''", 'promo_label': "TEXT NOT NULL DEFAULT ''"},
-    'products': {'unit_cost': 'INTEGER', 'low_stock': 'INTEGER NOT NULL DEFAULT 5'},
+    'products': {'unit_cost': 'INTEGER', 'low_stock': 'INTEGER NOT NULL DEFAULT 5', 'option_groups': "TEXT NOT NULL DEFAULT '[]'"},
     'orders': {'delivery_cost': 'INTEGER', 'payment_fee': 'INTEGER', 'platform_fee': 'INTEGER NOT NULL DEFAULT 0',
                'source': "TEXT NOT NULL DEFAULT 'web'", 'zone': "TEXT NOT NULL DEFAULT ''"},
     'order_items': {'unit_cost': 'INTEGER'},
