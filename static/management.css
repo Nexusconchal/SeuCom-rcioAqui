@@ -65,3 +65,9 @@ dialog.drawer{margin:0 0 0 auto;height:100dvh;max-height:100dvh;width:500px;max-
 .pos-block{border-bottom:1px solid var(--line);padding:6px 0}.pos-options summary{font-size:13px;cursor:pointer;color:#0d5a52;margin:4px 0}.pos-options .option-group{margin:6px 0}
 @media(max-width:560px){.group-rules{grid-template-columns:1fr 1fr}.group-rules label:last-child{grid-column:1/-1}}
 .order-lane.collapsed .lane-count{writing-mode:vertical-rl;transform:none;padding:6px 3px}.order-board .order-lane{min-width:200px}.order-lane .lane-scroll{margin-right:0}
+
+.scheduled-note{margin-top:12px;display:flex;gap:6px;align-items:center;justify-content:center;color:#9a4a07}
+.review-panel h2{margin-bottom:10px}.stars{display:flex;gap:6px;flex-direction:row-reverse;justify-content:flex-end;margin-bottom:10px}.stars label{cursor:pointer;font-size:34px;color:#d6dbd5;line-height:1}.stars input{position:absolute;opacity:0;width:1px;height:1px}.stars label:hover,.stars label:hover~label,.stars input:checked+span,.stars label:has(input:checked)~label{color:#ff9a2e}.stars input:focus-visible+span{outline:3px solid #8cc7bb;border-radius:4px}
+.review-done{text-align:center;color:#9a4a07;margin:12px 0}.remember{margin:6px 0}
+.order-meta{flex-wrap:wrap;gap:4px}
+.review-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}.review-item{border:1px solid var(--line);border-radius:12px;padding:12px;display:grid;gap:6px}.review-item>div{display:flex;justify-content:space-between;gap:8px}.review-stars{color:#ff9a2e;letter-spacing:1px}.review-stars span{color:#d6dbd5}.review-item p{color:var(--ink);font-size:14px}

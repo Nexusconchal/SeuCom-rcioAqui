@@ -207,6 +207,7 @@ def create_app(test_config=None):
         value["hours"] = json.loads(value["hours"] or "{}")
         value["delivery_zones"] = json.loads(value["delivery_zones"] or "[]")
         value["open"], value["auto_hours"] = bool(value["open"]), bool(value["auto_hours"])
+        value["allow_scheduling"] = bool(value["allow_scheduling"])
         value["open_now"], value["status_text"] = store_status(store)
         if not private:
             for key in ("owner_id", "created_at", "commission_bps", "monthly_fee", "payment_fees", "default_delivery_cost", "enabled",
@@ -226,6 +227,26 @@ def create_app(test_config=None):
         if not zone:
             abort(400, description="Escolha o seu bairro para calcular a entrega.")
         return zone["fee"], zone["name"]
+
+    def schedule(store, value):
+        """Horário agendado (UTC ISO) ou '' para agora. Agendar exige a opção ligada e cair dentro do horário da loja."""
+        raw = value.get("scheduled_for") or ""
+        if not raw:
+            return ""
+        if not isinstance(raw, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", raw):
+            abort(400, description="Horário de agendamento inválido.")
+        if not store["allow_scheduling"]:
+            abort(400, description="Esta loja não aceita pedidos agendados.")
+        try:
+            moment = datetime.strptime(raw, "%Y-%m-%dT%H:%M").replace(tzinfo=ZONE)
+        except ValueError:
+            abort(400, description="Horário de agendamento inválido.")
+        current = datetime.now(ZONE)
+        if moment < current + timedelta(minutes=20) or moment > current + timedelta(days=7):
+            abort(400, description="Agende com pelo menos 20 minutos de antecedência e até 7 dias.")
+        if not store["enabled"] or not store["open"] or (store["auto_hours"] and not store_status(store, moment)[0]):
+            abort(400, description="A loja não estará aberta nesse horário. Escolha outro.")
+        return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
 
     def hours_field(value):
         hours = value.get("hours", {})
@@ -323,7 +344,7 @@ def create_app(test_config=None):
         if private:
             value["driver_name"] = (one("SELECT name FROM drivers WHERE id=?", (value["driver_id"],)) or {"name": ""})["name"]
         else:
-            value = {k: value[k] for k in ("number", "mode", "zone", "payment", "subtotal", "discount", "delivery_fee",
+            value = {k: value[k] for k in ("number", "mode", "zone", "scheduled_for", "rating", "payment", "subtotal", "discount", "delivery_fee",
                 "total", "paid", "status", "status_label", "items", "events", "created_at")}
         for key in ("tracking_hash", "payload_hash", "idempotency_key"):
             value.pop(key, None)
@@ -358,7 +379,7 @@ def create_app(test_config=None):
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self' https://viacep.com.br; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         if production:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
         if request.path.startswith("/api/") or request.path.startswith("/pedido/"):
@@ -562,7 +583,7 @@ def create_app(test_config=None):
         if not store:
             abort(404, description="Loja não encontrada.")
         accepting, status_text = store_status(store)
-        if not accepting:
+        if not schedule(store, value) and not accepting:
             abort(409, description="A loja não está aceitando pedidos agora. " + status_text + ".")
         mode, items = value.get("mode"), value.get("items")
         if mode not in ("delivery", "pickup") or not isinstance(items, list) or not 1 <= len(items) <= 50:
@@ -610,7 +631,8 @@ def create_app(test_config=None):
                     abort(409, description="Este identificador já pertence a outro pedido.")
                 return jsonify(token=previous["tracking_token"], number=previous["number"], total=previous["total"]), 200
             accepting, status_text = store_status(store)
-            if not store["enabled"] or (not accepting and not getattr(g, 'manual_order', False)):
+            scheduled = schedule(store, value)
+            if not store["enabled"] or (not accepting and not scheduled and not getattr(g, 'manual_order', False)):
                 abort(409, description="A loja não está aceitando pedidos agora. " + status_text + ".")
             if payment not in json.loads(store["payments"]):
                 abort(400, description="Forma de pagamento indisponível.")
@@ -638,11 +660,11 @@ def create_app(test_config=None):
                 customer, phone, mode, address if mode == "delivery" else "", payment, change_for if payment == "cash" else None, notes,
                 subtotal, discount, fee, total, coupon_id, key, digest, token, stamp, stamp)).lastrowid
             fees=json.loads(store['payment_fees'])
-            conn.execute("UPDATE orders SET delivery_cost=?,payment_fee=?,platform_fee=?,source=?,zone=? WHERE id=?",
+            conn.execute("UPDATE orders SET delivery_cost=?,payment_fee=?,platform_fee=?,source=?,zone=?,scheduled_for=? WHERE id=?",
                 (store['default_delivery_cost'] if mode=='delivery' else 0,
                  (total*fees.get(payment,0)+5000)//10000,
                  ((subtotal-discount)*store['commission_bps']+5000)//10000,
-                 'counter' if getattr(g,'manual_order',False) else 'web',zone,oid))
+                 'counter' if getattr(g,'manual_order',False) else 'web',zone,scheduled,oid))
             for product, quantity, unit, extras, item_notes, cost in prepared:
                 conn.execute("INSERT INTO order_items(order_id,product_id,name,quantity,unit_price,unit_cost,extras,notes) VALUES(?,?,?,?,?,?,?,?)",
                              (oid, product["id"], product["name"], quantity, unit, cost, json.dumps([{k:v for k,v in x.items() if k!='unit_cost'} for x in extras]), item_notes))
@@ -672,6 +694,30 @@ def create_app(test_config=None):
         store = one("SELECT * FROM stores WHERE id=?", (order["store_id"],))
         return jsonify(order=order_dict(order, False), store=store_dict(store))
 
+    @app.post("/api/track/<token>/review")
+    def review_order(token):
+        limited("review", 20)
+        value = data()
+        rating = integer(value, "rating", minimum=1, maximum=5)
+        comment = text(value, "comment", 0, 500)
+        with transaction() as conn:
+            order = conn.execute("SELECT * FROM orders WHERE tracking_hash=?", (hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
+            if not order:
+                abort(404, description="Pedido não encontrado.")
+            if order["status"] != "completed":
+                abort(409, description="Você pode avaliar quando o pedido for concluído.")
+            if order["rating"] is not None:
+                abort(409, description="Este pedido já foi avaliado. Obrigado!")
+            conn.execute("UPDATE orders SET rating=?,review=?,reviewed_at=? WHERE id=?", (rating, comment, now(), order["id"]))
+        return jsonify(ok=True)
+
+    @app.get("/api/admin/reviews")
+    @owner
+    def reviews():
+        stats = one("SELECT COUNT(rating) AS total,AVG(rating) AS average FROM orders WHERE store_id=? AND rating IS NOT NULL", (g.store["id"],))
+        return jsonify(total=stats["total"], average=round(float(stats["average"]), 1) if stats["average"] is not None else None,
+                       reviews=rows("SELECT number,customer,rating,review,reviewed_at FROM orders WHERE store_id=? AND rating IS NOT NULL ORDER BY reviewed_at DESC LIMIT 50", (g.store["id"],)))
+
     @app.get("/api/admin/store")
     @owner
     def admin_store():
@@ -697,14 +743,15 @@ def create_app(test_config=None):
         hours = hours_field(value) if "hours" in value else json.loads(g.store["hours"] or "{}")
         zones = zones_field(value) if "delivery_zones" in value else json.loads(g.store["delivery_zones"] or "[]")
         auto_hours = boolean(value, "auto_hours", bool(g.store["auto_hours"]))
+        allow_scheduling = boolean(value, "allow_scheduling", bool(g.store["allow_scheduling"]))
         if auto_hours and not hours:
             abort(400, description="Informe ao menos um dia de funcionamento ou desative o horário automático.")
         db().execute("""UPDATE stores SET name=?,description=?,phone=?,address=?,color=?,logo=?,banner=?,open=?,
-            delivery_fee=?,minimum_order=?,delivery_minutes=?,pix_key=?,payments=?,hours=?,auto_hours=?,delivery_zones=? WHERE id=?""",
+            delivery_fee=?,minimum_order=?,delivery_minutes=?,pix_key=?,payments=?,hours=?,auto_hours=?,delivery_zones=?,allow_scheduling=? WHERE id=?""",
             (name, description, phone, address, color, image_url(value.get("logo", "")), image_url(value.get("banner", "")),
              boolean(value, "open"), integer(value, "delivery_fee"), integer(value, "minimum_order"),
              text(value, "delivery_minutes", 2, 40), pix, json.dumps(list(dict.fromkeys(payments))),
-             json.dumps(hours), int(auto_hours), json.dumps(zones, ensure_ascii=False), g.store["id"]))
+             json.dumps(hours), int(auto_hours), json.dumps(zones, ensure_ascii=False), int(allow_scheduling), g.store["id"]))
         return jsonify(store=store_dict(one("SELECT * FROM stores WHERE id=?", (g.store["id"],)), True))
 
     @app.post("/api/admin/upload")

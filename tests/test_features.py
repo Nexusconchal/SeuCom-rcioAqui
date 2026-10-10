@@ -223,3 +223,37 @@ def test_option_groups_required_sizes_and_half_and_half(shop):
     item = client.get("/api/admin/orders").json["orders"][0]["items"][0]
     assert item["unit_price"] == 4500 and item["unit_cost"] == 500 + 1200 + 400
     assert {x["name"] for x in item["extras"]} == {"Tamanho: Grande", "Sabores: Mussarela", "Sabores: Calabresa"}
+
+
+def test_scheduled_orders_respect_hours_and_reviews(shop):
+    from datetime import timedelta
+    client, pid = shop
+    store = client.get("/api/admin/store").json["store"]
+    later = datetime.now(ZONE) + timedelta(days=2)
+    day = str(later.weekday())
+    # Loja fora do horário agora, aberta só no dia agendado das 10h às 22h.
+    saved = send(client, "PUT", "/api/admin/store", {**store, "auto_hours": True, "hours": {day: [["10:00", "22:00"]]}})
+    assert saved.status_code == 200
+    good = later.replace(hour=19, minute=30).strftime("%Y-%m-%dT%H:%M")
+    bad = later.replace(hour=23, minute=0).strftime("%Y-%m-%dT%H:%M")
+    assert send(client, "POST", "/api/store/minha-loja/orders", payload(pid, scheduled_for=good), uuid.uuid4().hex).status_code == 400
+    store = client.get("/api/admin/store").json["store"]
+    assert send(client, "PUT", "/api/admin/store", {**store, "allow_scheduling": True}).status_code == 200
+    assert send(client, "POST", "/api/store/minha-loja/orders", payload(pid, scheduled_for=bad), uuid.uuid4().hex).status_code == 400
+    too_far = (datetime.now(ZONE) + timedelta(days=9)).strftime("%Y-%m-%dT%H:%M")
+    assert send(client, "POST", "/api/store/minha-loja/orders", payload(pid, scheduled_for=too_far), uuid.uuid4().hex).status_code == 400
+    if store_status({**store, "enabled": 1, "open": 1, "auto_hours": 1, "hours": '{"%s": [["10:00", "22:00"]]}' % day})[0] is False:
+        assert send(client, "POST", "/api/store/minha-loja/orders", payload(pid), uuid.uuid4().hex).status_code == 409
+    created = send(client, "POST", "/api/store/minha-loja/orders", payload(pid, scheduled_for=good), uuid.uuid4().hex)
+    assert created.status_code == 201
+    token = created.json["token"]
+    tracked = client.get("/api/track/" + token).json["order"]
+    assert tracked["scheduled_for"] and tracked["rating"] is None
+    assert send(client, "POST", f"/api/track/{token}/review", {"rating": 5}).status_code == 409
+    order = client.get("/api/admin/orders").json["orders"][0]
+    advance(client, order["id"], "preparing", "ready", "delivering", "completed")
+    assert send(client, "POST", f"/api/track/{token}/review", {"rating": 6}).status_code == 400
+    assert send(client, "POST", f"/api/track/{token}/review", {"rating": 4, "comment": "Chegou quentinho"}).status_code == 200
+    assert send(client, "POST", f"/api/track/{token}/review", {"rating": 1}).status_code == 409
+    reviews = client.get("/api/admin/reviews").json
+    assert reviews["average"] == 4.0 and reviews["reviews"][0]["review"] == "Chegou quentinho"
