@@ -21,8 +21,9 @@ from business import register_business
 from storage import put_image
 from notify import notify_store, vapid_keys
 from payments import MercadoPago, PaymentError, seal, unseal
+from order_flow import MOTOJA_LABEL, register_order_flow
 from billing import apply_exemptions, billing_ok, billing_state, first_billing_migration, register_billing
-from flask import Flask, abort, g, jsonify, redirect, request, send_from_directory, session
+from flask import Flask, abort, g, has_request_context, jsonify, redirect, request, send_from_directory, session
 from markupsafe import escape
 from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException
@@ -40,10 +41,10 @@ ROLE_BASE = {"admin_store", "merchant_notices", "change_password", "admin_orders
              "push_key", "push_subscribe", "push_unsubscribe", "push_test"}
 ROLE_ALLOWED = {
     "kitchen": ROLE_BASE | {"update_order"},
-    "cashier": ROLE_BASE | {"update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
+    "cashier": ROLE_BASE | {"motoja_send", "update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
                             "reviews", "store_qrcode", "coupons", "insights"},
 }
-MANAGER_DENY = {"mp_connect", "mp_disconnect", "billing_subscribe", "billing_cancel", "team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
+MANAGER_DENY = {"motoja_connect", "motoja_disconnect", "whatsapp_connect", "whatsapp_disconnect", "mp_connect", "mp_disconnect", "billing_subscribe", "billing_cancel", "team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
                 "rename_key", "delete_key", "rotate_key", "test_key", "finance_settings"}
 LABELS = {"new": "Novo", "preparing": "Em preparo", "ready": "Pronto",
           "delivering": "Saiu para entrega", "completed": "Concluído", "cancelled": "Cancelado"}
@@ -111,7 +112,9 @@ def create_app(test_config=None):
         STORAGE_UPLOAD_URL=os.getenv("STORAGE_UPLOAD_URL", ""), STORAGE_UPLOAD_TOKEN=os.getenv("STORAGE_UPLOAD_TOKEN", ""),
         STORAGE_PUBLIC_URL=os.getenv("STORAGE_PUBLIC_URL", ""), TRIAL_DAYS=int(os.getenv("TRIAL_DAYS", "1")),
         MP_PLATFORM_ACCESS_TOKEN=os.getenv("MP_PLATFORM_ACCESS_TOKEN", ""), PLAN_PRICE=int(os.getenv("PLAN_PRICE_CENTS", "5999")),
-        PLAN_FREE_MONTHS=int(os.getenv("PLAN_FREE_MONTHS", "1")), BILLING_EXEMPT_EMAILS=os.getenv("BILLING_EXEMPT_EMAILS", ""),
+        PLAN_FREE_MONTHS=int(os.getenv("PLAN_FREE_MONTHS", "1")),
+        MOTOJA_HOSTS={h.strip() for h in os.getenv("MOTOJA_HOSTS", "motoboy-conchal.onrender.com").split(",") if h.strip()},
+        EVOLUTION_API_URL=os.getenv("EVOLUTION_API_URL", ""), EVOLUTION_API_KEY=os.getenv("EVOLUTION_API_KEY", ""), BILLING_EXEMPT_EMAILS=os.getenv("BILLING_EXEMPT_EMAILS", ""),
         VAPID_PRIVATE_KEY=os.getenv("VAPID_PRIVATE_KEY", "").replace("\\n", "\n"), PUSH_CONTACT=os.getenv("PUSH_CONTACT", "suporte@seucomercioaqui.com.br"),
         UPLOAD_DIR=os.getenv("UPLOAD_DIR", str(BASE / "instance" / "uploads")),
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=production,
@@ -255,6 +258,7 @@ def create_app(test_config=None):
         value["open_now"], value["status_text"] = store_status(store)
         value["mp_connected"] = bool(value.pop("mp_token", ""))
         value["billing_state"] = billing_state(store)
+        value["motoja_connected"] = bool(value.pop("motoja_key", ""))
         for key in ("sub_id", "sub_checked_at"):
             value.pop(key, None)
         value.pop("mp_webhook_key", None)
@@ -262,7 +266,7 @@ def create_app(test_config=None):
             value["payments"] = [p for p in value["payments"] if p != "pix_online"]
         if not private:
             value.pop("mp_account", None)
-            for key in ("billing_exempt", "sub_status", "sub_payer_email", "sub_next_payment", "sub_used_trial", "paid_until", "trial_until", "billing_state"):
+            for key in ("motoja_url", "motoja_auto", "motoja_trigger", "wa_instance", "wa_enabled", "billing_exempt", "sub_status", "sub_payer_email", "sub_next_payment", "sub_used_trial", "paid_until", "trial_until", "billing_state"):
                 value.pop(key, None)
             for key in ("owner_id", "created_at", "commission_bps", "monthly_fee", "payment_fees", "default_delivery_cost", "enabled",
                         "blocked_reason", "promo_fee", "promo_until", "promo_label"):
@@ -395,12 +399,15 @@ def create_app(test_config=None):
                 item.pop("id", None)
         value["events"] = rows("SELECT status,created_at FROM order_events WHERE order_id=? ORDER BY id", (order["id"],))
         value["status_label"] = LABELS[value["status"]]
+        motoja = json.loads(value.get("motoja_info") or "{}")
+        value["motoja"] = {**motoja, "status": value.get("motoja_status", ""), "label": MOTOJA_LABEL.get(value.get("motoja_status", ""), "")}
+        value["motoboy"], value["tracking_url"] = motoja.get("motoboy", ""), motoja.get("trackingUrl", "")
         if private:
             value["driver_name"] = (one("SELECT name FROM drivers WHERE id=?", (value["driver_id"],)) or {"name": ""})["name"]
         else:
-            value = {k: value[k] for k in ("number", "mode", "zone", "scheduled_for", "rating", "payment", "subtotal", "discount", "delivery_fee",
+            value = {k: value[k] for k in ("number", "mode", "zone", "scheduled_for", "rating", "motoboy", "tracking_url", "payment", "subtotal", "discount", "delivery_fee",
                 "total", "paid", "status", "status_label", "items", "events", "created_at")}
-        for key in ("tracking_hash", "payload_hash", "idempotency_key"):
+        for key in ("tracking_hash", "payload_hash", "idempotency_key", "motoja_info"):
             value.pop(key, None)
         return value
 
@@ -772,6 +779,7 @@ def create_app(test_config=None):
             conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, "new", stamp))
             if coupon_id:
                 conn.execute("UPDATE coupons SET uses=uses+1 WHERE id=?", (coupon_id,))
+        app.extensions["on_new_order"](store["id"], oid)
         if payment == "pix_online":
             try:
                 create_pix(store["id"], oid)
@@ -1264,6 +1272,8 @@ def create_app(test_config=None):
         else:
             sql += " AND (status NOT IN ('completed','cancelled') OR created_at>=?)"
             params.append((datetime.now(timezone.utc) - timedelta(days=30)).isoformat(timespec="seconds"))
+        if g.store["motoja_url"]:
+            app.extensions["motoja_refresh"](g.store["id"])
         return jsonify(orders=[order_dict(o) for o in db().execute(sql + " ORDER BY id DESC LIMIT 500", params)])
 
     @app.patch("/api/admin/orders/<int:oid>")
@@ -1312,6 +1322,8 @@ def create_app(test_config=None):
                     abort(400, description="Retirada não usa entregador.")
             conn.execute("UPDATE orders SET status=?,paid=?,driver_id=?,updated_at=? WHERE id=?",
                          (status, int(paid), driver, now(), oid))
+        if status != order["status"]:
+            app.extensions["on_status"](g.store["id"], oid, status)
         return jsonify(order=order_dict(one("SELECT * FROM orders WHERE id=?", (oid,))))
 
     @app.get("/api/admin/drivers")
@@ -1441,6 +1453,12 @@ def create_app(test_config=None):
     def audit_entry(action, detail="", sid=None):
         db().execute("INSERT INTO audit_log(actor_id,store_id,action,detail,created_at) VALUES(?,?,?,?,?)",
                      (g.user["id"] if getattr(g, "user", None) else None, sid, action, detail, now()))
+
+    def public_base_static():
+        return app.config["PUBLIC_URL"] or (request.host_url.rstrip("/") if has_request_context() else "")
+
+    register_order_flow(app, dict(db=db, one=one, owner=owner, owned=owned, data=data, text=text, boolean=boolean,
+                                  limited=limited, now=now, public_base_static=public_base_static))
 
     register_billing(app, dict(db=db, one=one, rows=rows, owner=owner, data=data, text=text, transaction=transaction,
                                limited=limited, now=now, public_base=public_base, audit=audit_entry))

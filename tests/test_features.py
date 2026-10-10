@@ -561,3 +561,117 @@ def test_exempt_account_never_pays(app):
     finally:
         EXEMPT_HASHES.discard(hashlib.sha256(b"gratis@example.com").hexdigest())
     assert billing_state({"billing_exempt": 0, "sub_status": "", "paid_until": "", "trial_until": ""}) == "expired"
+
+
+class FakeMotoJa:
+    def __init__(self):
+        self.sent, self.deliveries, self.key = [], {}, "chave-do-motoja-1234567890"
+
+    def send(self, url, key, payload):
+        if key != self.key:
+            return 401, {"error": "chave_captura_invalida"}
+        self.sent.append((url, payload))
+        ext = payload["order"]["externalId"]
+        self.deliveries[ext] = {"deliveryStatus": "pendente", "deliveryId": "ent-" + ext, "motoboy": ""}
+        return 201, {"ok": True, "dispatch": {"deliveryId": "ent-" + ext}}
+
+    def status(self, url, key, external_id):
+        if key != self.key:
+            return 401, {}
+        if external_id not in self.deliveries:
+            return 404, {"error": "pedido_nao_encontrado", "active": True, "autoDispatch": True, "saldoDisponivel": 50}
+        d = self.deliveries[external_id]
+        return 200, {"ok": True, "capturedStatus": "enviado_motoboy", "trackingUrl": "https://motoboy-conchal.onrender.com/entrega/" + d["deliveryId"], **d}
+
+
+class FakeEvolution:
+    ready = True
+
+    def __init__(self):
+        self.messages = []
+
+    def create(self, instance):
+        return 201, {"qrcode": {"base64": "iVBORw0KGgo="}}
+
+    def connect(self, instance):
+        return 200, {}
+
+    def state(self, instance):
+        return 200, {"instance": {"state": "open"}}
+
+    def logout(self, instance):
+        return 200, {}
+
+    def send_text(self, instance, phone, text):
+        self.messages.append((phone, text))
+        return 201, {}
+
+
+MOTOJA_URL = "https://motoboy-conchal.onrender.com/api/integrations/orders/19999990000/seucomercio"
+
+
+def test_motoja_switch_calls_driver_and_follows_delivery(app, shop):
+    client, pid = shop
+    moto = FakeMotoJa()
+    app.extensions["motoja"] = moto
+    assert send(client, "PUT", "/api/admin/motoja", {"url": "https://evil.example.com/api/integrations/orders/19999990000/seucomercio", "key": moto.key}).status_code == 400
+    assert send(client, "PUT", "/api/admin/motoja", {"url": MOTOJA_URL, "key": "chave-errada-000000000000"}).status_code == 400
+    connected = send(client, "PUT", "/api/admin/motoja", {"url": MOTOJA_URL, "key": moto.key}).json
+    assert connected["motoja"]["connected"] and connected["motoja"]["auto"] and connected["warnings"] == []
+    store = client.get("/api/admin/store").json["store"]
+    assert "motoja_key" not in store and store["motoja_connected"] is True
+    assert "motoja_url" not in client.get("/api/store/minha-loja").json["store"]
+    # Ao aceitar o pedido de entrega, o motoboy é chamado sozinho com a forma de pagamento.
+    order = make_order(client, pid, payment="cash", change_for=10000)
+    advance(client, order["id"], "preparing")
+    url, payload = moto.sent[-1]
+    assert payload["order"]["externalId"].endswith("-" + str(order["number"])) and "Cobrar" in payload["order"]["note"] and "troco" in payload["order"]["note"]
+    assert payload["order"]["orderTotal"] == order["total"] / 100
+    ext = payload["order"]["externalId"]
+    # Motoboy aceita, retira e entrega: o pedido acompanha sozinho.
+    moto.deliveries[ext].update(deliveryStatus="retirada", motoboy="João")
+    from database import connect
+    conn = connect(app.config)
+    conn.execute("UPDATE orders SET motoja_checked_at='' WHERE id=?", (order["id"],))
+    conn.close()
+    current = next(o for o in client.get("/api/admin/orders").json["orders"] if o["id"] == order["id"])
+    current = next(o for o in client.get("/api/admin/orders").json["orders"] if o["id"] == order["id"])
+    assert current["status"] == "delivering" and current["motoja"]["motoboy"] == "João"
+    moto.deliveries[ext]["deliveryStatus"] = "finalizada"
+    conn = connect(app.config)
+    conn.execute("UPDATE orders SET motoja_checked_at='' WHERE id=?", (order["id"],))
+    conn.close()
+    client.get("/api/admin/orders")
+    assert next(o for o in client.get("/api/admin/orders?status=completed").json["orders"] if o["id"] == order["id"])["status"] == "completed"
+    # Chavinha desligada: não chama sozinho, mas dá para chamar na mão. Retirada nunca chama.
+    assert send(client, "PATCH", "/api/admin/motoja", {"auto": False}).json["motoja"]["auto"] is False
+    second = make_order(client, pid)
+    advance(client, second["id"], "preparing")
+    assert len(moto.sent) == 1
+    manual = send(client, "POST", f"/api/admin/orders/{second['id']}/motoja", {}).json
+    assert manual["status"] == "chamado" and len(moto.sent) == 2
+    pickup = make_order(client, pid, mode="pickup")
+    assert send(client, "POST", f"/api/admin/orders/{pickup['id']}/motoja", {}).status_code == 409
+    assert send(client, "DELETE", "/api/admin/motoja", {}).json["motoja"]["connected"] is False
+
+
+def test_whatsapp_automatic_messages(app, shop):
+    client, pid = shop
+    evo = FakeEvolution()
+    app.extensions["evolution"] = evo
+    assert send(client, "PATCH", "/api/admin/whatsapp", {"enabled": True}).status_code == 409
+    qr = send(client, "POST", "/api/admin/whatsapp/connect", {}).json
+    assert qr["qr"].startswith("data:image/png;base64,")
+    assert client.get("/api/admin/whatsapp/status").json["connected"] is True
+    assert send(client, "PATCH", "/api/admin/whatsapp", {"enabled": True}).json["whatsapp"]["enabled"] is True
+    order = make_order(client, pid, phone="(11) 98888-1111")
+    assert evo.messages[-1][0] == "(11) 98888-1111" and "Recebemos seu pedido" in evo.messages[-1][1] and "/pedido/" in evo.messages[-1][1]
+    advance(client, order["id"], "preparing", "ready", "delivering", "completed")
+    texts = [t for _, t in evo.messages]
+    assert any("sendo preparado" in t for t in texts) and any("saiu para entrega" in t for t in texts) and any("concluído" in t for t in texts)
+    assert not any("pronto para retirada" in t for t in texts)  # entrega não manda o aviso de retirada
+    count = len(evo.messages)
+    send(client, "PATCH", "/api/admin/whatsapp", {"enabled": False})
+    make_order(client, pid)
+    assert len(evo.messages) == count
+    assert send(client, "POST", "/api/admin/whatsapp/test", {"phone": "11977776666"}).status_code == 200
