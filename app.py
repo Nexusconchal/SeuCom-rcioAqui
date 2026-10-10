@@ -31,6 +31,16 @@ ZONE = ZoneInfo("America/Sao_Paulo")
 STATUSES = {"new": {"preparing", "cancelled"}, "preparing": {"ready", "cancelled"},
             "ready": {"delivering", "completed", "cancelled"}, "delivering": {"completed", "cancelled"},
             "completed": set(), "cancelled": set()}
+ROLE_LABELS = {"owner": "Dono", "manager": "Gerente", "cashier": "Caixa", "kitchen": "Cozinha"}
+# O dono pode tudo. Os demais só acessam o que a função precisa (o servidor confere em cada chamada).
+ROLE_BASE = {"admin_store", "merchant_notices", "change_password", "admin_orders", "admin_products", "drivers", "set_open"}
+ROLE_ALLOWED = {
+    "kitchen": ROLE_BASE | {"update_order"},
+    "cashier": ROLE_BASE | {"update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
+                            "reviews", "store_qrcode", "coupons", "insights"},
+}
+MANAGER_DENY = {"team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
+                "rename_key", "delete_key", "rotate_key", "test_key", "finance_settings"}
 LABELS = {"new": "Novo", "preparing": "Em preparo", "ready": "Pronto",
           "delivering": "Saiu para entrega", "completed": "Concluído", "cancelled": "Cancelado"}
 
@@ -188,10 +198,17 @@ def create_app(test_config=None):
             user = one("SELECT id,name,email,auth_version,platform_admin FROM users WHERE id=?", (session.get("uid", -1),))
             if not user or user["auth_version"] != session.get("version"):
                 abort(401, description="Entre na sua conta.")
-            store = one("SELECT * FROM stores WHERE owner_id=?", (user["id"],))
+            store, role = one("SELECT * FROM stores WHERE owner_id=?", (user["id"],)), "owner"
+            if not store:
+                member = one("SELECT * FROM store_members WHERE user_id=? AND active=1", (user["id"],))
+                if member:
+                    store, role = one("SELECT * FROM stores WHERE id=?", (member["store_id"],)), member["role"]
             if not store:
                 abort(404, description="Loja não encontrada.")
-            g.user, g.store = user, store
+            endpoint = request.endpoint or ""
+            if role != "owner" and (endpoint in MANAGER_DENY if role == "manager" else endpoint not in ROLE_ALLOWED[role]):
+                abort(403, description=f"O acesso de {ROLE_LABELS[role]} não permite esta ação. Fale com o dono da loja.")
+            g.user, g.store, g.role = user, store, role
             return fn(*args, **kwargs)
         return wrapped
 
@@ -481,6 +498,7 @@ def create_app(test_config=None):
                        registration=app.config["ALLOW_REGISTRATION"])
 
     def establish(user):
+        db().execute("UPDATE users SET last_login_at=? WHERE id=?", (now(), user["id"]))
         session.clear()
         session.update(uid=user["id"], version=user["auth_version"], csrf=secrets.token_urlsafe(32))
         session.permanent = True
@@ -721,7 +739,77 @@ def create_app(test_config=None):
     @app.get("/api/admin/store")
     @owner
     def admin_store():
-        return jsonify(store=store_dict(g.store, True))
+        return jsonify(store=store_dict(g.store, True), role=g.role, role_label=ROLE_LABELS[g.role])
+
+    @app.post("/api/admin/store/open")
+    @owner
+    def set_open():
+        is_open = boolean(data(), "open")
+        if is_open and not g.store["enabled"]:
+            abort(403, description="Loja suspensa pela plataforma. Entre em contato com o suporte.")
+        db().execute("UPDATE stores SET open=? WHERE id=?", (is_open, g.store["id"]))
+        return jsonify(store=store_dict(one("SELECT * FROM stores WHERE id=?", (g.store["id"],)), True))
+
+    def team_member(mid):
+        member = one("SELECT * FROM store_members WHERE id=? AND store_id=?", (mid, g.store["id"]))
+        if not member:
+            abort(404, description="Pessoa da equipe não encontrada.")
+        return member
+
+    def role_field(value):
+        role = value.get("role")
+        if role not in ("manager", "cashier", "kitchen"):
+            abort(400, description="Escolha a função: gerente, caixa ou cozinha.")
+        return role
+
+    @app.get("/api/admin/team")
+    @owner
+    def team_list():
+        return jsonify(members=rows("""SELECT m.id,m.role,m.active,m.created_at,u.name,u.email,u.last_login_at FROM store_members m
+            JOIN users u ON u.id=m.user_id WHERE m.store_id=? ORDER BY m.active DESC,u.name""", (g.store["id"],)))
+
+    @app.post("/api/admin/team")
+    @owner
+    def team_add():
+        value = data()
+        name, email = text(value, "name", 2, 100), text(value, "email", 5, 254).lower()
+        password, role = text(value, "password", 10, 128), role_field(value)
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            abort(400, description="E-mail inválido.")
+        if one("SELECT COUNT(*) FROM store_members WHERE store_id=?", (g.store["id"],))[0] >= 30:
+            abort(409, description="Limite de 30 pessoas na equipe.")
+        if one("SELECT id FROM users WHERE email=?", (email,)):
+            abort(409, description="Este e-mail já tem uma conta. Use outro e-mail para esta pessoa.")
+        with transaction() as conn:
+            uid = conn.execute("INSERT INTO users(name,email,password_hash,created_at) VALUES(?,?,?,?)",
+                               (name, email, generate_password_hash(password), now())).lastrowid
+            mid = conn.execute("INSERT INTO store_members(store_id,user_id,role,created_at) VALUES(?,?,?,?)",
+                               (g.store["id"], uid, role, now())).lastrowid
+            conn.execute("INSERT INTO audit_log(actor_id,store_id,action,detail,created_at) VALUES(?,?,?,?,?)",
+                         (g.user["id"], g.store["id"], "team.add", f"{email} ({ROLE_LABELS[role]})", now()))
+        return jsonify(id=mid), 201
+
+    @app.patch("/api/admin/team/<int:mid>")
+    @owner
+    def team_update(mid):
+        member, value = team_member(mid), data()
+        role = role_field(value) if "role" in value else member["role"]
+        active = boolean(value, "active", bool(member["active"]))
+        with transaction() as conn:
+            conn.execute("UPDATE store_members SET role=?,active=? WHERE id=?", (role, active, mid))
+            if role != member["role"] or active != member["active"]:
+                # Encerra as sessões abertas para valer a nova permissão na hora.
+                conn.execute("UPDATE users SET auth_version=auth_version+1 WHERE id=?", (member["user_id"],))
+        return jsonify(ok=True)
+
+    @app.post("/api/admin/team/<int:mid>/password")
+    @owner
+    def team_password(mid):
+        member = team_member(mid)
+        password = text(data(), "password", 10, 128)
+        db().execute("UPDATE users SET password_hash=?,auth_version=auth_version+1 WHERE id=?",
+                     (generate_password_hash(password), member["user_id"]))
+        return jsonify(ok=True)
 
     @app.put("/api/admin/store")
     @owner
@@ -923,6 +1011,11 @@ def create_app(test_config=None):
     @owner
     def update_order(oid):
         value = data()
+        if g.role == "kitchen":
+            # Cozinha só avança o preparo: não mexe em pagamento, entregador nem cancela.
+            value = {"status": value.get("status")} if "status" in value else {}
+            if value.get("status") == "cancelled":
+                abort(403, description="O acesso de Cozinha não pode cancelar pedidos.")
         with transaction() as conn:
             order = owned("orders", oid)
             status = value.get("status", order["status"])

@@ -1,6 +1,6 @@
 """Additive, repeatable upgrades for existing SQLite/PostgreSQL installations."""
 ADDITIONS = {
-    'users': {'platform_admin': 'INTEGER NOT NULL DEFAULT 0'},
+    'users': {'platform_admin': 'INTEGER NOT NULL DEFAULT 0', 'last_login_at': 'TEXT'},
     'stores': {'commission_bps': 'INTEGER NOT NULL DEFAULT 0', 'monthly_fee': 'INTEGER NOT NULL DEFAULT 0',
                'payment_fees': "TEXT NOT NULL DEFAULT '{}'", 'default_delivery_cost': 'INTEGER',
                'enabled': 'INTEGER NOT NULL DEFAULT 1', 'hours': "TEXT NOT NULL DEFAULT '{}'",
@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
  id INTEGER PRIMARY KEY, actor_id INTEGER REFERENCES users(id), store_id INTEGER REFERENCES stores(id),
  action TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS store_members (
+ id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), user_id INTEGER NOT NULL UNIQUE REFERENCES users(id),
+ role TEXT NOT NULL CHECK(role IN ('manager','cashier','kitchen')), active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS platform_notices (
  id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('info','promo','alert')),
  expires TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
@@ -90,6 +94,6 @@ def postgres_ddl():
         for column, definition in columns.items():
             statements.append(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition};')
     statements.extend(s+';' for s in TABLES.split(';') if s.strip() and not s.strip().startswith('CREATE TABLE'))
-    for table in ('api_keys', 'delivery_links', 'integration_events', 'stock_movements', 'platform_ledger', 'audit_log', 'platform_notices'):
+    for table in ('api_keys', 'delivery_links', 'integration_events', 'stock_movements', 'platform_ledger', 'audit_log', 'platform_notices', 'store_members'):
         statements.extend([f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;', f'REVOKE ALL ON {table} FROM PUBLIC,anon,authenticated;'])
     return '\n'.join(statements)

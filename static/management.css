@@ -71,3 +71,7 @@ dialog.drawer{margin:0 0 0 auto;height:100dvh;max-height:100dvh;width:500px;max-
 .review-done{text-align:center;color:#9a4a07;margin:12px 0}.remember{margin:6px 0}
 .order-meta{flex-wrap:wrap;gap:4px}
 .review-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}.review-item{border:1px solid var(--line);border-radius:12px;padding:12px;display:grid;gap:6px}.review-item>div{display:flex;justify-content:space-between;gap:8px}.review-stars{color:#ff9a2e;letter-spacing:1px}.review-stars span{color:#d6dbd5}.review-item p{color:var(--ink);font-size:14px}
+
+.team-list{display:grid;gap:10px;margin:8px 0 14px}.team-card{display:grid;grid-template-columns:40px minmax(0,1fr) 150px auto;gap:12px;align-items:center;border:1px solid var(--line);border-radius:14px;padding:10px 12px}.team-card.inactive{opacity:.6}.team-card>div{min-width:0;display:grid}.team-card small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.role-legend{display:grid;gap:4px;font-size:13px;color:var(--muted)}.role-legend b{color:var(--ink)}
+@media(max-width:760px){.team-card{grid-template-columns:40px minmax(0,1fr)}.team-card select,.team-card .row-actions{grid-column:1/-1}}

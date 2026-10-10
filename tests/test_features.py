@@ -257,3 +257,47 @@ def test_scheduled_orders_respect_hours_and_reviews(shop):
     assert send(client, "POST", f"/api/track/{token}/review", {"rating": 1}).status_code == 409
     reviews = client.get("/api/admin/reviews").json
     assert reviews["average"] == 4.0 and reviews["reviews"][0]["review"] == "Chegou quentinho"
+
+
+def test_team_roles_are_enforced_by_the_server(app, shop):
+    client, pid = shop
+    def member(email, role):
+        assert send(client, "POST", "/api/admin/team", {"name": "Pessoa " + role, "email": email, "password": "senha-da-equipe-1", "role": role}).status_code == 201
+        person = app.test_client()
+        assert send(person, "POST", "/api/auth/login", {"email": email, "password": "senha-da-equipe-1"}).status_code == 200
+        return person
+    assert send(client, "POST", "/api/admin/team", {"name": "X", "email": "owner@example.com", "password": "senha-da-equipe-1", "role": "cashier"}).status_code in (400, 409)
+    assert send(client, "POST", "/api/admin/team", {"name": "Xis", "email": "dono2@example.com", "password": "senha-da-equipe-1", "role": "owner"}).status_code == 400
+    kitchen, cashier, manager = member("cozinha@example.com", "kitchen"), member("caixa@example.com", "cashier"), member("gerente@example.com", "manager")
+    assert kitchen.get("/api/admin/store").json["role"] == "kitchen"
+    order = make_order(client, pid)
+    # Cozinha: vê e avança pedidos, mas não confirma pagamento, não cancela e não vê vendas.
+    assert send(kitchen, "PATCH", f"/api/admin/orders/{order['id']}", {"status": "preparing", "paid": True}).status_code == 200
+    assert not client.get("/api/admin/orders").json["orders"][0]["paid"]
+    assert send(kitchen, "PATCH", f"/api/admin/orders/{order['id']}", {"status": "cancelled"}).status_code == 403
+    for url in ("/api/admin/summary?days=1", "/api/admin/finance", "/api/admin/team", "/api/admin/report?days=7"):
+        assert kitchen.get(url).status_code == 403
+    assert send(kitchen, "PUT", "/api/admin/store", client.get("/api/admin/store").json["store"]).status_code == 403
+    # Caixa: pedidos, balcão e vendas; sem cardápio, financeiro ou integrações.
+    assert cashier.get("/api/admin/summary?days=1").status_code == 200
+    assert send(cashier, "POST", "/api/admin/orders", payload(pid), uuid.uuid4().hex).status_code == 201
+    assert send(cashier, "POST", "/api/admin/products", {"name": "Hack", "price": 1}).status_code == 403
+    assert cashier.get("/api/admin/integrations").status_code == 403
+    assert send(cashier, "POST", "/api/admin/store/open", {"open": False}).status_code == 200
+    # Gerente: quase tudo, menos equipe e integrações.
+    assert manager.get("/api/admin/finance").status_code == 200
+    assert manager.get("/api/admin/team").status_code == 403
+    assert send(manager, "POST", "/api/admin/integrations/keys", {"name": "x", "scopes": ["orders:read"]}).status_code == 403
+    # Desativar derruba a sessão na hora; trocar a função também.
+    members = client.get("/api/admin/team").json["members"]
+    cid = next(m["id"] for m in members if m["email"] == "caixa@example.com")
+    assert send(client, "PATCH", f"/api/admin/team/{cid}", {"active": False}).status_code == 200
+    assert cashier.get("/api/admin/orders").status_code == 401
+    kid = next(m["id"] for m in members if m["email"] == "cozinha@example.com")
+    assert send(client, "PATCH", f"/api/admin/team/{kid}", {"role": "cashier"}).status_code == 200
+    assert kitchen.get("/api/admin/orders").status_code == 401
+    # Outra loja não enxerga nem altera a equipe desta.
+    other = app.test_client()
+    assert register(other, "outra-loja", "other@example.com").status_code == 201
+    assert other.get("/api/admin/team").json["members"] == []
+    assert send(other, "PATCH", f"/api/admin/team/{kid}", {"active": False}).status_code == 404
