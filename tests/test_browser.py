@@ -215,13 +215,16 @@ def test_platform_finance_stock_customers_keys_and_mobile(live):
         expect(page.get_by_text('Revogada',exact=True)).to_be_visible()
         page.screenshot(path='artifacts/gestao-api-desktop.png',full_page=True)
         page.get_by_role('link',name='Dono da plataforma').click()
-        expect(page.get_by_role('heading',name='Seu negócio por inteiro',exact=True)).to_be_visible()
-        page.get_by_role('button',name='Gerenciar',exact=True).click()
+        expect(page.get_by_role('heading',name='Suas vendas mês a mês',exact=True)).to_be_visible()
+        expect(page.locator('.month-chart .chart-column')).to_have_count(12)
+        page.get_by_role('button',name='Lojas e contas',exact=True).click()
+        page.get_by_role('button',name='Contrato e promoção',exact=True).click()
         page.get_by_label('Comissão (%)',exact=True).fill('3')
-        page.get_by_label('Mensalidade',exact=True).fill('79.90')
+        page.get_by_label('Mensalidade normal',exact=True).fill('79.90')
         page.get_by_role('button',name='Salvar contrato',exact=True).click()
         expect(page.locator('#modal')).not_to_be_visible()
         expect(page.locator('#platform-stores')).to_contain_text('79,90')
+        page.get_by_role('button',name='Recebimentos e despesas',exact=True).click()
         page.get_by_role('button',name='Registrar recebimento ou despesa',exact=True).click()
         page.get_by_label('Loja',exact=True).select_option(label='Bistrô da Vila')
         page.get_by_label('Descrição',exact=True).fill('Mensalidade recebida')
@@ -230,9 +233,13 @@ def test_platform_finance_stock_customers_keys_and_mobile(live):
         expect(page.locator('#modal')).not_to_be_visible()
         expect(page.locator('.metric').filter(has_text='Recebido pela plataforma')).to_contain_text('79,90')
         page.screenshot(path='artifacts/gestao-plataforma-desktop.png',full_page=True)
-        for width in (390,768,1440):
-            page.set_viewport_size({'width':width,'height':900})
-            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'),f'Platform overflow at {width}'
+        for tab in ('Visão mês a mês','Lojas e contas','Promoções e avisos','Recebimentos e despesas'):
+            page.set_viewport_size({'width':1440,'height':900})
+            page.get_by_role('button',name=tab,exact=True).click()
+            page.wait_for_timeout(300)
+            for width in (390,768,1440):
+                page.set_viewport_size({'width':width,'height':900})
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'),f'Platform overflow at {width} in {tab}'
         page.set_viewport_size({'width':390,'height':844})
         page.screenshot(path='artifacts/gestao-plataforma-mobile.png',full_page=True)
         page.get_by_role('link',name='Minha loja',exact=True).click()

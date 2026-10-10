@@ -20,6 +20,7 @@ from database import connect, initialize
 from business import register_business
 from storage import put_image
 from flask import Flask, abort, g, jsonify, request, send_from_directory, session
+from markupsafe import escape
 from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -36,6 +37,42 @@ LABELS = {"new": "Novo", "preparing": "Em preparo", "ready": "Pronto",
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+WEEKDAYS = ("segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo")
+HHMM = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
+
+
+def minutes(value):
+    return int(value[:2]) * 60 + int(value[3:])
+
+
+def store_status(store, moment=None):
+    """Situação da loja para o cliente: (aceita pedidos, texto curto)."""
+    if not store["enabled"]:
+        return False, "Indisponível no momento"
+    if not store["open"]:
+        return False, "Fechado no momento"
+    if not store["auto_hours"]:
+        return True, "Aberto agora"
+    hours = json.loads(store["hours"] or "{}")
+    moment = (moment or datetime.now(ZONE)).astimezone(ZONE)
+    day, current = moment.weekday(), moment.hour * 60 + moment.minute
+    for start, end in hours.get(str(day), []):
+        s, e = minutes(start), minutes(end)
+        if (s < e and s <= current < e) or (e <= s and current >= s):
+            return True, "Aberto até " + end
+    for start, end in hours.get(str((day - 1) % 7), []):
+        if minutes(end) <= minutes(start) and current < minutes(end):
+            return True, "Aberto até " + end
+    for offset in range(8):
+        weekday = (day + offset) % 7
+        for start, _ in sorted(hours.get(str(weekday), [])):
+            if offset == 0 and minutes(start) <= current:
+                continue
+            label = "hoje" if offset == 0 else "amanhã" if offset == 1 else WEEKDAYS[weekday]
+            return False, f"Fechado • abre {label} às {start}"
+    return False, "Fechado no momento"
 
 
 def create_app(test_config=None):
@@ -165,11 +202,61 @@ def create_app(test_config=None):
     def store_dict(store, private=False):
         value = dict(store)
         value["payments"] = json.loads(value["payments"])
-        value["open"] = bool(value["open"])
+        value["hours"] = json.loads(value["hours"] or "{}")
+        value["delivery_zones"] = json.loads(value["delivery_zones"] or "[]")
+        value["open"], value["auto_hours"] = bool(value["open"]), bool(value["auto_hours"])
+        value["open_now"], value["status_text"] = store_status(store)
         if not private:
-            for key in ("owner_id", "created_at", "commission_bps", "monthly_fee", "payment_fees", "default_delivery_cost", "enabled"):
+            for key in ("owner_id", "created_at", "commission_bps", "monthly_fee", "payment_fees", "default_delivery_cost", "enabled",
+                        "blocked_reason", "promo_fee", "promo_until", "promo_label"):
                 value.pop(key, None)
         return value
+
+    def delivery_fee(store, mode, value):
+        """Taxa de entrega: por bairro quando a loja cadastrou bairros, senão a taxa única."""
+        if mode != "delivery":
+            return 0, ""
+        zones = json.loads(store["delivery_zones"] or "[]")
+        if not zones:
+            return store["delivery_fee"], ""
+        name = text(value, "zone", 0, 60)
+        zone = next((z for z in zones if z["name"] == name), None)
+        if not zone:
+            abort(400, description="Escolha o seu bairro para calcular a entrega.")
+        return zone["fee"], zone["name"]
+
+    def hours_field(value):
+        hours = value.get("hours", {})
+        if not isinstance(hours, dict) or any(k not in {str(d) for d in range(7)} for k in hours):
+            abort(400, description="Horário de funcionamento inválido.")
+        result = {}
+        for day, shifts in hours.items():
+            if not isinstance(shifts, list) or len(shifts) > 3:
+                abort(400, description="Use até 3 turnos por dia.")
+            clean = []
+            for shift in shifts:
+                if (not isinstance(shift, list) or len(shift) != 2 or not all(isinstance(t, str) and HHMM.fullmatch(t) for t in shift)
+                        or shift[0] == shift[1]):
+                    abort(400, description=f"Horário inválido na {WEEKDAYS[int(day)]}.")
+                clean.append(shift)
+            if clean:
+                result[day] = sorted(clean)
+        return result
+
+    def zones_field(value):
+        zones = value.get("delivery_zones", [])
+        if not isinstance(zones, list) or len(zones) > 100:
+            abort(400, description="Use até 100 bairros.")
+        result, seen = [], set()
+        for zone in zones:
+            if not isinstance(zone, dict):
+                abort(400, description="Bairro inválido.")
+            name = text(zone, "name", 2, 60)
+            if name.lower() in seen:
+                abort(400, description=f"O bairro {name} está repetido.")
+            seen.add(name.lower())
+            result.append({"name": name, "fee": integer(zone, "fee", maximum=100_000)})
+        return result
 
     def product_dict(product, private=False):
         value = dict(product)
@@ -195,7 +282,7 @@ def create_app(test_config=None):
         if private:
             value["driver_name"] = (one("SELECT name FROM drivers WHERE id=?", (value["driver_id"],)) or {"name": ""})["name"]
         else:
-            value = {k: value[k] for k in ("number", "mode", "payment", "subtotal", "discount", "delivery_fee",
+            value = {k: value[k] for k in ("number", "mode", "zone", "payment", "subtotal", "discount", "delivery_fee",
                 "total", "paid", "status", "status_label", "items", "events", "created_at")}
         for key in ("tracking_hash", "payload_hash", "idempotency_key"):
             value.pop(key, None)
@@ -255,14 +342,54 @@ def create_app(test_config=None):
         one("SELECT 1")
         return jsonify(status="ok", service="SeuComércioAqui")
 
+    def public_base():
+        return app.config["PUBLIC_URL"] or request.host_url.rstrip("/")
+
     @app.get("/")
     @app.get("/entrar")
     @app.get("/painel")
     @app.get("/plataforma")
-    @app.get("/loja/<slug>")
     @app.get("/pedido/<token>")
     def page(**kwargs):
         return send_from_directory(app.static_folder, "index.html")
+
+    @app.get("/loja/<slug>")
+    def store_page(slug):
+        """Mesma aplicação, com título e prévia próprios para o link compartilhado no WhatsApp."""
+        html = (Path(app.static_folder) / "index.html").read_text(encoding="utf-8")
+        store = one("SELECT name,description,logo,banner,slug FROM stores WHERE slug=?", (slug,))
+        if store:
+            base = public_base()
+            picture = store["banner"] or store["logo"]
+            picture = (base + picture if picture.startswith("/") else picture) if picture else base + "/static/og-image.png"
+            title = escape(store["name"] + " • Peça pelo cardápio digital")
+            summary = escape(store["description"] or "Veja o cardápio e faça seu pedido com entrega ou retirada.")
+            meta = (f'<meta property="og:type" content="website"><meta property="og:title" content="{title}">'
+                    f'<meta property="og:description" content="{summary}"><meta property="og:image" content="{escape(picture)}">'
+                    f'<meta property="og:url" content="{escape(base + "/loja/" + store["slug"])}"><meta name="twitter:card" content="summary_large_image">')
+            html = re.sub(r"<title>.*?</title>", f"<title>{title}</title>", html, count=1)
+            html = re.sub(r'<meta name="description"[^>]*>', f'<meta name="description" content="{summary}">', html, count=1)
+            html = re.sub(r'<meta property="og:[^>]*>|<meta name="twitter:[^>]*>', "", html)
+            html = html.replace("</head>", meta + "\n</head>", 1)
+        response = app.response_class(html, mimetype="text/html")
+        return response, 200 if store else 404
+
+    @app.get("/api/admin/qrcode")
+    @owner
+    def store_qrcode():
+        import segno
+        code = segno.make(public_base() + "/loja/" + g.store["slug"], error="m")
+        output = io.BytesIO()
+        if request.args.get("format") == "png":
+            code.save(output, kind="png", scale=16, border=2, dark="#103f42")
+            mimetype, extension = "image/png", "png"
+        else:
+            code.save(output, kind="svg", scale=10, border=2, dark="#103f42", xmldecl=False)
+            mimetype, extension = "image/svg+xml", "svg"
+        response = app.response_class(output.getvalue(), mimetype=mimetype)
+        if request.args.get("download"):
+            response.headers["Content-Disposition"] = f'attachment; filename="qrcode-{g.store["slug"]}.{extension}"'
+        return response
 
     @app.get("/media/<filename>")
     def media(filename):
@@ -382,8 +509,9 @@ def create_app(test_config=None):
         store = one("SELECT * FROM stores WHERE slug=?", (slug,))
         if not store:
             abort(404, description="Loja não encontrada.")
-        if not store["open"] or not store["enabled"]:
-            abort(409, description="A loja está fechada no momento.")
+        accepting, status_text = store_status(store)
+        if not accepting:
+            abort(409, description="A loja não está aceitando pedidos agora. " + status_text + ".")
         mode, items = value.get("mode"), value.get("items")
         if mode not in ("delivery", "pickup") or not isinstance(items, list) or not 1 <= len(items) <= 50:
             abort(400, description="Sacola inválida.")
@@ -394,8 +522,8 @@ def create_app(test_config=None):
         if subtotal < store["minimum_order"]:
             abort(400, description=f"Pedido mínimo de R$ {store['minimum_order']/100:.2f} em produtos.")
         discount, _ = coupon_discount(db(), store["id"], text(value, "coupon", 0, 30).upper(), subtotal)
-        fee = store["delivery_fee"] if mode == "delivery" else 0
-        return jsonify(subtotal=subtotal, discount=discount, delivery_fee=fee, total=subtotal-discount+fee)
+        fee, zone = delivery_fee(store, mode, value)
+        return jsonify(subtotal=subtotal, discount=discount, delivery_fee=fee, zone=zone, total=subtotal-discount+fee)
 
     @app.post("/api/store/<slug>/orders")
     def create_order(slug):
@@ -429,8 +557,9 @@ def create_app(test_config=None):
                 if previous["payload_hash"] != digest:
                     abort(409, description="Este identificador já pertence a outro pedido.")
                 return jsonify(token=previous["tracking_token"], number=previous["number"], total=previous["total"]), 200
-            if (not store["open"] and not getattr(g,'manual_order',False)) or not store["enabled"]:
-                abort(409, description="A loja está fechada no momento.")
+            accepting, status_text = store_status(store)
+            if not store["enabled"] or (not accepting and not getattr(g, 'manual_order', False)):
+                abort(409, description="A loja não está aceitando pedidos agora. " + status_text + ".")
             if payment not in json.loads(store["payments"]):
                 abort(400, description="Forma de pagamento indisponível.")
             subtotal, quantities, prepared = price_items(conn, store, items)
@@ -443,7 +572,7 @@ def create_app(test_config=None):
                         abort(409, description=f"Estoque insuficiente: {product['name']}.")
                     conn.execute("UPDATE products SET stock=stock-? WHERE id=?", (quantity, pid))
             discount, coupon_id = coupon_discount(conn, store["id"], coupon_code, subtotal)
-            fee = store["delivery_fee"] if mode == "delivery" else 0
+            fee, zone = delivery_fee(store, mode, value)
             total = subtotal - discount + fee
             if "expected_total" in value and integer(value, "expected_total", maximum=10**14) != total:
                 abort(409, description="O preço mudou. Confira o novo total antes de confirmar.")
@@ -457,11 +586,11 @@ def create_app(test_config=None):
                 customer, phone, mode, address if mode == "delivery" else "", payment, change_for if payment == "cash" else None, notes,
                 subtotal, discount, fee, total, coupon_id, key, digest, token, stamp, stamp)).lastrowid
             fees=json.loads(store['payment_fees'])
-            conn.execute("UPDATE orders SET delivery_cost=?,payment_fee=?,platform_fee=?,source=? WHERE id=?",
+            conn.execute("UPDATE orders SET delivery_cost=?,payment_fee=?,platform_fee=?,source=?,zone=? WHERE id=?",
                 (store['default_delivery_cost'] if mode=='delivery' else 0,
                  (total*fees.get(payment,0)+5000)//10000,
                  ((subtotal-discount)*store['commission_bps']+5000)//10000,
-                 'counter' if getattr(g,'manual_order',False) else 'web',oid))
+                 'counter' if getattr(g,'manual_order',False) else 'web',zone,oid))
             for product, quantity, unit, extras, item_notes in prepared:
                 known=product['unit_cost'] is not None and all(x.get('unit_cost') is not None for x in extras)
                 cost=product['unit_cost']+sum(x['unit_cost'] for x in extras) if known else None
@@ -515,11 +644,17 @@ def create_app(test_config=None):
         pix = text(value, "pix_key", 0, 200)
         if "pix" in payments and not pix:
             abort(400, description="Informe sua chave Pix ou desative Pix.")
+        hours = hours_field(value) if "hours" in value else json.loads(g.store["hours"] or "{}")
+        zones = zones_field(value) if "delivery_zones" in value else json.loads(g.store["delivery_zones"] or "[]")
+        auto_hours = boolean(value, "auto_hours", bool(g.store["auto_hours"]))
+        if auto_hours and not hours:
+            abort(400, description="Informe ao menos um dia de funcionamento ou desative o horário automático.")
         db().execute("""UPDATE stores SET name=?,description=?,phone=?,address=?,color=?,logo=?,banner=?,open=?,
-            delivery_fee=?,minimum_order=?,delivery_minutes=?,pix_key=?,payments=? WHERE id=?""",
+            delivery_fee=?,minimum_order=?,delivery_minutes=?,pix_key=?,payments=?,hours=?,auto_hours=?,delivery_zones=? WHERE id=?""",
             (name, description, phone, address, color, image_url(value.get("logo", "")), image_url(value.get("banner", "")),
              boolean(value, "open"), integer(value, "delivery_fee"), integer(value, "minimum_order"),
-             text(value, "delivery_minutes", 2, 40), pix, json.dumps(list(dict.fromkeys(payments))), g.store["id"]))
+             text(value, "delivery_minutes", 2, 40), pix, json.dumps(list(dict.fromkeys(payments))),
+             json.dumps(hours), int(auto_hours), json.dumps(zones, ensure_ascii=False), g.store["id"]))
         return jsonify(store=store_dict(one("SELECT * FROM stores WHERE id=?", (g.store["id"],)), True))
 
     @app.post("/api/admin/upload")

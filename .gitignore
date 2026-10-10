@@ -7,3 +7,4 @@ instance/
 data/
 artifacts/
 .coverage
+.tmp-tests/

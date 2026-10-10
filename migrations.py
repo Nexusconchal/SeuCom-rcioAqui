@@ -3,10 +3,13 @@ ADDITIONS = {
     'users': {'platform_admin': 'INTEGER NOT NULL DEFAULT 0'},
     'stores': {'commission_bps': 'INTEGER NOT NULL DEFAULT 0', 'monthly_fee': 'INTEGER NOT NULL DEFAULT 0',
                'payment_fees': "TEXT NOT NULL DEFAULT '{}'", 'default_delivery_cost': 'INTEGER',
-               'enabled': 'INTEGER NOT NULL DEFAULT 1'},
+               'enabled': 'INTEGER NOT NULL DEFAULT 1', 'hours': "TEXT NOT NULL DEFAULT '{}'",
+               'auto_hours': 'INTEGER NOT NULL DEFAULT 0', 'delivery_zones': "TEXT NOT NULL DEFAULT '[]'",
+               'blocked_reason': "TEXT NOT NULL DEFAULT ''", 'promo_fee': 'INTEGER',
+               'promo_until': "TEXT NOT NULL DEFAULT ''", 'promo_label': "TEXT NOT NULL DEFAULT ''"},
     'products': {'unit_cost': 'INTEGER', 'low_stock': 'INTEGER NOT NULL DEFAULT 5'},
     'orders': {'delivery_cost': 'INTEGER', 'payment_fee': 'INTEGER', 'platform_fee': 'INTEGER NOT NULL DEFAULT 0',
-               'source': "TEXT NOT NULL DEFAULT 'web'"},
+               'source': "TEXT NOT NULL DEFAULT 'web'", 'zone': "TEXT NOT NULL DEFAULT ''"},
     'order_items': {'unit_cost': 'INTEGER'},
     'expenses': {'category': "TEXT NOT NULL DEFAULT 'operating'"},
     'platform_ledger': {'idempotency_key': 'TEXT', 'payload_hash': 'TEXT', 'voided_at': 'TEXT'},
@@ -40,6 +43,10 @@ CREATE TABLE IF NOT EXISTS platform_ledger (
 CREATE TABLE IF NOT EXISTS audit_log (
  id INTEGER PRIMARY KEY, actor_id INTEGER REFERENCES users(id), store_id INTEGER REFERENCES stores(id),
  action TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS platform_notices (
+ id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('info','promo','alert')),
+ expires TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_api_keys_store ON api_keys(store_id);
 CREATE INDEX IF NOT EXISTS ix_delivery_store ON delivery_links(store_id,updated_at);
@@ -80,6 +87,6 @@ def postgres_ddl():
         for column, definition in columns.items():
             statements.append(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition};')
     statements.extend(s+';' for s in TABLES.split(';') if s.strip() and not s.strip().startswith('CREATE TABLE'))
-    for table in ('api_keys', 'delivery_links', 'integration_events', 'stock_movements', 'platform_ledger', 'audit_log'):
+    for table in ('api_keys', 'delivery_links', 'integration_events', 'stock_movements', 'platform_ledger', 'audit_log', 'platform_notices'):
         statements.extend([f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;', f'REVOKE ALL ON {table} FROM PUBLIC,anon,authenticated;'])
     return '\n'.join(statements)

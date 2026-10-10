@@ -4,3 +4,4 @@ Pillow==12.3.0
 gunicorn==26.2.0
 tzdata==2026.5
 psycopg[binary]==3.3.6
+segno==1.6.6

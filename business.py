@@ -20,6 +20,24 @@ def start_of_period(days):
             - timedelta(days=days-1)).astimezone(timezone.utc).isoformat(timespec='seconds')
 
 
+def month_bounds(label):
+    """Início e fim (UTC, ISO) do mês AAAA-MM no fuso de São Paulo."""
+    if not isinstance(label, str) or not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])', label):
+        abort(400, description='Mês inválido.')
+    year, month = int(label[:4]), int(label[5:])
+    start = datetime(year, month, 1, tzinfo=ZONE)
+    end = datetime(year + (month == 12), month % 12 + 1, 1, tzinfo=ZONE)
+    return (start.astimezone(timezone.utc).isoformat(timespec='seconds'),
+            end.astimezone(timezone.utc).isoformat(timespec='seconds'))
+
+
+def effective_fee(store, today):
+    """Mensalidade vigente: a promocional enquanto estiver no prazo."""
+    if store['promo_fee'] is not None and store['promo_until'] and store['promo_until'] >= today:
+        return store['promo_fee']
+    return store['monthly_fee']
+
+
 def finance(conn, sid, start):
     orders = [dict(r) for r in conn.execute('''SELECT o.*,SUM(i.quantity*i.unit_cost) AS cogs,SUM(CASE WHEN i.unit_cost IS NULL THEN 1 ELSE 0 END) AS missing
         FROM orders o LEFT JOIN order_items i ON i.order_id=o.id
@@ -184,39 +202,167 @@ def register_business(app, helpers):
     @platform
     def platform_summary():
         start=start_of_period(days())
-        stores=h.rows('''SELECT s.id,s.name,s.slug,s.open,s.enabled,s.commission_bps,s.monthly_fee,s.created_at,u.email,
+        month=month_bounds(datetime.now(ZONE).strftime('%Y-%m'))
+        today=datetime.now(ZONE).date().isoformat()
+        stores=h.rows('''SELECT s.id,s.name,s.slug,s.open,s.enabled,s.blocked_reason,s.commission_bps,s.monthly_fee,
+             s.promo_fee,s.promo_until,s.promo_label,s.created_at,s.phone,s.pix_key,s.address,u.email,
              COALESCE(o.orders,0) AS orders,COALESCE(o.revenue,0) AS revenue,COALESCE(o.commission,0) AS commission,
-             COALESCE(o.missing,0) AS missing_fees,COALESCE(l.received,0) AS received,COALESCE(l.expenses,0) AS expenses
+             COALESCE(o.missing,0) AS missing_fees,COALESCE(l.received,0) AS received,COALESCE(l.expenses,0) AS expenses,
+             COALESCE(m.received,0) AS received_month,a.last_order,COALESCE(p.products,0) AS products
              FROM stores s JOIN users u ON u.id=s.owner_id LEFT JOIN
              (SELECT store_id,COUNT(*) AS orders,SUM(total) AS revenue,SUM(platform_fee) AS commission,
               SUM(CASE WHEN platform_fee IS NULL THEN 1 ELSE 0 END) AS missing FROM orders WHERE status='completed'
               AND created_at>=? GROUP BY store_id) o ON o.store_id=s.id LEFT JOIN
              (SELECT store_id,SUM(CASE WHEN kind='receipt' THEN amount ELSE 0 END) AS received,
               SUM(CASE WHEN kind='expense' THEN amount ELSE 0 END) AS expenses FROM platform_ledger WHERE created_at>=? AND voided_at IS NULL
-              GROUP BY store_id) l ON l.store_id=s.id ORDER BY s.id DESC LIMIT 1000''',(start,start))
+              GROUP BY store_id) l ON l.store_id=s.id LEFT JOIN
+             (SELECT store_id,SUM(amount) AS received FROM platform_ledger WHERE kind='receipt' AND voided_at IS NULL
+              AND created_at>=? AND created_at<? GROUP BY store_id) m ON m.store_id=s.id LEFT JOIN
+             (SELECT store_id,MAX(created_at) AS last_order FROM orders GROUP BY store_id) a ON a.store_id=s.id LEFT JOIN
+             (SELECT store_id,COUNT(*) AS products FROM products WHERE active=1 GROUP BY store_id) p ON p.store_id=s.id
+             ORDER BY s.id DESC LIMIT 1000''',(start,start,*month))
+        for s in stores:
+            s['effective_fee']=effective_fee(s,today)
+            s['promo_active']=s['effective_fee']!=s['monthly_fee']
+            s['overdue']=bool(s['enabled'] and s['effective_fee'] and s['received_month']<s['effective_fee'])
+            s['setup']={'products':s['products']>0,'phone':bool(s.pop('phone')),'pix':bool(s.pop('pix_key')),'address':bool(s.pop('address'))}
         ledger=h.rows('SELECT l.*,s.name AS store_name FROM platform_ledger l LEFT JOIN stores s ON s.id=l.store_id WHERE l.created_at>=? ORDER BY l.id DESC LIMIT 200',(start,))
         totals=h.one("SELECT COALESCE(SUM(CASE WHEN kind='receipt' THEN amount ELSE 0 END),0) AS received,COALESCE(SUM(CASE WHEN kind='expense' THEN amount ELSE 0 END),0) AS expenses FROM platform_ledger WHERE created_at>=? AND voided_at IS NULL",(start,))
         return jsonify(stores=stores,ledger=ledger,received=totals['received'],expenses=totals['expenses'],
                        cash_result=totals['received']-totals['expenses'],commission=sum(s['commission'] for s in stores),
-                       monthly_recurring=sum(s['monthly_fee'] for s in stores if s['enabled']),
+                       monthly_recurring=sum(s['effective_fee'] for s in stores if s['enabled']),
+                       overdue=sum(max(0,s['effective_fee']-s['received_month']) for s in stores if s['overdue']),
                        gross_store_sales=sum(s['revenue'] for s in stores),
                        audit=h.rows('SELECT action,detail,created_at FROM audit_log ORDER BY id DESC LIMIT 30'))
+
+    @app.get('/api/platform/monthly')
+    @platform
+    def platform_monthly():
+        """Evolução mês a mês e ranking das lojas no mês escolhido."""
+        try:
+            count=int(request.args.get('months','12'))
+        except ValueError:
+            abort(400,description='Quantidade de meses inválida.')
+        if not 1<=count<=36:
+            abort(400,description='Use de 1 a 36 meses.')
+        current=datetime.now(ZONE).replace(day=1)
+        labels=[]
+        year,mon=current.year,current.month
+        for _ in range(count):
+            labels.append(f'{year:04d}-{mon:02d}')
+            year,mon=(year,mon-1) if mon>1 else (year-1,12)
+        months=[]
+        for label in reversed(labels):
+            start,end=month_bounds(label)
+            o=h.one('''SELECT COUNT(*) AS orders,COALESCE(SUM(total),0) AS gmv,COALESCE(SUM(platform_fee),0) AS commission,
+                COUNT(DISTINCT store_id) AS active_stores FROM orders WHERE status='completed' AND created_at>=? AND created_at<?''',(start,end))
+            c=h.one("SELECT COUNT(*) FROM orders WHERE status='cancelled' AND created_at>=? AND created_at<?",(start,end))[0]
+            l=h.one('''SELECT COALESCE(SUM(CASE WHEN kind='receipt' THEN amount ELSE 0 END),0) AS received,
+                COALESCE(SUM(CASE WHEN kind='expense' THEN amount ELSE 0 END),0) AS expenses
+                FROM platform_ledger WHERE voided_at IS NULL AND created_at>=? AND created_at<?''',(start,end))
+            n=h.one('SELECT COUNT(*) FROM stores WHERE created_at>=? AND created_at<?',(start,end))[0]
+            months.append(dict(month=label,orders=o['orders'],gmv=o['gmv'],commission=o['commission'],active_stores=o['active_stores'],
+                               cancelled=c,received=l['received'],expenses=l['expenses'],result=l['received']-l['expenses'],new_stores=n,
+                               ticket=o['gmv']//o['orders'] if o['orders'] else 0))
+        selected=request.args.get('month',labels[0])
+        start,end=month_bounds(selected)
+        ranking=h.rows('''SELECT s.id,s.name,s.enabled,COUNT(o.id) AS orders,COALESCE(SUM(o.total),0) AS gmv,
+            COALESCE(SUM(o.platform_fee),0) AS commission,COALESCE(MAX(r.received),0) AS received
+            FROM stores s LEFT JOIN orders o ON o.store_id=s.id AND o.status='completed' AND o.created_at>=? AND o.created_at<?
+            LEFT JOIN (SELECT store_id,SUM(amount) AS received FROM platform_ledger WHERE kind='receipt' AND voided_at IS NULL
+              AND created_at>=? AND created_at<? GROUP BY store_id) r ON r.store_id=s.id
+            GROUP BY s.id,s.name,s.enabled ORDER BY gmv DESC,s.name LIMIT 1000''',(start,end,start,end))
+        return jsonify(months=months,month=selected,ranking=ranking)
 
     @app.put('/api/platform/stores/<int:sid>')
     @platform
     def platform_store(sid):
         value=h.data()
-        if not h.one('SELECT id FROM stores WHERE id=?',(sid,)):
+        store=h.one('SELECT * FROM stores WHERE id=?',(sid,))
+        if not store:
             abort(404,description='Loja não encontrada.')
         commission=h.integer(value,'commission_bps',maximum=10000)
         fee=h.integer(value,'monthly_fee')
-        enabled=h.boolean(value,'enabled',True)
+        enabled=h.boolean(value,'enabled',bool(store['enabled']))
+        promo_fee=value.get('promo_fee',store['promo_fee'])
+        if promo_fee is not None:
+            promo_fee=h.integer({'promo_fee':promo_fee},'promo_fee')
+        promo_until=h.text(value,'promo_until',0,10) if 'promo_until' in value else store['promo_until']
+        promo_label=h.text(value,'promo_label',0,80) if 'promo_label' in value else store['promo_label']
+        if promo_until:
+            try:
+                datetime.strptime(promo_until,'%Y-%m-%d')
+            except ValueError:
+                abort(400,description='Data final da promoção inválida.')
+        if promo_fee is not None and not promo_until:
+            abort(400,description='Informe até quando vale a promoção.')
         with h.transaction() as conn:
-            conn.execute('UPDATE stores SET commission_bps=?,monthly_fee=?,enabled=? WHERE id=?',(commission,fee,enabled,sid))
+            conn.execute('''UPDATE stores SET commission_bps=?,monthly_fee=?,enabled=?,promo_fee=?,promo_until=?,promo_label=?,
+                blocked_reason=CASE WHEN ?=1 THEN '' ELSE blocked_reason END WHERE id=?''',
+                (commission,fee,enabled,promo_fee,promo_until if promo_fee is not None else '',promo_label if promo_fee is not None else '',enabled,sid))
             if not enabled:
                 conn.execute('UPDATE stores SET open=0 WHERE id=?',(sid,))
-            audit('store.plan',json.dumps({'commission_bps':commission,'monthly_fee':fee,'enabled':enabled}),sid)
+            audit('store.plan',json.dumps({'commission_bps':commission,'monthly_fee':fee,'enabled':enabled,
+                                           'promo_fee':promo_fee,'promo_until':promo_until}),sid)
         return jsonify(ok=True)
+
+    @app.post('/api/platform/stores/<int:sid>/block')
+    @platform
+    def platform_block(sid):
+        value=h.data()
+        blocked=h.boolean(value,'blocked')
+        reason=h.text(value,'reason',3 if blocked else 0,300)
+        if not h.one('SELECT id FROM stores WHERE id=?',(sid,)):
+            abort(404,description='Loja não encontrada.')
+        with h.transaction() as conn:
+            if blocked:
+                conn.execute('UPDATE stores SET enabled=0,open=0,blocked_reason=? WHERE id=?',(reason,sid))
+            else:
+                conn.execute("UPDATE stores SET enabled=1,blocked_reason='' WHERE id=?",(sid,))
+            audit('store.block' if blocked else 'store.unblock',reason,sid)
+        return jsonify(ok=True)
+
+    @app.get('/api/platform/notices')
+    @platform
+    def platform_notices():
+        return jsonify(notices=h.rows('SELECT * FROM platform_notices ORDER BY id DESC LIMIT 100'))
+
+    @app.post('/api/platform/notices')
+    @platform
+    def create_notice():
+        value=h.data()
+        kind=value.get('kind','info')
+        if kind not in ('info','promo','alert'):
+            abort(400,description='Tipo de aviso inválido.')
+        expires=h.text(value,'expires',0,10)
+        if expires:
+            try:
+                datetime.strptime(expires,'%Y-%m-%d')
+            except ValueError:
+                abort(400,description='Validade inválida.')
+        with h.transaction() as conn:
+            nid=conn.execute('INSERT INTO platform_notices(title,body,kind,expires,created_at) VALUES(?,?,?,?,?)',
+                (h.text(value,'title',3,100),h.text(value,'body',3,600),kind,expires,h.now())).lastrowid
+            audit('notice.create',str(nid))
+        return jsonify(id=nid),201
+
+    @app.patch('/api/platform/notices/<int:nid>')
+    @platform
+    def toggle_notice(nid):
+        if not h.one('SELECT id FROM platform_notices WHERE id=?',(nid,)):
+            abort(404,description='Aviso não encontrado.')
+        active=h.boolean(h.data(),'active')
+        with h.transaction() as conn:
+            conn.execute('UPDATE platform_notices SET active=? WHERE id=?',(active,nid))
+            audit('notice.toggle',str(nid))
+        return jsonify(ok=True)
+
+    @app.get('/api/admin/notices')
+    @h.owner
+    def merchant_notices():
+        today=datetime.now(ZONE).date().isoformat()
+        return jsonify(notices=h.rows("SELECT id,title,body,kind,created_at FROM platform_notices WHERE active=1 AND (expires='' OR expires>=?) ORDER BY id DESC LIMIT 5",(today,)),
+                       blocked_reason='' if g.store['enabled'] else (g.store['blocked_reason'] or 'Loja suspensa pela plataforma.'))
 
     @app.post('/api/platform/ledger')
     @platform

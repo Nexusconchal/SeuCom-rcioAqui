@@ -28,7 +28,7 @@ export const icons = {
   user:'<circle cx="12" cy="7" r="4"/><path d="M4 21v-3a8 8 0 0 1 16 0v3"/>'
 };
 export const icon = name => '<svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">'+(icons[name]||icons.store)+'</svg>';
-export const brand = () => '<a class="brand" href="/" aria-label="SeuComércioAqui, início"><img src="/static/logo.svg" alt="" width="32" height="36"><span>SeuComércio<b>Aqui</b><small>Seu negócio. Mais perto.</small></span></a>';
+export const brand = () => '<a class="brand" href="/" aria-label="SeuComércioAqui, início"><img src="/static/logo.svg" alt="" width="40" height="40"><span>SeuComércio<b>Aqui</b><small>Seu negócio. Mais perto.</small></span></a>';
 export const statuses = {new:'Novo',preparing:'Em preparo',ready:'Pronto',delivering:'Em entrega',completed:'Concluído',cancelled:'Cancelado'};
 export const pay = {pix:'Pix',cash:'Dinheiro',card:'Cartão na entrega/retirada'};
 export let auth = {csrf:'',user:null,registration:true};

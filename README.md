@@ -21,6 +21,12 @@ Cardápio digital e gestão de pedidos para pequenos comércios. Frontend respon
 - Painel exclusivo do dono da plataforma: lojas, contratos, mensalidades, comissões, recebimentos, despesas, resultado de caixa e histórico administrativo.
 - API de entregas com chaves por loja, permissões, revogação, vinculação de pedidos e eventos sem duplicação. Documentação em `/static/api-docs.html`.
 - Nome, logo, capa, cor, contato, taxa, pedido mínimo e pagamentos configuráveis.
+- Horário de funcionamento por dia (até 3 turnos, inclusive virando a madrugada): a loja abre e fecha sozinha e o cliente vê "abre hoje às 18:00".
+- Taxa de entrega por bairro, escolhida pelo cliente no checkout e validada no servidor.
+- Alerta sonoro, notificação do navegador e contador no título quando chega pedido novo no painel.
+- Botão para o cliente enviar o resumo do pedido no WhatsApp da loja; prévia do link da loja (nome, descrição e foto) ao compartilhar no WhatsApp.
+- QR Code do cardápio para imprimir (PNG ou SVG) e ícones para instalar o painel no celular.
+- Área do dono da plataforma em **/plataforma**: vendas mês a mês com gráfico e ranking das lojas, exportação CSV, bloqueio/desbloqueio com motivo exibido ao lojista, mensalidade promocional com prazo, mensalidades em aberto no mês, saúde das lojas e avisos/promoções exibidos no painel de todos os lojistas.
 - Alteração de senha, logout e recuperação administrativa por comando.
 
 **Pagamentos:** Pix é confirmado manualmente pelo lojista. Dinheiro e cartão são recebidos na entrega ou retirada. Não há gateway bancário, captura de cartão ou confirmação automática de Pix. O link do WhatsApp abre uma conversa com a loja; não envia mensagens automaticamente.
@@ -180,7 +186,7 @@ static/
   api-docs.html           Contrato público da API de entregas
   ui.js                   Componentes e cliente HTTP
   styles.css              Desktop, celular e impressão
-  logo.svg                Marca original
+  logo.svg                Marca (sacola com toldo); PNGs gerados por scripts/brand_assets.py
 tests/                    Testes da API e do navegador
 scripts/backup.py         Backup consistente
 Dockerfile                Servidor de produção
