@@ -331,3 +331,77 @@ def test_push_subscription_and_new_order_alert(app, shop):
     assert len(sent) == before
     assert send(client, "POST", "/api/admin/push/unsubscribe", {"endpoint": sub["endpoint"]}).status_code == 200
     assert send(client, "POST", "/api/admin/push/test", {}).json["sent"] == 0
+
+
+class FakeMercadoPago:
+    def __init__(self):
+        self.payments, self.created, self.cancelled = {}, [], []
+
+    def me(self, token):
+        from payments import PaymentError
+        if token != "APP_USR-valido-123456789012345":
+            raise PaymentError("Mercado Pago recusou (401).")
+        return {"id": 1, "nickname": "LOJA_TESTE"}
+
+    def create_pix(self, token, payload, idempotency):
+        pid = 9000 + len(self.created)
+        self.created.append((token, payload, idempotency))
+        self.payments[pid] = {"id": pid, "status": "pending", "external_reference": payload["external_reference"],
+                              "transaction_amount": payload["transaction_amount"], "fee_details": [{"amount": 0.99}]}
+        return {"id": pid, "point_of_interaction": {"transaction_data": {"qr_code": "00020126PIXCOPIAECOLA" + str(pid)}}}
+
+    def get_payment(self, token, pid):
+        return self.payments[int(pid)]
+
+    def cancel(self, token, pid):
+        self.cancelled.append(int(pid))
+
+
+def test_pix_online_with_mercado_pago(app, shop):
+    client, pid = shop
+    mp = FakeMercadoPago()
+    app.extensions["mercadopago"] = mp
+    store = client.get("/api/admin/store").json["store"]
+    assert send(client, "PUT", "/api/admin/store", {**store, "payments": ["pix_online"]}).status_code == 400
+    assert send(client, "PUT", "/api/admin/payments/mercadopago", {"access_token": "APP_USR-errado-0000000000000"}).status_code == 400
+    connected = send(client, "PUT", "/api/admin/payments/mercadopago", {"access_token": "APP_USR-valido-123456789012345"})
+    assert connected.json == {"connected": True, "account": "LOJA_TESTE"}
+    store = client.get("/api/admin/store").json["store"]
+    assert store["mp_connected"] is True and "mp_token" not in store and "mp_webhook_key" not in store
+    assert send(client, "PUT", "/api/admin/store", {**store, "payments": ["pix_online", "cash"]}).status_code == 200
+    assert client.get("/api/store/minha-loja").json["store"]["payments"] == ["pix_online", "cash"]
+    # Token nunca fica legível no banco.
+    from database import connect
+    conn = connect(app.config)
+    raw = conn.execute("SELECT mp_token,mp_webhook_key FROM stores").fetchone()
+    conn.close()
+    assert "APP_USR" not in raw[0]
+    created = send(client, "POST", "/api/store/minha-loja/orders", payload(pid, payment="pix_online"), uuid.uuid4().hex)
+    assert created.status_code == 201
+    token = created.json["token"]
+    tracked = client.get("/api/track/" + token).json["order"]
+    assert tracked["pix"]["code"].startswith("00020126") and tracked["paid"] == 0
+    assert mp.created[0][1]["transaction_amount"] == created.json["total"] / 100
+    assert client.get(f"/api/track/{token}/pix.svg").mimetype == "image/svg+xml"
+    # Webhook com valor diferente não confirma; com o pagamento aprovado e o valor certo, confirma.
+    payment_id = int(mp.created[0][1]["external_reference"].split("-")[2]) and 9000
+    mp.payments[payment_id]["status"] = "approved"
+    mp.payments[payment_id]["transaction_amount"] = 1.0
+    hook = app.test_client().post(f"/webhooks/mercadopago/{raw[1]}", json={"data": {"id": str(payment_id)}})
+    assert hook.status_code == 200 and not client.get("/api/admin/orders").json["orders"][0]["paid"]
+    mp.payments[payment_id]["transaction_amount"] = created.json["total"] / 100
+    assert app.test_client().post("/webhooks/mercadopago/chave-falsa-que-nao-existe-123", json={"data": {"id": str(payment_id)}}).status_code == 200
+    assert not client.get("/api/admin/orders").json["orders"][0]["paid"]
+    app.test_client().post(f"/webhooks/mercadopago/{raw[1]}", json={"data": {"id": str(payment_id)}})
+    order = client.get("/api/admin/orders").json["orders"][0]
+    assert order["paid"] and order["payment_fee"] == 99
+    assert client.get(f"/api/track/{token}/pix.svg").status_code == 404
+    # Cancelar um Pix ainda pendente avisa o Mercado Pago.
+    second = send(client, "POST", "/api/store/minha-loja/orders", payload(pid, payment="pix_online"), uuid.uuid4().hex).json
+    oid = client.get("/api/admin/orders").json["orders"][0]["id"]
+    assert send(client, "PATCH", f"/api/admin/orders/{oid}", {"status": "cancelled"}).status_code == 200
+    assert mp.cancelled == [9001]
+    assert send(client, "POST", f"/api/track/{second['token']}/pix", {}).status_code == 409
+    # Desconectar remove o Pix automático das formas de pagamento.
+    assert send(client, "DELETE", "/api/admin/payments/mercadopago", {}).status_code == 200
+    assert client.get("/api/store/minha-loja").json["store"]["payments"] == ["cash"]

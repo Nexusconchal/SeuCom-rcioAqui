@@ -15,7 +15,7 @@ import reports
 
 ZONE = ZoneInfo('America/Sao_Paulo')
 MONTHS = ('janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro')
-PAY = {'pix': 'Pix', 'cash': 'Dinheiro', 'card': 'Cartão'}
+PAY = {'pix': 'Pix', 'pix_online': 'Pix automático', 'cash': 'Dinheiro', 'card': 'Cartão'}
 STATUS = {'new': 'Novo', 'preparing': 'Em preparo', 'ready': 'Pronto', 'delivering': 'Em entrega', 'completed': 'Concluído', 'cancelled': 'Cancelado'}
 
 
@@ -111,9 +111,9 @@ def register_business(app, helpers):
     def finance_settings():
         value = h.data()
         fees = value.get('payment_fees', {})
-        if not isinstance(fees,dict) or any(k not in ('pix','cash','card') for k in fees):
+        if not isinstance(fees,dict) or any(k not in ('pix','pix_online','cash','card') for k in fees):
             abort(400, description='Taxas inválidas.')
-        sanitized = {m:h.integer(fees,m,maximum=10000) for m in ('pix','cash','card')}
+        sanitized = {m:h.integer(fees,m,maximum=10000) for m in ('pix','pix_online','cash','card') if m in fees}
         delivery = value.get('default_delivery_cost')
         if delivery is not None:
             delivery = h.integer(value,'default_delivery_cost')
@@ -562,7 +562,7 @@ def register_business(app, helpers):
             {'title':'Vendas por dia','columns':[('Dia','text'),('Pedidos concluídos','int'),('Vendas','money')],'rows':[[d,c,t] for d,(c,t) in by_day.items()]},
             {'title':'Formas de pagamento','columns':[('Forma','text'),('Pedidos','int'),('Valor','money'),('Já recebido','money')],
              'rows':[[PAY[m],sum(o['payment']==m for o in valid),sum(o['total'] for o in valid if o['payment']==m),
-                      sum(o['total'] for o in valid if o['payment']==m and o['paid'])] for m in ('pix','cash','card')]},
+                      sum(o['total'] for o in valid if o['payment']==m and o['paid'])] for m in ('pix','pix_online','cash','card')]},
             {'title':'Produtos mais vendidos','columns':[('Produto','text'),('Quantidade','int'),('Vendas','money')],'rows':[[p['name'],p['quantity'],p['total']] for p in products]},
             {'title':'Pedidos','columns':[('Nº','int'),('Data','date'),('Cliente','text'),('Tipo','text'),('Bairro','text'),('Pagamento','text'),('Situação','text'),('Pago','text'),('Total','money')],
              'rows':[[o['number'],o['created_at'],o['customer'],'Entrega' if o['mode']=='delivery' else 'Retirada',o['zone'],PAY[o['payment']],STATUS[o['status']],

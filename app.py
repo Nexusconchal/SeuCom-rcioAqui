@@ -20,6 +20,7 @@ from database import connect, initialize
 from business import register_business
 from storage import put_image
 from notify import notify_store, vapid_keys
+from payments import MercadoPago, PaymentError, seal, unseal
 from flask import Flask, abort, g, jsonify, redirect, request, send_from_directory, session
 from markupsafe import escape
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -41,7 +42,7 @@ ROLE_ALLOWED = {
     "cashier": ROLE_BASE | {"update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
                             "reviews", "store_qrcode", "coupons", "insights"},
 }
-MANAGER_DENY = {"team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
+MANAGER_DENY = {"mp_connect", "mp_disconnect", "team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
                 "rename_key", "delete_key", "rotate_key", "test_key", "finance_settings"}
 LABELS = {"new": "Novo", "preparing": "Em preparo", "ready": "Pronto",
           "delivering": "Saiu para entrega", "completed": "Concluído", "cancelled": "Cancelado"}
@@ -118,6 +119,7 @@ def create_app(test_config=None):
         raise RuntimeError("Render exige DATABASE_URL para preservar os dados.")
     Path(app.config["UPLOAD_DIR"]).mkdir(parents=True, exist_ok=True)
     initialize(app.config)
+    app.extensions.setdefault("mercadopago", MercadoPago())
 
     def db():
         if "db" not in g:
@@ -229,7 +231,12 @@ def create_app(test_config=None):
         value["open"], value["auto_hours"] = bool(value["open"]), bool(value["auto_hours"])
         value["allow_scheduling"] = bool(value["allow_scheduling"])
         value["open_now"], value["status_text"] = store_status(store)
+        value["mp_connected"] = bool(value.pop("mp_token", ""))
+        value.pop("mp_webhook_key", None)
+        if not value["mp_connected"]:
+            value["payments"] = [p for p in value["payments"] if p != "pix_online"]
         if not private:
+            value.pop("mp_account", None)
             for key in ("owner_id", "created_at", "commission_bps", "monthly_fee", "payment_fees", "default_delivery_cost", "enabled",
                         "blocked_reason", "promo_fee", "promo_until", "promo_label"):
                 value.pop(key, None)
@@ -655,7 +662,7 @@ def create_app(test_config=None):
             scheduled = schedule(store, value)
             if not store["enabled"] or (not accepting and not scheduled and not getattr(g, 'manual_order', False)):
                 abort(409, description="A loja não está aceitando pedidos agora. " + status_text + ".")
-            if payment not in json.loads(store["payments"]):
+            if payment not in json.loads(store["payments"]) or (payment == "pix_online" and not store["mp_token"]):
                 abort(400, description="Forma de pagamento indisponível.")
             subtotal, quantities, prepared = price_items(conn, store, items)
             if subtotal < store["minimum_order"]:
@@ -697,6 +704,11 @@ def create_app(test_config=None):
             conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, "new", stamp))
             if coupon_id:
                 conn.execute("UPDATE coupons SET uses=uses+1 WHERE id=?", (coupon_id,))
+        if payment == "pix_online":
+            try:
+                create_pix(store["id"], oid)
+            except PaymentError:
+                app.logger.warning("Pix automático não gerado para o pedido %s", oid)
         if not getattr(g, "manual_order", False):
             when = (" • agendado " + datetime.fromisoformat(scheduled).astimezone(ZONE).strftime("%d/%m %H:%M")) if scheduled else ""
             notify_store(app, store["id"], {"title": f"Novo pedido #{number}", "tag": f"pedido-{oid}", "url": "/painel",
@@ -717,7 +729,128 @@ def create_app(test_config=None):
         if not order:
             abort(404, description="Pedido não encontrado.")
         store = one("SELECT * FROM stores WHERE id=?", (order["store_id"],))
-        return jsonify(order=order_dict(order, False), store=store_dict(store))
+        if order["payment"] == "pix_online" and not order["paid"] and order["pix_provider_id"] and order["status"] != "cancelled":
+            last = order["pix_checked_at"]
+            if not last or datetime.fromisoformat(last) < datetime.now(timezone.utc) - timedelta(seconds=8):
+                try:
+                    sync_pix(order, store)
+                except PaymentError:
+                    pass
+                order = one("SELECT * FROM orders WHERE id=?", (order["id"],))
+        public = order_dict(order, False)
+        if order["payment"] == "pix_online":
+            public["pix"] = {"code": order["pix_code"] if not order["paid"] else "", "expires": order["pix_expires"],
+                             "expired": bool(order["pix_expires"] and datetime.fromisoformat(order["pix_expires"]) < datetime.now(timezone.utc))}
+        return jsonify(order=public, store=store_dict(store))
+
+    def mp_token(store):
+        token = unseal(app.config["SECRET_KEY"], store["mp_token"])
+        if not token:
+            raise PaymentError("Conta do Mercado Pago não conectada.")
+        return token
+
+    def create_pix(store_id, oid):
+        store = one("SELECT * FROM stores WHERE id=?", (store_id,))
+        order = one("SELECT * FROM orders WHERE id=? AND store_id=?", (oid, store_id))
+        attempt = order["pix_attempts"] + 1
+        db().execute("UPDATE orders SET pix_attempts=? WHERE id=?", (attempt, oid))
+        expires = datetime.now(ZONE) + timedelta(minutes=30)
+        payload = {"transaction_amount": round(order["total"] / 100, 2), "payment_method_id": "pix",
+                   "description": f"Pedido #{order['number']} - {store['name']}"[:200], "external_reference": f"sca-{store_id}-{oid}",
+                   "date_of_expiration": expires.isoformat(timespec="milliseconds"),
+                   "payer": {"email": f"pedido{oid}.loja{store_id}@seucomercioaqui.com.br", "first_name": order["customer"].split(" ")[0][:40]}}
+        base = public_base()
+        if base.startswith("https://") and store["mp_webhook_key"]:
+            payload["notification_url"] = f"{base}/webhooks/mercadopago/{store['mp_webhook_key']}"
+        result = app.extensions["mercadopago"].create_pix(mp_token(store), payload, f"sca-{store_id}-{oid}-{attempt}")
+        code = ((result.get("point_of_interaction") or {}).get("transaction_data") or {}).get("qr_code", "")
+        if not result.get("id") or not code:
+            raise PaymentError("O Mercado Pago não devolveu o código Pix.")
+        db().execute("UPDATE orders SET pix_provider_id=?,pix_code=?,pix_expires=?,pix_checked_at=? WHERE id=?",
+                     (str(result["id"]), code, expires.astimezone(timezone.utc).isoformat(timespec="seconds"), now(), oid))
+
+    def sync_pix(order, store):
+        """Consulta o Mercado Pago e marca como pago só se o valor e o pedido baterem."""
+        db().execute("UPDATE orders SET pix_checked_at=? WHERE id=?", (now(), order["id"]))
+        info = app.extensions["mercadopago"].get_payment(mp_token(store), order["pix_provider_id"])
+        approved = (info.get("status") == "approved" and info.get("external_reference") == f"sca-{store['id']}-{order['id']}"
+                    and round(float(info.get("transaction_amount", 0)) * 100) == order["total"])
+        if approved and not order["paid"]:
+            fee = sum(round(float(f.get("amount", 0)) * 100) for f in info.get("fee_details") or [])
+            db().execute("UPDATE orders SET paid=1,payment_fee=?,updated_at=? WHERE id=? AND paid=0", (fee, now(), order["id"]))
+            notify_store(app, store["id"], {"title": f"Pix confirmado • pedido #{order['number']}", "tag": f"pago-{order['id']}",
+                                            "url": "/painel", "body": f"{order['customer']} pagou R$ {order['total']/100:.2f}".replace(".", ",")})
+        return info.get("status")
+
+    @app.get("/api/track/<token>/pix.svg")
+    def pix_qrcode(token):
+        import segno
+        order = one("SELECT * FROM orders WHERE tracking_hash=?", (hashlib.sha256(token.encode()).hexdigest(),))
+        if not order or order["payment"] != "pix_online" or not order["pix_code"] or order["paid"]:
+            abort(404, description="Pix não encontrado.")
+        output = io.BytesIO()
+        segno.make(order["pix_code"], error="m").save(output, kind="svg", scale=8, border=2, xmldecl=False)
+        response = app.response_class(output.getvalue(), mimetype="image/svg+xml")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/track/<token>/pix")
+    def renew_pix(token):
+        limited("pix-renew", 10)
+        order = one("SELECT * FROM orders WHERE tracking_hash=?", (hashlib.sha256(token.encode()).hexdigest(),))
+        if not order or order["payment"] != "pix_online":
+            abort(404, description="Pedido não encontrado.")
+        if order["paid"] or order["status"] == "cancelled":
+            abort(409, description="Este pedido não precisa de um novo Pix.")
+        if order["pix_attempts"] >= 5:
+            abort(409, description="Limite de tentativas atingido. Fale com a loja.")
+        if order["pix_code"] and order["pix_expires"] and datetime.fromisoformat(order["pix_expires"]) > datetime.now(timezone.utc):
+            return jsonify(ok=True)
+        try:
+            create_pix(order["store_id"], order["id"])
+        except PaymentError as error:
+            abort(502, description=str(error))
+        return jsonify(ok=True)
+
+    @app.post("/webhooks/mercadopago/<key>")
+    def mercadopago_webhook(key):
+        limited("mp-webhook", 300, 60)
+        store = one("SELECT * FROM stores WHERE mp_webhook_key=?", (key,)) if re.fullmatch(r"[A-Za-z0-9_-]{20,80}", key) else None
+        if not store:
+            return jsonify(ok=True)
+        body = request.get_json(silent=True) or {}
+        payment_id = str((body.get("data") or {}).get("id") or request.args.get("data.id") or request.args.get("id") or "")
+        if payment_id.isdigit():
+            order = one("SELECT * FROM orders WHERE store_id=? AND pix_provider_id=?", (store["id"], payment_id))
+            if order and not order["paid"]:
+                try:
+                    sync_pix(order, store)
+                except PaymentError:
+                    pass
+        return jsonify(ok=True)
+
+    @app.put("/api/admin/payments/mercadopago")
+    @owner
+    def mp_connect():
+        token = text(data(), "access_token", 20, 200)
+        if not re.fullmatch(r"(APP_USR|TEST)-[A-Za-z0-9-]+", token):
+            abort(400, description="Cole o Access Token do Mercado Pago (começa com APP_USR-).")
+        try:
+            account = app.extensions["mercadopago"].me(token)
+        except PaymentError as error:
+            abort(400, description="Token não aceito pelo Mercado Pago. Confira se copiou o Access Token de produção. " + str(error))
+        label = account.get("nickname") or account.get("email") or str(account.get("id", ""))
+        key = g.store["mp_webhook_key"] or secrets.token_urlsafe(24)
+        db().execute("UPDATE stores SET mp_token=?,mp_account=?,mp_webhook_key=? WHERE id=?",
+                     (seal(app.config["SECRET_KEY"], token), label, key, g.store["id"]))
+        return jsonify(connected=True, account=label)
+
+    @app.delete("/api/admin/payments/mercadopago")
+    @owner
+    def mp_disconnect():
+        payments = [p for p in json.loads(g.store["payments"]) if p != "pix_online"] or ["cash"]
+        db().execute("UPDATE stores SET mp_token='',mp_account='',payments=? WHERE id=?", (json.dumps(payments), g.store["id"]))
+        return jsonify(connected=False)
 
     @app.post("/api/track/<token>/review")
     def review_order(token):
@@ -874,10 +1007,12 @@ def create_app(test_config=None):
         payments = value.get("payments", [])
         if not g.store['enabled'] and value.get('open'):
             abort(403,description='Loja suspensa pela plataforma. Entre em contato com o suporte.')
-        if not isinstance(payments, list) or not payments or any(p not in ("pix", "cash", "card") for p in payments):
+        if not isinstance(payments, list) or not payments or any(p not in ("pix", "pix_online", "cash", "card") for p in payments):
             abort(400, description="Selecione ao menos uma forma de pagamento.")
+        if "pix_online" in payments and not g.store["mp_token"]:
+            abort(400, description="Conecte sua conta do Mercado Pago para usar o Pix automático.")
         pix = text(value, "pix_key", 0, 200)
-        if "pix" in payments and not pix:
+        if "pix" in payments and not pix and "pix_online" not in payments:
             abort(400, description="Informe sua chave Pix ou desative Pix.")
         hours = hours_field(value) if "hours" in value else json.loads(g.store["hours"] or "{}")
         zones = zones_field(value) if "delivery_zones" in value else json.loads(g.store["delivery_zones"] or "[]")
@@ -1084,6 +1219,11 @@ def create_app(test_config=None):
                                 (g.store['id'],item['product_id'],item['qty'],balance,'Cancelamento #'+str(order['number']),now()))
                     if order["coupon_id"]:
                         conn.execute("UPDATE coupons SET uses=CASE WHEN uses>0 THEN uses-1 ELSE 0 END WHERE id=?", (order["coupon_id"],))
+                    if order["payment"] == "pix_online" and order["pix_provider_id"] and not order["paid"]:
+                        try:
+                            app.extensions["mercadopago"].cancel(mp_token(g.store), order["pix_provider_id"])
+                        except PaymentError:
+                            pass
                 conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, status, now()))
             paid = value.get("paid", bool(order["paid"]))
             if not isinstance(paid, bool):
@@ -1176,7 +1316,7 @@ def create_app(test_config=None):
                 "completed": completed, "ticket": revenue // completed if completed else 0,
                 "active": sum(o["status"] not in ("completed", "cancelled") for o in orders),
                 "chart": chart, "expenses": expenses,
-                "payments": [{"method": m, "total": sum(o["total"] for o in orders if o["paid"] and o["payment"] == m)} for m in ("pix", "cash", "card")]}
+                "payments": [{"method": m, "total": sum(o["total"] for o in orders if o["paid"] and o["payment"] == m)} for m in ("pix", "pix_online", "cash", "card")]}
 
     @app.get("/api/admin/summary")
     @owner
