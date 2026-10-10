@@ -62,6 +62,11 @@ def test_profit_snapshots_costs_and_excludes_inventory_purchase(app,shop):
     assert send(client,'POST','/api/admin/expenses',{'description':'Compra de estoque','amount':10000,'category':'inventory'}).status_code==201
     finance=client.get('/api/admin/finance').json
     assert finance['estimated_profit']==982 and finance['cogs']==1700 and finance['margin']==25.2
+    assert all(type(finance[k]) is int for k in ('revenue','cogs','expenses','estimated_profit'))
+    assert client.get('/api/admin/customers').json['customers'][0]['spent']==3900
+    assert client.get('/api/admin/insights').json['top_products'][0]['total']==3400
+    assert app.test_cli_runner().invoke(args=['grant-platform-admin','--email','owner@example.com']).exit_code==0
+    assert client.get('/api/platform/summary').json['gross_store_sales']==3900
     assert client.get('/api/admin/summary').json['expenses_total']==10300
     public=app.test_client()
     catalog=public.get('/api/store/minha-loja').json

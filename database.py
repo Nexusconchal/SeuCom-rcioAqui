@@ -1,6 +1,7 @@
 """SQLite local e PostgreSQL para hospedagem sem disco persistente."""
 import re
 import sqlite3
+from decimal import Decimal
 from pathlib import Path
 
 import psycopg
@@ -13,6 +14,12 @@ SCHEMA_NAME = re.compile(r"[a-z][a-z0-9_]{0,62}\Z")
 
 
 class Row(dict):
+    def __init__(self, values):
+        # PostgreSQL SUM(bigint) returns numeric. Keep integer-centavo/count
+        # results numeric in JSON, matching SQLite without truncating fractions.
+        super().__init__((key, int(value) if isinstance(value, Decimal) and value == value.to_integral_value() else value)
+                         for key, value in values.items())
+
     def __getitem__(self, key):
         return tuple(self.values())[key] if isinstance(key, int) else super().__getitem__(key)
 
