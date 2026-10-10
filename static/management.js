@@ -178,6 +178,12 @@ async function monthlyView(root,draw){
   };
 }
 
+function billingBadge(x){
+  const map={exempt:['green','Grátis para sempre'],active:['green','Assinatura ativa'],paid:['green','Pago'],trial:['amber','Em teste'],pending:['amber','Cartão pendente'],paused:['red','Cartão recusado'],cancelled:['gray','Cancelada'],expired:['red','Sem assinatura']};
+  const [color,label]=map[x.billing]||['gray',x.billing||'—'];
+  const extra=x.billing==='trial'&&x.trial_until?'até '+new Date(x.trial_until.length===10?x.trial_until+'T12:00:00':x.trial_until).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):x.paid_until&&x.billing==='paid'?'até '+new Date(x.paid_until+'T12:00:00').toLocaleDateString('pt-BR'):x.sub_next_payment&&x.billing==='active'?'próxima '+new Date(x.sub_next_payment).toLocaleDateString('pt-BR'):'';
+  return '<span class="badge '+color+'">'+label+'</span>'+(extra?'<small class="table-sub">'+extra+'</small>':'');
+}
 function health(x){
   const idle=daysSince(x.last_order), missing=Object.entries({products:'produtos',phone:'WhatsApp',pix:'Pix',address:'endereço'}).filter(([k])=>!x.setup[k]).map(([,v])=>v);
   const parts=[];
@@ -198,7 +204,13 @@ async function summaryView(root,draw){
     bindPeriods(draw);$('#new-ledger').onclick=()=>ledgerDialog(s.stores,draw);return;
   }
   const blocked=s.stores.filter(x=>!x.enabled), overdue=s.stores.filter(x=>x.overdue), idle=s.stores.filter(x=>x.enabled&&(daysSince(x.last_order)??99)>=7);
-  root.innerHTML='<div class="page-toolbar">'+periods()+'<label class="search compact">'+icon('search')+'<input id="platform-search" aria-label="Buscar loja" placeholder="Loja ou e-mail"></label></div><div class="metrics four">'+metric('Lojas cadastradas',s.stores.length,(s.stores.length-blocked.length)+' ativas • '+blocked.length+' bloqueadas')+metric('Mensalidades do mês',money(s.monthly_recurring),'Valor vigente, já com promoções')+metric('Mensalidades em aberto',money(s.overdue),overdue.length+' loja(s) sem pagamento registrado neste mês')+metric('Vendas dos lojistas',money(s.gross_store_sales),'Pedidos concluídos no período')+'</div>'+
+  const bill=await api('/api/platform/billing');
+  root.innerHTML='<div class="page-toolbar">'+periods()+'<label class="search compact">'+icon('search')+'<input id="platform-search" aria-label="Buscar loja" placeholder="Loja ou e-mail"></label></div>'+
+    '<section class="panel billing-setup"><div class="section-heading"><div><h2>Assinaturas no cartão (Mercado Pago)</h2><p class="muted">Teste grátis de '+bill.trial_days+' dia'+(bill.trial_days===1?'':'s')+', depois '+(bill.free_months?bill.free_months+' mês grátis e ':'')+money(bill.price)+'/mês cobrado automaticamente. Você recebe na sua conta do Mercado Pago.</p></div><span class="badge '+(bill.configured?'green':'red')+'">'+(bill.configured?'Conectado':'Falta configurar')+'</span></div>'+
+    (bill.configured?'':'<div class="notice warning"><b>Para começar a cobrar:</b><p>No Render, em Environment, crie a variável <code>MP_PLATFORM_ACCESS_TOKEN</code> com o Access Token de produção da sua conta do Mercado Pago e salve (o site reinicia sozinho).</p></div>')+
+    '<label>Endereço para os avisos do Mercado Pago (Webhook)<div class="inline-input"><input readonly id="billing-webhook" value="'+esc(bill.webhook_url)+'"><button class="btn secondary" type="button" id="copy-webhook">'+icon('copy')+' Copiar</button></div></label><p class="muted">No Mercado Pago: Suas integrações › sua aplicação › Webhooks › cole este endereço e marque “Planos e assinaturas”. Sem isso o sistema também confere sozinho de tempos em tempos.</p><div class="row-actions"><button class="btn secondary small" id="billing-sync">Atualizar cobranças agora</button></div></section>'+
+    '<div class="metrics four">'+metric('Assinaturas pagando',bill.paying,money(bill.monthly_recurring)+' por mês')+metric('Em teste grátis',bill.trial,'Ainda sem cartão cadastrado')+metric('Pausadas por pagamento',bill.blocked,'Não recebem pedidos até assinar')+metric('Grátis para sempre',bill.exempt,'Contas isentas')+'</div>'+
+    '<div class="metrics four">'+metric('Lojas cadastradas',s.stores.length,(s.stores.length-blocked.length)+' ativas • '+blocked.length+' bloqueadas')+metric('Mensalidades do mês',money(s.monthly_recurring),'Valor vigente, já com promoções')+metric('Mensalidades em aberto',money(s.overdue),overdue.length+' loja(s) sem assinatura ativa')+metric('Vendas dos lojistas',money(s.gross_store_sales),'Pedidos concluídos no período')+'</div>'+
     '<section class="panel"><div class="section-heading"><div><h2>Lojas</h2><p class="muted">Bloquear fecha a loja, impede novos pedidos e mostra o motivo no painel do lojista. O histórico é mantido.</p></div><div class="chips">'+[['all','Todas',s.stores.length],['overdue','Em aberto',overdue.length],['idle','Paradas',idle.length],['blocked','Bloqueadas',blocked.length]].map(([k,l,n])=>'<button class="chip '+(storeFilter===k?'active':'')+'" data-filter="'+k+'">'+l+' ('+n+')</button>').join('')+'</div></div><div id="platform-stores"></div></section>';
   function stores(){
     const term=$('#platform-search').value.toLowerCase();
@@ -207,7 +219,7 @@ async function summaryView(root,draw){
       '<b>'+esc(x.name)+'</b><small class="table-sub">'+esc(x.email)+'</small><a class="text-link small-link" href="/loja/'+esc(x.slug)+'" target="_blank" rel="noopener">Ver cardápio</a>',
       x.enabled?'<span class="badge green">Ativa</span>':'<span class="badge red">Bloqueada</span>'+(x.blocked_reason?'<small class="table-sub">'+esc(x.blocked_reason)+'</small>':''),
       money(x.effective_fee)+(x.promo_active?'<small class="table-sub promo-sub">Promoção'+(x.promo_label?' “'+esc(x.promo_label)+'”':'')+' até '+new Date(x.promo_until+'T12:00:00').toLocaleDateString('pt-BR')+' • normal '+money(x.monthly_fee)+'</small>':'')+(x.commission_bps?'<small class="table-sub">+ '+(x.commission_bps/100).toLocaleString('pt-BR')+'% de comissão</small>':''),
-      x.trial?'<span class="badge green">Em teste</span><small class="table-sub">até '+new Date(x.trial_until+'T12:00:00').toLocaleDateString('pt-BR')+'</small>':!x.effective_fee?'<span class="muted">Sem mensalidade</span>':x.overdue?'<span class="badge amber">Em aberto</span><small class="table-sub">Pago '+money(x.received_month)+' de '+money(x.effective_fee)+'</small>':'<span class="badge green">Em dia</span>',
+      billingBadge(x),
       money(x.revenue)+'<small class="table-sub">'+x.orders+' pedidos</small>',
       health(x),
       '<div class="row-actions"><button class="btn secondary small" data-plan="'+x.id+'">Contrato e promoção</button>'+(x.enabled?'<button class="btn secondary small danger-text" data-block="'+x.id+'">Bloquear</button>':'<button class="btn small" data-unblock="'+x.id+'">Desbloquear</button>')+(x.overdue?'<button class="btn secondary small" data-receive="'+x.id+'">Registrar pagamento</button>':'')+'</div>'
@@ -218,6 +230,8 @@ async function summaryView(root,draw){
     $$('[data-receive]').forEach(b=>b.onclick=()=>{const x=s.stores.find(v=>v.id===Number(b.dataset.receive));ledgerDialog(s.stores,draw,{store_id:x.id,amount:x.effective_fee-x.received_month,description:'Mensalidade '+monthLong(new Date().toISOString().slice(0,7))});});
   }
   stores();$('#platform-search').oninput=stores;bindPeriods(draw);
+  $('#copy-webhook').onclick=()=>copy(bill.webhook_url);
+  $('#billing-sync').onclick=async()=>{try{const r=await api('/api/platform/billing/sync',{method:'POST'});toast(r.synced+' assinatura(s) conferida(s).');draw();}catch(e){toast(e.message);}};
   $$('[data-filter]').forEach(b=>b.onclick=()=>{storeFilter=b.dataset.filter;$$('[data-filter]').forEach(c=>c.classList.toggle('active',c===b));stores();});
 }
 
@@ -229,10 +243,10 @@ function blockDialog(s,done){
 
 function planDialog(s,done){
   const until=new Date();until.setMonth(until.getMonth()+3);
-  modal('Contrato de '+s.name,'<form id="plan-form"><p class="muted">A comissão vale para novos pedidos e incide sobre produtos após descontos. Nenhuma cobrança é executada automaticamente.</p><div class="form-grid">'+field('commission','Comissão (%)',s.commission_bps/100,'number','min="0" max="100" step=".01" required')+moneyInput('monthly','Mensalidade normal',s.monthly_fee)+'</div>'+field('trial_until','Teste grátis até (vazio = sem teste)',s.trial_until||'','date')+'<fieldset class="promo-box"><legend>Mensalidade promocional</legend><label class="check-row"><span><input name="promo" type="checkbox" '+(s.promo_fee!=null?'checked':'')+'> Cobrar um valor promocional por um tempo</span></label><div class="form-grid">'+moneyInput('promo_fee','Valor na promoção',s.promo_fee??0,false)+field('promo_until','Vale até',s.promo_until||until.toISOString().slice(0,10),'date')+'</div>'+field('promo_label','Nome da promoção (opcional)',s.promo_label||'','text','maxlength="80" placeholder="Ex.: 3 meses pela metade"')+'<p class="muted">Use R$ 0,00 para meses grátis. Depois da data, volta a valer a mensalidade normal sozinha.</p></fieldset><p class="form-error" role="alert" hidden></p><button type="submit" class="btn full">Salvar contrato</button></form>',true);
+  modal('Contrato de '+s.name,'<form id="plan-form"><p class="muted">A comissão vale para novos pedidos e incide sobre produtos após descontos. Nenhuma cobrança é executada automaticamente.</p><div class="form-grid">'+field('commission','Comissão (%)',s.commission_bps/100,'number','min="0" max="100" step=".01" required')+moneyInput('monthly','Mensalidade normal',s.monthly_fee)+'</div>'+field('trial_until','Teste grátis até (vazio = sem teste)',(s.trial_until||'').slice(0,10),'date')+'<label class="check-row"><span><input type="checkbox" name="billing_exempt" '+(s.billing_exempt?'checked':'')+'> Grátis para sempre (não paga assinatura)</span></label>'+'<fieldset class="promo-box"><legend>Mensalidade promocional</legend><label class="check-row"><span><input name="promo" type="checkbox" '+(s.promo_fee!=null?'checked':'')+'> Cobrar um valor promocional por um tempo</span></label><div class="form-grid">'+moneyInput('promo_fee','Valor na promoção',s.promo_fee??0,false)+field('promo_until','Vale até',s.promo_until||until.toISOString().slice(0,10),'date')+'</div>'+field('promo_label','Nome da promoção (opcional)',s.promo_label||'','text','maxlength="80" placeholder="Ex.: 3 meses pela metade"')+'<p class="muted">Use R$ 0,00 para meses grátis. Depois da data, volta a valer a mensalidade normal sozinha.</p></fieldset><p class="form-error" role="alert" hidden></p><button type="submit" class="btn full">Salvar contrato</button></form>',true);
   bindForm($('#plan-form'),async form=>{
     const promo=form.has('promo');
-    await api('/api/platform/stores/'+s.id,{method:'PUT',body:JSON.stringify({commission_bps:cents(form.get('commission')),monthly_fee:cents(form.get('monthly')),enabled:!!s.enabled,promo_fee:promo?cents(form.get('promo_fee')||0):null,promo_until:promo?form.get('promo_until'):'',promo_label:promo?form.get('promo_label'):'',trial_until:form.get('trial_until')||''})});
+    await api('/api/platform/stores/'+s.id,{method:'PUT',body:JSON.stringify({commission_bps:cents(form.get('commission')),monthly_fee:cents(form.get('monthly')),enabled:!!s.enabled,promo_fee:promo?cents(form.get('promo_fee')||0):null,promo_until:promo?form.get('promo_until'):'',promo_label:promo?form.get('promo_label'):'',trial_until:form.get('trial_until')||'',billing_exempt:form.has('billing_exempt')})});
     closeModal();toast('Contrato atualizado.');done();
   });
 }

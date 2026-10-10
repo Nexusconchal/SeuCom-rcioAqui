@@ -26,6 +26,7 @@ Cardápio digital e gestão de pedidos para pequenos comércios. Frontend respon
 - Alerta sonoro, notificação do navegador e contador no título quando chega pedido novo no painel.
 - Botão para o cliente enviar o resumo do pedido no WhatsApp da loja; prévia do link da loja (nome, descrição e foto) ao compartilhar no WhatsApp.
 - QR Code do cardápio para imprimir (PNG ou SVG) e ícones para instalar o painel no celular.
+- **Assinatura no cartão pelo Mercado Pago:** 1 dia grátis ao criar a conta; ao assinar, o 1º mês sai por R$ 0 e depois R$ 59,99/mês é cobrado automaticamente na conta do dono da plataforma. Sem assinatura ativa (ou pagamento manual registrado), a loja fica pausada. Configure `MP_PLATFORM_ACCESS_TOKEN` (Access Token de produção da plataforma); opcionais: `PLAN_PRICE_CENTS` (5999), `PLAN_FREE_MONTHS` (1), `TRIAL_DAYS` (1) e `BILLING_EXEMPT_EMAILS` (contas grátis, separadas por vírgula). O endereço do webhook aparece na Central do Dono.
 - Relatórios em **PDF e Excel** para o lojista (Vendas e caixa) e para o dono da plataforma (mês escolhido).
 - Integrações: renomear, trocar (rotacionar), revogar, excluir e testar chaves de API; exemplos prontos para o parceiro.
 - Pedidos em andamento com rolagem por coluna e detalhes em gaveta lateral (WhatsApp do cliente, imprimir e avançar status).

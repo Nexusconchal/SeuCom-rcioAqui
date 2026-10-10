@@ -13,6 +13,7 @@ import click
 from flask import abort, g, jsonify, request, session
 
 import reports
+from billing import OK_STATES, billing_state, extend_paid_until
 
 ZONE = ZoneInfo('America/Sao_Paulo')
 MONTHS = ('janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro')
@@ -215,7 +216,8 @@ def register_business(app, helpers):
         month=month_bounds(datetime.now(ZONE).strftime('%Y-%m'))
         today=datetime.now(ZONE).date().isoformat()
         stores=h.rows('''SELECT s.id,s.name,s.slug,s.open,s.enabled,s.blocked_reason,s.commission_bps,s.monthly_fee,
-             s.promo_fee,s.promo_until,s.promo_label,s.trial_until,s.created_at,s.phone,s.pix_key,s.address,u.email,
+             s.promo_fee,s.promo_until,s.promo_label,s.trial_until,s.billing_exempt,s.sub_status,s.paid_until,s.sub_next_payment,
+             s.created_at,s.phone,s.pix_key,s.address,u.email,
              COALESCE(o.orders,0) AS orders,COALESCE(o.revenue,0) AS revenue,COALESCE(o.commission,0) AS commission,
              COALESCE(o.missing,0) AS missing_fees,COALESCE(l.received,0) AS received,COALESCE(l.expenses,0) AS expenses,
              COALESCE(m.received,0) AS received_month,a.last_order,COALESCE(p.products,0) AS products
@@ -234,8 +236,9 @@ def register_business(app, helpers):
         for s in stores:
             s['effective_fee']=effective_fee(s,today)
             s['promo_active']=s['effective_fee']!=s['monthly_fee']
-            s['trial']=bool(s['trial_until'] and s['trial_until']>=today)
-            s['overdue']=bool(s['enabled'] and not s['trial'] and s['effective_fee'] and s['received_month']<s['effective_fee'])
+            s['billing']=billing_state(s)
+            s['trial']=s['billing']=='trial'
+            s['overdue']=bool(s['enabled'] and s['billing'] not in OK_STATES)
             s['setup']={'products':s['products']>0,'phone':bool(s.pop('phone')),'pix':bool(s.pop('pix_key')),'address':bool(s.pop('address'))}
         ledger=h.rows('SELECT l.*,s.name AS store_name FROM platform_ledger l LEFT JOIN stores s ON s.id=l.store_id WHERE l.created_at>=? ORDER BY l.id DESC LIMIT 200',(start,))
         totals=h.one("SELECT COALESCE(SUM(CASE WHEN kind='receipt' THEN amount ELSE 0 END),0) AS received,COALESCE(SUM(CASE WHEN kind='expense' THEN amount ELSE 0 END),0) AS expenses FROM platform_ledger WHERE created_at>=? AND voided_at IS NULL",(start,))
@@ -305,7 +308,8 @@ def register_business(app, helpers):
         promo_until=h.text(value,'promo_until',0,10) if 'promo_until' in value else store['promo_until']
         promo_label=h.text(value,'promo_label',0,80) if 'promo_label' in value else store['promo_label']
         trial_until=h.text(value,'trial_until',0,10) if 'trial_until' in value else store['trial_until']
-        if trial_until:
+        exempt=h.boolean(value,'billing_exempt',bool(store['billing_exempt']))
+        if trial_until and 'trial_until' in value:
             try:
                 datetime.strptime(trial_until,'%Y-%m-%d')
             except ValueError:
@@ -318,7 +322,7 @@ def register_business(app, helpers):
         if promo_fee is not None and not promo_until:
             abort(400,description='Informe até quando vale a promoção.')
         with h.transaction() as conn:
-            conn.execute('UPDATE stores SET trial_until=? WHERE id=?',(trial_until,sid))
+            conn.execute('UPDATE stores SET trial_until=?,billing_exempt=? WHERE id=?',(trial_until,exempt,sid))
             conn.execute('''UPDATE stores SET commission_bps=?,monthly_fee=?,enabled=?,promo_fee=?,promo_until=?,promo_label=?,
                 blocked_reason=CASE WHEN ?=1 THEN '' ELSE blocked_reason END WHERE id=?''',
                 (commission,fee,enabled,promo_fee,promo_until if promo_fee is not None else '',promo_label if promo_fee is not None else '',enabled,sid))
@@ -385,7 +389,7 @@ def register_business(app, helpers):
         today=datetime.now(ZONE).date().isoformat()
         return jsonify(notices=h.rows("SELECT id,title,body,kind,created_at FROM platform_notices WHERE active=1 AND (expires='' OR expires>=?) ORDER BY id DESC LIMIT 5",(today,)),
                        blocked_reason='' if g.store['enabled'] else (g.store['blocked_reason'] or 'Loja suspensa pela plataforma.'),
-                       trial_until=g.store['trial_until'] if g.store['trial_until']>=today else '')
+                       trial_until='', billing=app.extensions['billing_info'](app.extensions['billing_fresh'](g.store)))
 
     IMPORT_HEADERS = ('Categoria', 'Produto', 'Descrição', 'Preço', 'Foto (link https)', 'Estoque', 'Destaque')
 
@@ -538,8 +542,14 @@ def register_business(app, helpers):
                 if previous['payload_hash']!=digest:
                     abort(409,description='Este identificador já pertence a outro lançamento.')
                 return jsonify(id=previous['id'],duplicate=True)
+            amount=h.integer(value,'amount',minimum=1)
             lid=conn.execute('INSERT INTO platform_ledger(store_id,kind,description,amount,created_at,idempotency_key,payload_hash) VALUES(?,?,?,?,?,?,?)',
-                (sid,kind,h.text(value,'description',3,200),h.integer(value,'amount',minimum=1),h.now(),key,digest)).lastrowid
+                (sid,kind,h.text(value,'description',3,200),amount,h.now(),key,digest)).lastrowid
+            if kind=='receipt':
+                # Pagamento manual (ex.: Pix direto para a plataforma) também libera a loja por um mês.
+                paying=conn.execute('SELECT * FROM stores WHERE id=?',(sid,)).fetchone()
+                if amount>=effective_fee(paying,datetime.now(ZONE).date().isoformat()):
+                    conn.execute('UPDATE stores SET paid_until=? WHERE id=?',(extend_paid_until(paying['paid_until'],datetime.now(ZONE).date()),sid))
             audit('ledger.'+kind,str(lid),sid)
         return jsonify(id=lid),201
 

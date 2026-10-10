@@ -21,6 +21,7 @@ from business import register_business
 from storage import put_image
 from notify import notify_store, vapid_keys
 from payments import MercadoPago, PaymentError, seal, unseal
+from billing import apply_exemptions, billing_ok, billing_state, first_billing_migration, register_billing
 from flask import Flask, abort, g, jsonify, redirect, request, send_from_directory, session
 from markupsafe import escape
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -42,7 +43,7 @@ ROLE_ALLOWED = {
     "cashier": ROLE_BASE | {"update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
                             "reviews", "store_qrcode", "coupons", "insights"},
 }
-MANAGER_DENY = {"mp_connect", "mp_disconnect", "team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
+MANAGER_DENY = {"mp_connect", "mp_disconnect", "billing_subscribe", "billing_cancel", "team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
                 "rename_key", "delete_key", "rotate_key", "test_key", "finance_settings"}
 LABELS = {"new": "Novo", "preparing": "Em preparo", "ready": "Pronto",
           "delivering": "Saiu para entrega", "completed": "Concluído", "cancelled": "Cancelado"}
@@ -71,7 +72,8 @@ def minutes(value):
 
 def store_status(store, moment=None):
     """Situação da loja para o cliente: (aceita pedidos, texto curto)."""
-    if not store["enabled"]:
+    # A assinatura vale pelo momento atual (a loja pode assinar antes do horário agendado).
+    if not store["enabled"] or not billing_ok(store):
         return False, "Indisponível no momento"
     if not store["open"]:
         return False, "Fechado no momento"
@@ -107,7 +109,9 @@ def create_app(test_config=None):
         SECRET_KEY=key or secrets.token_hex(32), DATABASE_PATH=os.getenv("DATABASE_PATH", str(BASE / "instance" / "seucomercio.sqlite3")),
         DATABASE_URL=os.getenv("DATABASE_URL", ""), DATABASE_SCHEMA=os.getenv("DATABASE_SCHEMA", "seucomercio"),
         STORAGE_UPLOAD_URL=os.getenv("STORAGE_UPLOAD_URL", ""), STORAGE_UPLOAD_TOKEN=os.getenv("STORAGE_UPLOAD_TOKEN", ""),
-        STORAGE_PUBLIC_URL=os.getenv("STORAGE_PUBLIC_URL", ""), TRIAL_DAYS=int(os.getenv("TRIAL_DAYS", "14")),
+        STORAGE_PUBLIC_URL=os.getenv("STORAGE_PUBLIC_URL", ""), TRIAL_DAYS=int(os.getenv("TRIAL_DAYS", "1")),
+        MP_PLATFORM_ACCESS_TOKEN=os.getenv("MP_PLATFORM_ACCESS_TOKEN", ""), PLAN_PRICE=int(os.getenv("PLAN_PRICE_CENTS", "5999")),
+        PLAN_FREE_MONTHS=int(os.getenv("PLAN_FREE_MONTHS", "1")), BILLING_EXEMPT_EMAILS=os.getenv("BILLING_EXEMPT_EMAILS", ""),
         VAPID_PRIVATE_KEY=os.getenv("VAPID_PRIVATE_KEY", "").replace("\\n", "\n"), PUSH_CONTACT=os.getenv("PUSH_CONTACT", "suporte@seucomercioaqui.com.br"),
         UPLOAD_DIR=os.getenv("UPLOAD_DIR", str(BASE / "instance" / "uploads")),
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=production,
@@ -129,6 +133,13 @@ def create_app(test_config=None):
     Path(app.config["UPLOAD_DIR"]).mkdir(parents=True, exist_ok=True)
     initialize(app.config)
     app.extensions.setdefault("mercadopago", MercadoPago())
+    with app.app_context():
+        startup = connect(app.config)
+        try:
+            first_billing_migration(startup, app.config)
+            apply_exemptions(startup, app.config)
+        finally:
+            startup.close()
 
     def db():
         if "db" not in g:
@@ -241,11 +252,16 @@ def create_app(test_config=None):
         value["allow_scheduling"], value["loyalty_enabled"] = bool(value["allow_scheduling"]), bool(value["loyalty_enabled"])
         value["open_now"], value["status_text"] = store_status(store)
         value["mp_connected"] = bool(value.pop("mp_token", ""))
+        value["billing_state"] = billing_state(store)
+        for key in ("sub_id", "sub_checked_at"):
+            value.pop(key, None)
         value.pop("mp_webhook_key", None)
         if not value["mp_connected"]:
             value["payments"] = [p for p in value["payments"] if p != "pix_online"]
         if not private:
             value.pop("mp_account", None)
+            for key in ("billing_exempt", "sub_status", "sub_payer_email", "sub_next_payment", "sub_used_trial", "paid_until", "trial_until", "billing_state"):
+                value.pop(key, None)
             for key in ("owner_id", "created_at", "commission_bps", "monthly_fee", "payment_fees", "default_delivery_cost", "enabled",
                         "blocked_reason", "promo_fee", "promo_until", "promo_label"):
                 value.pop(key, None)
@@ -544,12 +560,13 @@ def create_app(test_config=None):
         if value.get("accept_terms") is not True:
             abort(400, description="Para criar a loja, aceite os Termos de uso e a Política de privacidade.")
         hashed = generate_password_hash(password)
-        trial = (datetime.now(ZONE).date() + timedelta(days=app.config["TRIAL_DAYS"])).isoformat() if app.config["TRIAL_DAYS"] > 0 else ""
+        trial = (datetime.now(timezone.utc) + timedelta(days=app.config["TRIAL_DAYS"])).isoformat(timespec="seconds") if app.config["TRIAL_DAYS"] > 0 else ""
         with transaction() as conn:
             uid = conn.execute("INSERT INTO users(name,email,password_hash,created_at,terms_accepted_at) VALUES(?,?,?,?,?)",
                                (name, email, hashed, now(), now())).lastrowid
-            sid = conn.execute("INSERT INTO stores(owner_id,name,slug,created_at,trial_until) VALUES(?,?,?,?,?)",
-                               (uid, store_name, slug, now(), trial)).lastrowid
+            sid = conn.execute("INSERT INTO stores(owner_id,name,slug,created_at,trial_until,monthly_fee) VALUES(?,?,?,?,?,?)",
+                               (uid, store_name, slug, now(), trial, app.config["PLAN_PRICE"])).lastrowid
+            apply_exemptions(conn, app.config)
             conn.execute("INSERT INTO categories(store_id,name) VALUES(?,?)", (sid, "Destaques"))
         return establish(one("SELECT * FROM users WHERE id=?", (uid,))), 201
 
@@ -1418,6 +1435,13 @@ def create_app(test_config=None):
 
     register_business(app, dict(db=db,one=one,rows=rows,owner=owner,owned=owned,data=data,text=text,integer=integer,
         boolean=boolean,transaction=transaction,limited=limited,order_dict=order_dict,now=now))
+
+    def audit_entry(action, detail="", sid=None):
+        db().execute("INSERT INTO audit_log(actor_id,store_id,action,detail,created_at) VALUES(?,?,?,?,?)",
+                     (g.user["id"] if getattr(g, "user", None) else None, sid, action, detail, now()))
+
+    register_billing(app, dict(db=db, one=one, rows=rows, owner=owner, data=data, text=text, transaction=transaction,
+                               limited=limited, now=now, public_base=public_base, audit=audit_entry))
 
     @app.cli.command("seed-demo")
     @click.option("--email", prompt=True)

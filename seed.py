@@ -14,11 +14,13 @@ def seed(conn, email, password):
         uid = conn.execute("INSERT INTO users(name,email,password_hash,created_at) VALUES(?,?,?,?)",
                            ("Lojista de exemplo", email.strip().lower(), generate_password_hash(password), stamp)).lastrowid
         burger = "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=1200&auto=format&fit=crop&q=85"
-        sid = conn.execute("""INSERT INTO stores(owner_id,name,slug,description,phone,address,logo,banner,open,pix_key,created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (uid, "Bistrô da Vila", "bistro-da-vila",
+        # A demonstração fica liberada por 30 dias, sem assinatura.
+        trial = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(timespec="seconds")
+        sid = conn.execute("""INSERT INTO stores(owner_id,name,slug,description,phone,address,logo,banner,open,pix_key,created_at,trial_until)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (uid, "Bistrô da Vila", "bistro-da-vila",
             "Comida de verdade, feita com carinho. Seu favorito está por aqui.", "",
             "Endereço de exemplo — configure o endereço real da sua loja", "", burger, 1,
-            "CHAVE-DE-EXEMPLO-NAO-PAGAR", stamp)).lastrowid
+            "CHAVE-DE-EXEMPLO-NAO-PAGAR", stamp, trial)).lastrowid
         categories = {}
         for i, name in enumerate(("Lanches", "Bowls", "Bebidas")):
             categories[name] = conn.execute("INSERT INTO categories(store_id,name,position) VALUES(?,?,?)", (sid, name, i)).lastrowid

@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from app import ZONE, store_status
 from tests.test_api import app, shop, send, register, payload
@@ -413,7 +413,8 @@ def test_terms_trial_loyalty_and_first_order_coupon(app, shop):
     body = {"name": "Nova", "email": "nova@example.com", "password": "uma-senha-segura", "store_name": "Nova", "slug": "nova-loja"}
     assert send(fresh, "POST", "/api/auth/register", body).status_code == 400
     assert send(fresh, "POST", "/api/auth/register", {**body, "accept_terms": True}).status_code == 201
-    assert fresh.get("/api/admin/notices").json["trial_until"] > datetime.now(ZONE).date().isoformat()
+    billing = fresh.get("/api/admin/notices").json["billing"]
+    assert billing["state"] == "trial" and billing["trial_until"] > datetime.now(timezone.utc).isoformat()
     app.test_cli_runner().invoke(args=["grant-platform-admin", "--email", "owner@example.com"])
     nova = next(s for s in client.get("/api/platform/summary").json["stores"] if s["slug"] == "nova-loja")
     assert nova["trial"] and not nova["overdue"]
@@ -465,3 +466,98 @@ def test_lgpd_anonymize_and_spreadsheet_import(app, shop):
     xlsx = client.post("/api/admin/products/import", data={"file": (_io.BytesIO(template.data), "modelo.xlsx")},
                        headers={"X-CSRF-Token": client.get("/api/session").json["csrf"]}, content_type="multipart/form-data")
     assert xlsx.json["created"] == 3
+
+
+class FakeSubscriptions(FakeMercadoPago):
+    def __init__(self):
+        super().__init__()
+        self.preapprovals, self.charges = {}, {}
+
+    def create_preapproval(self, token, payload):
+        pid = "pre%04d" % (len(self.preapprovals) + 1)
+        self.preapprovals[pid] = {"id": pid, "status": "pending", "external_reference": payload["external_reference"], "payload": payload}
+        self.charges[pid] = []
+        return {"id": pid, "status": "pending", "init_point": "https://www.mercadopago.com.br/subscriptions/checkout?preapproval_id=" + pid}
+
+    def get_preapproval(self, token, pid):
+        return {k: v for k, v in self.preapprovals[pid].items() if k != "payload"}
+
+    def update_preapproval(self, token, pid, body):
+        self.preapprovals[pid].update(body)
+        return self.preapprovals[pid]
+
+    def authorized_payments(self, token, pid):
+        return {"results": self.charges[pid]}
+
+    def authorized_payment(self, token, payment_id):
+        return next({"preapproval_id": p} for p, items in self.charges.items() for c in items if c["id"] == int(payment_id))
+
+
+def expire_trial(app, slug="minha-loja"):
+    from database import connect
+    conn = connect(app.config)
+    conn.execute("UPDATE stores SET trial_until=? WHERE slug=?", ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(), slug))
+    conn.close()
+
+
+def test_subscription_trial_free_month_and_monthly_charge(app, shop):
+    client, pid = shop
+    mp = FakeSubscriptions()
+    app.extensions["mercadopago"] = mp
+    # Sem token da plataforma não dá para assinar.
+    assert send(client, "POST", "/api/admin/billing/subscribe", {"payer_email": "dona@example.com"}).status_code == 503
+    app.config["MP_PLATFORM_ACCESS_TOKEN"] = "APP_USR-plataforma"
+    info = client.get("/api/admin/billing").json
+    assert info["state"] == "trial" and info["price"] == 5999 and info["free_months"] == 1
+    # Acabou o dia grátis: a loja para de receber pedidos.
+    expire_trial(app)
+    assert client.get("/api/admin/billing").json["state"] == "expired"
+    assert client.get("/api/store/minha-loja").json["store"]["open_now"] is False
+    assert send(client, "POST", "/api/store/minha-loja/orders", payload(pid), uuid.uuid4().hex).status_code == 409
+    started = send(client, "POST", "/api/admin/billing/subscribe", {"payer_email": "dona@example.com"})
+    assert started.status_code == 200 and "preapproval_id=pre0001" in started.json["init_point"]
+    recurring = mp.preapprovals["pre0001"]["payload"]["auto_recurring"]
+    assert recurring["transaction_amount"] == 59.99 and recurring["free_trial"] == {"frequency": 1, "frequency_type": "months"}
+    # Cartão cadastrado: assinatura autorizada (1º mês grátis) e a loja volta a vender.
+    mp.preapprovals["pre0001"]["status"] = "authorized"
+    secret = client.get("/api/platform/billing")
+    app.test_cli_runner().invoke(args=["grant-platform-admin", "--email", "owner@example.com"])
+    hook_url = client.get("/api/platform/billing").json["webhook_url"]
+    assert app.test_client().post(hook_url.split("localhost")[-1], json={"type": "subscription_preapproval", "data": {"id": "pre0001"}}).status_code == 200
+    assert client.get("/api/admin/billing").json["state"] == "active"
+    assert send(client, "POST", "/api/store/minha-loja/orders", payload(pid), uuid.uuid4().hex).status_code == 201
+    # Cobrança mensal aprovada vira recebimento na Central do Dono, uma vez só.
+    mp.charges["pre0001"].append({"id": 777, "transaction_amount": 59.99, "debit_date": datetime.now(ZONE).date().isoformat(), "payment": {"id": 555, "status": "approved"}})
+    for _ in range(2):
+        app.test_client().post(hook_url.split("localhost")[-1], json={"type": "subscription_authorized_payment", "data": {"id": "777"}})
+        send(client, "POST", "/api/admin/billing/sync", {})
+    report = client.get("/api/platform/summary").json
+    assert report["received"] == 5999 and len([l for l in report["ledger"] if l["kind"] == "receipt"]) == 1
+    # Cancelou: continua liberada até o fim do mês pago e o próximo assinar não ganha outro mês grátis.
+    assert send(client, "POST", "/api/admin/billing/cancel", {}).json["state"] == "paid"
+    again = send(client, "POST", "/api/admin/billing/subscribe", {"payer_email": "dona@example.com"})
+    assert "free_trial" not in mp.preapprovals["pre0002"]["payload"]["auto_recurring"]
+    # Webhook com segredo errado é ignorado.
+    assert app.test_client().post("/webhooks/mercadopago-assinaturas/errado", json={"data": {"id": "pre0001"}}).status_code == 200
+    overview = client.get("/api/platform/billing").json
+    assert overview["paying"] == 1 and overview["monthly_recurring"] == 5999
+
+
+def test_exempt_account_never_pays(app):
+    import hashlib
+    from billing import EXEMPT_HASHES, billing_state
+    EXEMPT_HASHES.add(hashlib.sha256(b"gratis@example.com").hexdigest())
+    try:
+        client = app.test_client()
+        assert register(client, "loja-gratis", "Gratis@Example.com").status_code == 201
+        expire_trial(app, "loja-gratis")
+        assert client.get("/api/admin/billing").json["state"] == "exempt"
+        assert send(client, "POST", "/api/admin/billing/subscribe", {"payer_email": "gratis@example.com"}).status_code == 409
+        app.config["BILLING_EXEMPT_EMAILS"] = ""
+        other = app.test_client()
+        assert register(other, "loja-paga", "paga@example.com").status_code == 201
+        expire_trial(app, "loja-paga")
+        assert other.get("/api/admin/billing").json["state"] == "expired"
+    finally:
+        EXEMPT_HASHES.discard(hashlib.sha256(b"gratis@example.com").hexdigest())
+    assert billing_state({"billing_exempt": 0, "sub_status": "", "paid_until": "", "trial_until": ""}) == "expired"

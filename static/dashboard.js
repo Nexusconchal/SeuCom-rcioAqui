@@ -13,10 +13,11 @@ export async function renderDashboard(){
   $('#sound-toggle').onclick=()=>{try{localStorage.setItem('sca.sound',soundOn()?'0':'1');}catch{}unlockAudio();updateSoundButton();
     if(soundOn()){chime();if('Notification' in window&&Notification.permission==='default')Notification.requestPermission().catch(()=>{});}
     toast(soundOn()?'Som de novos pedidos ligado.':'Som de novos pedidos desligado.');};
-  platformNotices();watchOrders();
+  if(new URLSearchParams(location.search).has('assinatura')){history.replaceState(null,'','/painel');refreshBilling();}else platformNotices();
+  watchOrders();
   await switchTab(role==='kitchen'?'kitchen':'overview');
 }
-function updateStoreButton(){const b=$('#store-toggle');b.className='badge '+(store.open_now?'green':store.open?'amber':'gray');b.innerHTML='<i></i>'+(!store.open?'Loja fechada':store.open_now?'Loja aberta':'Aberta • fora do horário');b.title=store.open?'Clique para fechar a loja agora':'Clique para abrir a loja';}
+function updateStoreButton(){const b=$('#store-toggle');const paused=store.billing_state&&!['exempt','active','paid','trial'].includes(store.billing_state);b.className='badge '+(store.open_now?'green':store.open&&!paused?'amber':'gray');b.innerHTML='<i></i>'+(paused?'Loja pausada (assinatura)':!store.open?'Loja fechada':store.open_now?'Loja aberta':'Aberta • fora do horário');b.title=store.open?'Clique para fechar a loja agora':'Clique para abrir a loja';}
 const days=['Segunda','Terça','Quarta','Quinta','Sexta','Sábado','Domingo'];
 let seen=null,watchTimer,audio;
 const soundOn=()=>{try{return localStorage.getItem('sca.sound')!=='0';}catch{return true;}};
@@ -98,9 +99,42 @@ async function bindAlertsPanel(){
 }
 async function platformNotices(){
   try{const r=await api('/api/admin/notices');
-    $('#platform-notices').innerHTML=(r.trial_until?'<div class="platform-notice promo"><b>Teste grátis até '+new Date(r.trial_until+'T12:00:00').toLocaleDateString('pt-BR')+'</b><p>Aproveite para cadastrar o cardápio e testar com clientes. Fale com o suporte para escolher o seu plano.</p></div>':'')+(r.blocked_reason?'<div class="platform-notice alert"><b>Sua loja está bloqueada pela plataforma.</b><p>'+esc(r.blocked_reason)+' Fale com o suporte do SeuComércioAqui para regularizar.</p></div>':'')+
+    billing=r.billing;
+    $('#platform-notices').innerHTML=billingBanner(r.billing)+(r.blocked_reason?'<div class="platform-notice alert"><b>Sua loja está bloqueada pela plataforma.</b><p>'+esc(r.blocked_reason)+' Fale com o suporte do SeuComércioAqui para regularizar.</p></div>':'')+
       r.notices.map(n=>'<div class="platform-notice '+esc(n.kind)+'"><b>'+esc(n.title)+'</b><p>'+esc(n.body)+'</p></div>').join('');
+    $$('[data-subscribe]').forEach(b=>b.onclick=subscribeDialog);
+    if($('#billing-refresh'))$('#billing-refresh').onclick=refreshBilling;
   }catch{}
+}
+let billing=null;
+const planText=b=>(b.free_months?'1º mês por R$ 0,00 e depois ':'')+money(b.price)+' por mês, cobrado no cartão pelo Mercado Pago';
+function billingBanner(b){
+  if(!b||['exempt','active','paid'].includes(b.state))return '';
+  const owner=role==='owner';
+  const button=label=>owner?'<button class="btn small" data-subscribe>'+label+'</button>':'<p class="muted">Peça ao dono da loja para assinar.</p>';
+  if(b.state==='trial')return '<div class="platform-notice promo billing-banner"><div><b>Teste grátis até '+new Date(b.trial_until).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</b><p>Assine já para não parar de vender: '+planText(b)+'.</p></div>'+button('Assinar agora')+'</div>';
+  if(b.state==='pending')return '<div class="platform-notice alert billing-banner"><div><b>Falta concluir a assinatura no Mercado Pago.</b><p>'+(owner?'Se você já cadastrou o cartão, clique em “Já assinei”.':'')+'</p></div>'+(owner?'<div class="row-actions"><button class="btn small" data-subscribe>Continuar assinatura</button><button class="btn secondary small" id="billing-refresh">Já assinei</button></div>':'')+'</div>';
+  const why={paused:'O pagamento do cartão não foi aprovado.',cancelled:'A assinatura foi cancelada.',expired:'O período grátis terminou.'}[b.state]||'A assinatura não está ativa.';
+  return '<div class="platform-notice alert billing-banner"><div><b>Sua loja está pausada e não recebe pedidos.</b><p>'+why+' Assine para voltar a vender: '+planText(b)+'.</p></div>'+button('Assinar e voltar a vender')+'</div>';
+}
+async function refreshBilling(){try{billing=await api('/api/admin/billing/sync',{method:'POST'});toast(['active','paid'].includes(billing.state)?'Assinatura ativa. Boas vendas!':'Ainda não recebemos a confirmação do Mercado Pago. Tente em alguns minutos.');store=(await api('/api/admin/store')).store;updateStoreButton();platformNotices();if(tab==='settings')settingsPage();}catch(e){toast(e.message);}}
+function subscribeDialog(){
+  const b=billing||{price:5999,free_months:1};
+  modal('Assinar o SeuComércioAqui','<form id="subscribe-form"><div class="plan-card"><b>Plano completo</b><strong>'+money(b.price)+'<small>/mês</small></strong>'+(b.free_months?'<span class="badge green">1º mês grátis</span>':'')+'<p class="muted">Cardápio, pedidos, equipe, relatórios, Pix automático e avisos. Sem comissão por pedido. Cancele quando quiser.</p></div>'+field('payer_email','E-mail da sua conta do Mercado Pago',b.payer_email||auth.user.email,'email','required maxlength="254"')+'<p class="muted">Você vai para o site do Mercado Pago cadastrar o cartão. Os dados do cartão ficam só com o Mercado Pago. '+(b.free_months?'Hoje não é cobrado nada; ':'')+'a cobrança de '+money(b.price)+' acontece todo mês automaticamente.</p><p class="form-error" role="alert" hidden></p><button class="btn full" type="submit">Ir para o Mercado Pago '+icon('arrow')+'</button></form>');
+  bindForm($('#subscribe-form'),async form=>{const r=await api('/api/admin/billing/subscribe',{method:'POST',body:JSON.stringify({payer_email:form.get('payer_email')})});location.href=r.init_point;});
+}
+function planPanel(){
+  if(role!=='owner'||!billing)return '';
+  const b=billing,labels={exempt:['green','Uso gratuito'],active:['green','Assinatura ativa'],paid:['green','Pago'],trial:['amber','Em teste grátis'],pending:['amber','Aguardando o cartão'],paused:['red','Pagamento não aprovado'],cancelled:['gray','Cancelada'],expired:['red','Sem assinatura']};
+  const [color,label]=labels[b.state]||['gray',b.state];
+  return '<section class="panel"><div class="section-heading"><div><h2>Seu plano</h2><p class="muted">'+(b.state==='exempt'?'Esta loja tem uso gratuito permanente.':planText(b)+'.')+'</p></div><span class="badge '+color+'">'+label+'</span></div>'+
+    (b.next_payment?'<div class="payment-line"><span>Próxima cobrança</span><b>'+new Date(b.next_payment).toLocaleDateString('pt-BR')+'</b></div>':'')+(b.paid_until?'<div class="payment-line"><span>Liberada até</span><b>'+new Date(b.paid_until+'T12:00:00').toLocaleDateString('pt-BR')+'</b></div>':'')+
+    (b.state==='exempt'?'':'<div class="row-actions">'+(['active'].includes(b.state)?'<a class="btn secondary small" href="'+b.manage_url+'" target="_blank" rel="noopener">Trocar cartão no Mercado Pago</a><button type="button" class="btn secondary small danger-text" id="cancel-plan">Cancelar assinatura</button>':'<button type="button" class="btn small" data-subscribe>Assinar</button>')+'<button type="button" class="btn secondary small" id="billing-refresh-2">Atualizar situação</button></div>')+'</section>';
+}
+function bindPlanPanel(){
+  $$('[data-subscribe]').forEach(b=>b.onclick=subscribeDialog);
+  if($('#billing-refresh-2'))$('#billing-refresh-2').onclick=refreshBilling;
+  if($('#cancel-plan'))$('#cancel-plan').onclick=()=>{modal('Cancelar a assinatura?','<p>Não haverá novas cobranças. A loja continua funcionando até o fim do período já pago e depois para de receber pedidos.</p><button id="confirm-cancel-plan" class="btn danger full">Cancelar assinatura</button>');$('#confirm-cancel-plan').onclick=async()=>{try{billing=await api('/api/admin/billing/cancel',{method:'POST'});closeModal();toast('Assinatura cancelada.');settingsPage();platformNotices();}catch(e){toast(e.message);}};};
 }
 async function switchTab(next,quiet=false){
   clearTimeout(timer);$('#new-manual-order')?.remove();tab=next;$('#dashboard-content').dataset.management=next;const v=++generation;
@@ -311,7 +345,7 @@ function settingsPage(){
   if($('#mp-connect'))$('#mp-connect').onclick=async()=>{try{const r=await api('/api/admin/payments/mercadopago',{method:'PUT',body:JSON.stringify({access_token:$('#mp-token').value.trim()})});toast('Mercado Pago conectado: '+r.account);store=(await api('/api/admin/store')).store;settingsPage();}catch(e){toast(e.message);}};
   if($('#mp-disconnect'))$('#mp-disconnect').onclick=async()=>{try{await api('/api/admin/payments/mercadopago',{method:'DELETE'});store=(await api('/api/admin/store')).store;toast('Mercado Pago desconectado.');settingsPage();}catch(e){toast(e.message);}};
   bindUploads($('#store-form'));$('#settings-copy').onclick=()=>copy(location.origin+'/loja/'+store.slug);$('#change-password').onclick=passwordDialog;
-  $('#dashboard-content').insertAdjacentHTML('afterbegin',alertsPanel());bindAlertsPanel();
+  $('#dashboard-content').insertAdjacentHTML('afterbegin',planPanel()+alertsPanel());bindAlertsPanel();bindPlanPanel();
   if(role==='owner'){$('#dashboard-content').insertAdjacentHTML('afterbegin','<section class="panel" id="team-panel"><div class="loading small-loading">Carregando equipe…</div></section>');teamPanel();}
   const bindZones=()=>$$('[data-remove-zone]').forEach(b=>b.onclick=()=>b.closest('.zone-row').remove());bindZones();
   $('#add-zone').onclick=()=>{$('#zone-rows').insertAdjacentHTML('beforeend',zoneRow({name:'',fee:store.delivery_fee}));bindZones();$('#zone-rows .zone-row:last-child input').focus();};

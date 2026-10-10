@@ -66,3 +66,19 @@ class MercadoPago:
 
     def cancel(self, token, payment_id):
         return self._call("PUT", "/v1/payments/" + str(int(payment_id)), token, {"status": "cancelled"})
+
+    # Assinatura mensal da plataforma (conta do dono do SeuComércioAqui).
+    def create_preapproval(self, token, payload):
+        return self._call("POST", "/preapproval", token, payload)
+
+    def get_preapproval(self, token, preapproval_id):
+        return self._call("GET", "/preapproval/" + urllib.request.quote(str(preapproval_id), safe=""), token)
+
+    def update_preapproval(self, token, preapproval_id, body):
+        return self._call("PUT", "/preapproval/" + urllib.request.quote(str(preapproval_id), safe=""), token, body)
+
+    def authorized_payments(self, token, preapproval_id):
+        return self._call("GET", "/authorized_payments/search?preapproval_id=" + urllib.request.quote(str(preapproval_id), safe=""), token)
+
+    def authorized_payment(self, token, payment_id):
+        return self._call("GET", "/authorized_payments/" + str(int(payment_id)), token)
