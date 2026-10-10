@@ -44,7 +44,7 @@ ROLE_ALLOWED = {
     "cashier": ROLE_BASE | {"motoja_send", "update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
                             "reviews", "store_qrcode", "coupons", "insights"},
 }
-MANAGER_DENY = {"motoja_connect", "motoja_disconnect", "whatsapp_connect", "whatsapp_disconnect", "mp_connect", "mp_disconnect", "billing_subscribe", "billing_cancel", "team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
+MANAGER_DENY = {"motoja_connect", "motoja_disconnect", "whatsapp_connect", "whatsapp_disconnect", "mp_connect", "mp_disconnect", "billing_subscribe", "billing_cancel", "billing_pix", "team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
                 "rename_key", "delete_key", "rotate_key", "test_key", "finance_settings"}
 LABELS = {"new": "Novo", "preparing": "Em preparo", "ready": "Pronto",
           "delivering": "Saiu para entrega", "completed": "Concluído", "cancelled": "Cancelado"}

@@ -675,3 +675,37 @@ def test_whatsapp_automatic_messages(app, shop):
     make_order(client, pid)
     assert len(evo.messages) == count
     assert send(client, "POST", "/api/admin/whatsapp/test", {"phone": "11977776666"}).status_code == 200
+
+
+def test_monthly_pix_and_owner_one_real_test(app, shop):
+    client, pid = shop
+    mp = FakeSubscriptions()
+    app.extensions["mercadopago"] = mp
+    app.config["MP_PLATFORM_ACCESS_TOKEN"] = "APP_USR-plataforma"
+    expire_trial(app)
+    pix = send(client, "POST", "/api/admin/billing/pix", {}).json
+    assert pix["code"].startswith("00020126") and pix["amount"] == 5999
+    assert send(client, "POST", "/api/admin/billing/pix", {}).json["code"] == pix["code"]  # mesmo Pix enquanto vale
+    assert client.get("/api/admin/billing/pix.svg").mimetype == "image/svg+xml"
+    payment = mp.payments[9000]
+    assert payment["transaction_amount"] == 59.99
+    assert send(client, "POST", "/api/admin/billing/pix/check", {}).json["paid"] is False
+    payment["status"] = "approved"
+    # Webhook do Mercado Pago confirma e libera a loja por um mês, lançando o recebimento uma vez.
+    app.test_cli_runner().invoke(args=["grant-platform-admin", "--email", "owner@example.com"])
+    hook = client.get("/api/platform/billing").json["webhook_url"].split("localhost")[-1]
+    app.test_client().post(hook, json={"type": "payment", "data": {"id": "9000"}})
+    billing = client.get("/api/admin/billing").json
+    assert billing["state"] == "paid" and billing["paid_until"] > datetime.now(ZONE).date().isoformat()
+    assert client.get("/api/platform/summary").json["received"] == 5999
+    assert send(client, "POST", "/api/store/minha-loja/orders", payload(pid), uuid.uuid4().hex).status_code == 201
+    # Teste de R$ 1,00 do dono.
+    other = app.test_client()
+    assert register(other, "outra", "x@example.com").status_code == 201
+    assert send(other, "POST", "/api/platform/billing/test-pix", {}).status_code == 403
+    test = send(client, "POST", "/api/platform/billing/test-pix", {}).json
+    assert mp.payments[int(test["id"])]["transaction_amount"] == 1.0
+    assert client.get("/api/platform/billing/test-pix.svg").status_code == 200
+    assert send(client, "POST", "/api/platform/billing/test-pix/check", {}).json["approved"] is False
+    mp.payments[int(test["id"])]["status"] = "approved"
+    assert send(client, "POST", "/api/platform/billing/test-pix/check", {}).json["approved"] is True

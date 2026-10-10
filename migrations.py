@@ -15,6 +15,7 @@ ADDITIONS = {
                'sub_payer_email': "TEXT NOT NULL DEFAULT ''", 'sub_next_payment': "TEXT NOT NULL DEFAULT ''",
                'sub_checked_at': "TEXT NOT NULL DEFAULT ''", 'sub_used_trial': 'INTEGER NOT NULL DEFAULT 0', 'paid_until': "TEXT NOT NULL DEFAULT ''",
                'motoja_url': "TEXT NOT NULL DEFAULT ''", 'motoja_key': "TEXT NOT NULL DEFAULT ''", 'motoja_auto': 'INTEGER NOT NULL DEFAULT 0',
+               'sub_pix_id': "TEXT NOT NULL DEFAULT ''", 'sub_pix_code': "TEXT NOT NULL DEFAULT ''", 'sub_pix_expires': "TEXT NOT NULL DEFAULT ''",
                'motoja_trigger': "TEXT NOT NULL DEFAULT 'preparing'", 'wa_instance': "TEXT NOT NULL DEFAULT ''", 'wa_enabled': 'INTEGER NOT NULL DEFAULT 0'},
     'products': {'unit_cost': 'INTEGER', 'low_stock': 'INTEGER NOT NULL DEFAULT 5', 'option_groups': "TEXT NOT NULL DEFAULT '[]'"},
     'orders': {'delivery_cost': 'INTEGER', 'payment_fee': 'INTEGER', 'platform_fee': 'INTEGER NOT NULL DEFAULT 0',

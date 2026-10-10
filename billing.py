@@ -7,8 +7,10 @@ até uma data. Contas isentas são definidas por hash do e-mail (nada de e-mail 
 pela variável BILLING_EXEMPT_EMAILS ou pelo dono da plataforma na Central.
 """
 import hashlib
+import io
 import json
 import re
+import secrets
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from types import SimpleNamespace
@@ -227,6 +229,118 @@ def register_billing(app, helpers):
         h.audit("billing.cancel", "", g.store["id"])
         return jsonify(info(h.one("SELECT * FROM stores WHERE id=?", (g.store["id"],))))
 
+    # ---------- Mensalidade por Pix (paga um mês por vez)
+    def create_plan_pix(amount, reference, description, payer, idempotency):
+        expires = datetime.now(ZONE) + timedelta(minutes=30)
+        payload = {"transaction_amount": round(amount / 100, 2), "payment_method_id": "pix", "description": description,
+                   "external_reference": reference, "date_of_expiration": expires.isoformat(timespec="milliseconds"),
+                   "payer": {"email": payer}}
+        base = h.public_base()
+        if base.startswith("https://"):
+            payload["notification_url"] = f"{base}/webhooks/mercadopago-assinaturas/{webhook_secret()}"
+        result = mp().create_pix(token(), payload, idempotency)
+        code = ((result.get("point_of_interaction") or {}).get("transaction_data") or {}).get("qr_code", "")
+        if not result.get("id") or not code:
+            raise PaymentError("O Mercado Pago não devolveu o código Pix. Confira se a sua conta tem uma chave Pix cadastrada.")
+        return str(result["id"]), code, expires.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+    def check_plan_pix(store):
+        """Confere o Pix da mensalidade no Mercado Pago e libera a loja por um mês se foi pago certinho."""
+        if not store["sub_pix_id"]:
+            return False
+        info = mp().get_payment(token(), store["sub_pix_id"])
+        ok = (info.get("status") == "approved" and str(info.get("external_reference", "")).startswith(f"plan-{store['id']}-")
+              and round(float(info.get("transaction_amount", 0)) * 100) == price())
+        if ok:
+            record_payment(store["id"], "pix-" + store["sub_pix_id"], price(), datetime.now(ZONE).date(), "Mensalidade por Pix (Mercado Pago)")
+            h.db().execute("UPDATE stores SET sub_pix_id='',sub_pix_code='',sub_pix_expires='' WHERE id=?", (store["id"],))
+        return ok
+
+    def qr_svg(code):
+        import segno
+        output = io.BytesIO()
+        segno.make(code, error="m").save(output, kind="svg", scale=8, border=2, xmldecl=False)
+        response = app.response_class(output.getvalue(), mimetype="image/svg+xml")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/admin/billing/pix")
+    @h.owner
+    def billing_pix():
+        store = g.store
+        if store["billing_exempt"]:
+            abort(409, description="Sua loja tem uso gratuito, não precisa pagar.")
+        h.limited("billing-pix", 10, 3600)
+        if store["sub_pix_code"] and store["sub_pix_expires"] > datetime.now(timezone.utc).isoformat():
+            return jsonify(code=store["sub_pix_code"], amount=price(), expires=store["sub_pix_expires"])
+        try:
+            pid, code, expires = create_plan_pix(price(), f"plan-{store['id']}-{secrets.token_hex(4)}", "SeuComércioAqui - mensalidade",
+                                                 f"loja{store['id']}@seucomercioaqui.com.br", f"plan-{store['id']}-{secrets.token_hex(8)}")
+        except PaymentError as error:
+            abort(502, description=str(error))
+        h.db().execute("UPDATE stores SET sub_pix_id=?,sub_pix_code=?,sub_pix_expires=? WHERE id=?", (pid, code, expires, store["id"]))
+        h.audit("billing.pix", pid, store["id"])
+        return jsonify(code=code, amount=price(), expires=expires)
+
+    @app.get("/api/admin/billing/pix.svg")
+    @h.owner
+    def billing_pix_qr():
+        if not g.store["sub_pix_code"]:
+            abort(404, description="Gere o Pix primeiro.")
+        return qr_svg(g.store["sub_pix_code"])
+
+    @app.post("/api/admin/billing/pix/check")
+    @h.owner
+    def billing_pix_check():
+        h.limited("billing-pix-check", 120)
+        try:
+            paid = check_plan_pix(g.store)
+        except PaymentError as error:
+            abort(502, description=str(error))
+        return jsonify(paid=paid, billing=info(h.one("SELECT * FROM stores WHERE id=?", (g.store["id"],))))
+
+    # ---------- Teste de R$ 1,00 do dono da plataforma
+    def test_pix_state():
+        row = h.one("SELECT value FROM platform_settings WHERE key='test_pix'")
+        return json.loads(row["value"]) if row else {}
+
+    @app.post("/api/platform/billing/test-pix")
+    def platform_test_pix():
+        platform_only()
+        h.limited("platform-test-pix", 10, 3600)
+        try:
+            pid, code, expires = create_plan_pix(100, f"teste-{secrets.token_hex(6)}", "SeuComércioAqui - teste de R$ 1,00",
+                                                 "teste-pix@seucomercioaqui.com.br", "teste-" + secrets.token_hex(10))
+        except PaymentError as error:
+            abort(502, description=str(error))
+        state = {"id": pid, "code": code, "expires": expires, "status": "pending"}
+        h.db().execute("DELETE FROM platform_settings WHERE key='test_pix'")
+        h.db().execute("INSERT INTO platform_settings(key,value) VALUES('test_pix',?)", (json.dumps(state),))
+        return jsonify(state)
+
+    @app.get("/api/platform/billing/test-pix.svg")
+    def platform_test_pix_qr():
+        platform_only()
+        state = test_pix_state()
+        if not state.get("code"):
+            abort(404, description="Gere o Pix de teste primeiro.")
+        return qr_svg(state["code"])
+
+    @app.post("/api/platform/billing/test-pix/check")
+    def platform_test_pix_check():
+        platform_only()
+        state = test_pix_state()
+        if not state.get("id"):
+            abort(404, description="Gere o Pix de teste primeiro.")
+        try:
+            payment = mp().get_payment(token(), state["id"])
+        except PaymentError as error:
+            abort(502, description=str(error))
+        state["status"] = payment.get("status", "pending")
+        state["net"] = round(float((payment.get("transaction_details") or {}).get("net_received_amount") or 0) * 100)
+        h.db().execute("UPDATE platform_settings SET value=? WHERE key='test_pix'", (json.dumps(state),))
+        return jsonify(status=state["status"], approved=state["status"] == "approved", net=state["net"])
+
     @app.post("/webhooks/mercadopago-assinaturas/<secret>")
     def billing_webhook(secret):
         h.limited("billing-webhook", 300, 60)
@@ -236,6 +350,11 @@ def register_billing(app, helpers):
         kind = body.get("type") or request.args.get("type") or ""
         ref = str((body.get("data") or {}).get("id") or request.args.get("data.id") or "")
         try:
+            if kind == "payment" and ref.isdigit():
+                store = h.one("SELECT * FROM stores WHERE sub_pix_id=?", (ref,))
+                if store:
+                    check_plan_pix(store)
+                return jsonify(ok=True)
             if kind == "subscription_authorized_payment" and ref.isdigit():
                 ref = str(mp().authorized_payment(token(), ref).get("preapproval_id") or "")
             if ref and re.fullmatch(r"[A-Za-z0-9_-]{6,80}", ref):

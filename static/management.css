@@ -104,3 +104,6 @@ dialog.drawer{margin:0 0 0 auto;height:100dvh;max-height:100dvh;width:500px;max-
 .wa-qr{display:block;margin:12px 0;border:1px solid var(--line);border-radius:12px;background:#fff}
 #motoja-panel h2,#whatsapp-panel h2{display:flex;gap:8px;align-items:center}
 @media(max-width:560px){.motoja-box{flex-direction:column;align-items:flex-start}}
+
+.pay-choice{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}.pay-choice .chip{display:inline-flex;gap:6px;align-items:center}
+.success-box{background:#e0f3e6;border-color:#b5dfc3;color:#1e5634}
