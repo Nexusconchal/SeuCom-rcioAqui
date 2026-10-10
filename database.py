@@ -59,7 +59,8 @@ class Postgres:
             self.connection.execute("SELECT pg_advisory_xact_lock(hashtext(current_schema()))")
             return Cursor(self.connection.execute("SELECT 1"))
         insert = re.match(r"\s*INSERT INTO ([a-z_]+)", query, re.I)
-        inserted = bool(insert and insert.group(1).lower() != "rate_limits")
+        # Tabelas sem coluna id não podem usar RETURNING id.
+        inserted = bool(insert and insert.group(1).lower() not in ("rate_limits", "platform_settings"))
         query = query.replace("%", "%%").replace("?", "%s")
         if inserted:
             query = query.rstrip().rstrip(";") + " RETURNING id"

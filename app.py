@@ -138,6 +138,8 @@ def create_app(test_config=None):
         try:
             first_billing_migration(startup, app.config)
             apply_exemptions(startup, app.config)
+        except Exception:  # nunca impedir o site de subir por causa da rotina de cobrança
+            app.logger.exception("Falha ao preparar as assinaturas na inicialização")
         finally:
             startup.close()
 
