@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 import click
 from database import connect, initialize
+from business import register_business
 from storage import put_image
 from flask import Flask, abort, g, jsonify, request, send_from_directory, session
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -127,11 +128,11 @@ def create_app(test_config=None):
             abort(400, description="Envie um objeto JSON válido.")
         return value
 
-    def limited(name, limit, seconds=600):
+    def limited(name, limit, seconds=600, per_ip=True):
         if not app.config["RATE_LIMIT_ENABLED"]:
             return
         stamp = int(time.time())
-        key_hash = hashlib.sha256(f"{name}:{request.remote_addr}".encode()).hexdigest()
+        key_hash = hashlib.sha256(f"{name}:{request.remote_addr if per_ip else 'key'}".encode()).hexdigest()
         with transaction() as conn:
             current = conn.execute("SELECT * FROM rate_limits WHERE key=?", (key_hash,)).fetchone()
             if current and current["resets_at"] > stamp:
@@ -145,7 +146,7 @@ def create_app(test_config=None):
     def owner(fn):
         @wraps(fn)
         def wrapped(*args, **kwargs):
-            user = one("SELECT id,name,email,auth_version FROM users WHERE id=?", (session.get("uid", -1),))
+            user = one("SELECT id,name,email,auth_version,platform_admin FROM users WHERE id=?", (session.get("uid", -1),))
             if not user or user["auth_version"] != session.get("version"):
                 abort(401, description="Entre na sua conta.")
             store = one("SELECT * FROM stores WHERE owner_id=?", (user["id"],))
@@ -166,21 +167,29 @@ def create_app(test_config=None):
         value["payments"] = json.loads(value["payments"])
         value["open"] = bool(value["open"])
         if not private:
-            for key in ("owner_id", "created_at"):
+            for key in ("owner_id", "created_at", "commission_bps", "monthly_fee", "payment_fees", "default_delivery_cost", "enabled"):
                 value.pop(key, None)
         return value
 
-    def product_dict(product):
+    def product_dict(product, private=False):
         value = dict(product)
         value["extras"] = json.loads(value["extras"])
         value["active"], value["featured"] = bool(value["active"]), bool(value["featured"])
+        if not private:
+            value.pop("unit_cost", None)
+            value.pop("low_stock", None)
+            value["extras"] = [{k:v for k,v in x.items() if k!='unit_cost'} for x in value["extras"]]
         return value
 
     def order_dict(order, private=True):
         value = dict(order)
-        value["items"] = rows("SELECT name,product_id,quantity,unit_price,extras,notes FROM order_items WHERE order_id=?", (order["id"],))
+        value["items"] = rows("SELECT id,name,product_id,quantity,unit_price,unit_cost,extras,notes FROM order_items WHERE order_id=?", (order["id"],))
         for item in value["items"]:
             item["extras"] = json.loads(item["extras"])
+            item["extras"] = [{k:v for k,v in x.items() if k!='unit_cost'} for x in item["extras"]]
+            if not private:
+                item.pop("unit_cost", None)
+                item.pop("id", None)
         value["events"] = rows("SELECT status,created_at FROM order_events WHERE order_id=? ORDER BY id", (order["id"],))
         value["status_label"] = LABELS[value["status"]]
         if private:
@@ -200,6 +209,9 @@ def create_app(test_config=None):
 
     @app.before_request
     def protect():
+        if request.path.startswith("/api/v1/"):
+            app.extensions["partner_auth"]()
+            return
         if request.path.startswith("/api/") and request.method in ("POST", "PUT", "PATCH", "DELETE"):
             expected = session.get("csrf", "")
             supplied = request.headers.get("X-CSRF-Token", "")
@@ -246,6 +258,7 @@ def create_app(test_config=None):
     @app.get("/")
     @app.get("/entrar")
     @app.get("/painel")
+    @app.get("/plataforma")
     @app.get("/loja/<slug>")
     @app.get("/pedido/<token>")
     def page(**kwargs):
@@ -260,16 +273,16 @@ def create_app(test_config=None):
     @app.get("/api/session")
     def get_session():
         session.setdefault("csrf", secrets.token_urlsafe(32))
-        user = one("SELECT id,name,email,auth_version FROM users WHERE id=?", (session.get("uid", -1),))
+        user = one("SELECT id,name,email,auth_version,platform_admin FROM users WHERE id=?", (session.get("uid", -1),))
         authenticated = bool(user and user["auth_version"] == session.get("version"))
-        return jsonify(csrf=session["csrf"], user={"name": user["name"], "email": user["email"]} if authenticated else None,
+        return jsonify(csrf=session["csrf"], user={"name": user["name"], "email": user["email"], "platform_admin": bool(user["platform_admin"])} if authenticated else None,
                        registration=app.config["ALLOW_REGISTRATION"])
 
     def establish(user):
         session.clear()
         session.update(uid=user["id"], version=user["auth_version"], csrf=secrets.token_urlsafe(32))
         session.permanent = True
-        return jsonify(csrf=session["csrf"], user={"name": user["name"], "email": user["email"]})
+        return jsonify(csrf=session["csrf"], user={"name": user["name"], "email": user["email"], "platform_admin": bool(user["platform_admin"])})
 
     @app.post("/api/auth/register")
     def register():
@@ -369,7 +382,7 @@ def create_app(test_config=None):
         store = one("SELECT * FROM stores WHERE slug=?", (slug,))
         if not store:
             abort(404, description="Loja não encontrada.")
-        if not store["open"]:
+        if not store["open"] or not store["enabled"]:
             abort(409, description="A loja está fechada no momento.")
         mode, items = value.get("mode"), value.get("items")
         if mode not in ("delivery", "pickup") or not isinstance(items, list) or not 1 <= len(items) <= 50:
@@ -416,7 +429,7 @@ def create_app(test_config=None):
                 if previous["payload_hash"] != digest:
                     abort(409, description="Este identificador já pertence a outro pedido.")
                 return jsonify(token=previous["tracking_token"], number=previous["number"], total=previous["total"]), 200
-            if not store["open"]:
+            if (not store["open"] and not getattr(g,'manual_order',False)) or not store["enabled"]:
                 abort(409, description="A loja está fechada no momento.")
             if payment not in json.loads(store["payments"]):
                 abort(400, description="Forma de pagamento indisponível.")
@@ -443,13 +456,32 @@ def create_app(test_config=None):
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (store["id"], number, hashlib.sha256(token.encode()).hexdigest(),
                 customer, phone, mode, address if mode == "delivery" else "", payment, change_for if payment == "cash" else None, notes,
                 subtotal, discount, fee, total, coupon_id, key, digest, token, stamp, stamp)).lastrowid
+            fees=json.loads(store['payment_fees'])
+            conn.execute("UPDATE orders SET delivery_cost=?,payment_fee=?,platform_fee=?,source=? WHERE id=?",
+                (store['default_delivery_cost'] if mode=='delivery' else 0,
+                 (total*fees.get(payment,0)+5000)//10000,
+                 ((subtotal-discount)*store['commission_bps']+5000)//10000,
+                 'counter' if getattr(g,'manual_order',False) else 'web',oid))
             for product, quantity, unit, extras, item_notes in prepared:
-                conn.execute("INSERT INTO order_items(order_id,product_id,name,quantity,unit_price,extras,notes) VALUES(?,?,?,?,?,?,?)",
-                             (oid, product["id"], product["name"], quantity, unit, json.dumps(extras), item_notes))
+                known=product['unit_cost'] is not None and all(x.get('unit_cost') is not None for x in extras)
+                cost=product['unit_cost']+sum(x['unit_cost'] for x in extras) if known else None
+                conn.execute("INSERT INTO order_items(order_id,product_id,name,quantity,unit_price,unit_cost,extras,notes) VALUES(?,?,?,?,?,?,?,?)",
+                             (oid, product["id"], product["name"], quantity, unit, cost, json.dumps([{k:v for k,v in x.items() if k!='unit_cost'} for x in extras]), item_notes))
+            for pid, quantity in quantities.items():
+                balance=conn.execute('SELECT stock FROM products WHERE id=?',(pid,)).fetchone()[0]
+                if balance is not None:
+                    conn.execute('INSERT INTO stock_movements(store_id,product_id,delta,balance,reason,created_at) VALUES(?,?,?,?,?,?)',
+                        (store['id'],pid,-quantity,balance,'Venda #'+str(number),stamp))
             conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, "new", stamp))
             if coupon_id:
                 conn.execute("UPDATE coupons SET uses=uses+1 WHERE id=?", (coupon_id,))
         return jsonify(token=token, number=number, total=total), 201
+
+    @app.post('/api/admin/orders')
+    @owner
+    def manual_order():
+        g.manual_order=True
+        return create_order(g.store['slug'])
 
     @app.get("/api/track/<token>")
     def track(token):
@@ -476,6 +508,8 @@ def create_app(test_config=None):
         if not re.fullmatch(r"#[a-fA-F0-9]{6}", color):
             abort(400, description="Cor inválida.")
         payments = value.get("payments", [])
+        if not g.store['enabled'] and value.get('open'):
+            abort(403,description='Loja suspensa pela plataforma. Entre em contato com o suporte.')
         if not isinstance(payments, list) or not payments or any(p not in ("pix", "cash", "card") for p in payments):
             abort(400, description="Selecione ao menos uma forma de pagamento.")
         pix = text(value, "pix_key", 0, 200)
@@ -518,7 +552,7 @@ def create_app(test_config=None):
     @app.get("/api/admin/products")
     @owner
     def admin_products():
-        return jsonify(products=[product_dict(p) for p in db().execute("SELECT * FROM products WHERE store_id=? ORDER BY position,id", (g.store["id"],))],
+        return jsonify(products=[product_dict(p, True) for p in db().execute("SELECT * FROM products WHERE store_id=? ORDER BY position,id", (g.store["id"],))],
                        categories=rows("SELECT * FROM categories WHERE store_id=? ORDER BY position,id", (g.store["id"],)))
 
     @app.post("/api/admin/categories")
@@ -558,26 +592,45 @@ def create_app(test_config=None):
             if not re.fullmatch(r"[a-zA-Z0-9_-]+", eid) or eid in seen:
                 abort(400, description="Identificador de complemento inválido ou duplicado.")
             seen.add(eid)
-            sanitized.append({"id": eid, "name": text(extra, "name", 1, 80), "price": integer(extra, "price")})
+            sanitized.append({"id": eid, "name": text(extra, "name", 1, 80), "price": integer(extra, "price"),
+                              "unit_cost":None if extra.get('unit_cost') is None else integer(extra,'unit_cost')})
         return (category, text(value, "name", 2, 120), text(value, "description", 0, 500),
                 integer(value, "price", minimum=1), image_url(value.get("image", "")), boolean(value, "active", True),
-                boolean(value, "featured"), stock, json.dumps(sanitized), integer(value, "position"))
+                boolean(value, "featured"), stock, json.dumps(sanitized), integer(value, "position"),
+                None if value.get('unit_cost') is None else integer(value,'unit_cost'), integer(value,'low_stock',default=5,maximum=1000000))
 
     @app.post("/api/admin/products")
     @owner
     def create_product():
         fields = product_fields(data())
-        pid = db().execute("""INSERT INTO products(store_id,category_id,name,description,price,image,active,featured,stock,extras,position)
-                          VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (g.store["id"], *fields)).lastrowid
+        with transaction() as conn:
+            pid = conn.execute("""INSERT INTO products(store_id,category_id,name,description,price,image,active,featured,stock,extras,position,unit_cost,low_stock)
+                              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.store["id"], *fields)).lastrowid
+            if fields[7] is not None:
+                conn.execute('INSERT INTO stock_movements(store_id,product_id,delta,balance,reason,created_at) VALUES(?,?,?,?,?,?)',
+                             (g.store['id'],pid,fields[7],fields[7],'Estoque inicial',now()))
         return jsonify(id=pid), 201
 
     @app.put("/api/admin/products/<int:pid>")
     @owner
     def update_product(pid):
-        owned("products", pid)
-        fields = product_fields(data())
-        db().execute("""UPDATE products SET category_id=?,name=?,description=?,price=?,image=?,active=?,featured=?,
-                     stock=?,extras=?,position=? WHERE id=? AND store_id=?""", (*fields, pid, g.store["id"]))
+        value=data()
+        fields = list(product_fields(value))
+        with transaction() as conn:
+            previous=owned('products',pid)
+            if 'expected_stock' in value:
+                expected=value['expected_stock']
+                if expected is not None:
+                    expected=integer(value,'expected_stock',maximum=1000000)
+                if fields[7]==expected:
+                    fields[7]=previous['stock']
+                elif previous['stock']!=expected:
+                    abort(409,description='O estoque mudou enquanto você editava. Atualize o cadastro antes de ajustar a quantidade.')
+            conn.execute("""UPDATE products SET category_id=?,name=?,description=?,price=?,image=?,active=?,featured=?,
+                         stock=?,extras=?,position=?,unit_cost=?,low_stock=? WHERE id=? AND store_id=?""", (*fields, pid, g.store["id"]))
+            if fields[7] is not None and fields[7]!=previous['stock']:
+                conn.execute('INSERT INTO stock_movements(store_id,product_id,delta,balance,reason,created_at) VALUES(?,?,?,?,?,?)',
+                             (g.store['id'],pid,fields[7]-(previous['stock'] or 0),fields[7],'Ajuste no cadastro',now()))
         return jsonify(ok=True)
 
     @app.delete("/api/admin/products/<int:pid>")
@@ -617,6 +670,10 @@ def create_app(test_config=None):
                 if status == "cancelled":
                     for item in conn.execute("SELECT product_id,SUM(quantity) AS qty FROM order_items WHERE order_id=? GROUP BY product_id", (oid,)):
                         conn.execute("UPDATE products SET stock=stock+? WHERE id=? AND stock IS NOT NULL", (item["qty"], item["product_id"]))
+                        balance=conn.execute('SELECT stock FROM products WHERE id=?',(item['product_id'],)).fetchone()[0]
+                        if balance is not None:
+                            conn.execute('INSERT INTO stock_movements(store_id,product_id,delta,balance,reason,created_at) VALUES(?,?,?,?,?,?)',
+                                (g.store['id'],item['product_id'],item['qty'],balance,'Cancelamento #'+str(order['number']),now()))
                     if order["coupon_id"]:
                         conn.execute("UPDATE coupons SET uses=CASE WHEN uses>0 THEN uses-1 ELSE 0 END WHERE id=?", (order["coupon_id"],))
                 conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, status, now()))
@@ -728,8 +785,11 @@ def create_app(test_config=None):
     @owner
     def add_expense():
         value = data()
-        eid = db().execute("INSERT INTO expenses(store_id,description,amount,created_at) VALUES(?,?,?,?)",
-                           (g.store["id"], text(value, "description", 2, 200), integer(value, "amount", minimum=1), now())).lastrowid
+        category=value.get('category','operating')
+        if category not in ('operating','inventory'):
+            abort(400,description='Categoria de despesa inválida.')
+        eid = db().execute("INSERT INTO expenses(store_id,description,amount,created_at,category) VALUES(?,?,?,?,?)",
+                           (g.store["id"], text(value, "description", 2, 200), integer(value, "amount", minimum=1), now(),category)).lastrowid
         return jsonify(id=eid), 201
 
     @app.delete("/api/admin/expenses/<int:eid>")
@@ -753,6 +813,9 @@ def create_app(test_config=None):
         response = app.response_class("\ufeff" + output.getvalue(), mimetype="text/csv")
         response.headers["Content-Disposition"] = 'attachment; filename="pedidos.csv"'
         return response
+
+    register_business(app, dict(db=db,one=one,rows=rows,owner=owner,owned=owned,data=data,text=text,integer=integer,
+        boolean=boolean,transaction=transaction,limited=limited,order_dict=order_dict,now=now))
 
     @app.cli.command("seed-demo")
     @click.option("--email", prompt=True)

@@ -15,10 +15,17 @@ Cardápio digital e gestão de pedidos para pequenos comércios. Frontend respon
 - Produtos, upload de fotos, estoque, categorias e cupons.
 - Entregadores e atribuição de pedidos.
 - Vendas por período, pagamentos confirmados, despesas e exportação CSV.
+- Financeiro com custos de produtos e complementos, entrega, taxas de pagamento, comissão e lucro estimado. Custos pendentes impedem exibir um lucro enganoso.
+- Cozinha com fichas de produção e atualização dos pedidos; cadastro de pedidos de balcão ou telefone.
+- Clientes com histórico de compras; estoque com alertas, ajustes justificados e histórico de movimentações.
+- Painel exclusivo do dono da plataforma: lojas, contratos, mensalidades, comissões, recebimentos, despesas, resultado de caixa e histórico administrativo.
+- API de entregas com chaves por loja, permissões, revogação, vinculação de pedidos e eventos sem duplicação. Documentação em `/static/api-docs.html`.
 - Nome, logo, capa, cor, contato, taxa, pedido mínimo e pagamentos configuráveis.
 - Alteração de senha, logout e recuperação administrativa por comando.
 
 **Pagamentos:** Pix é confirmado manualmente pelo lojista. Dinheiro e cartão são recebidos na entrega ou retirada. Não há gateway bancário, captura de cartão ou confirmação automática de Pix. O link do WhatsApp abre uma conversa com a loja; não envia mensagens automaticamente.
+
+**Plataforma:** mensalidades e comissões configuram contratos; recebimentos são lançados quando efetivamente pagos. Vendas dos lojistas não são receita da plataforma. O conector do MotoJá precisa ser instalado no servidor do parceiro; gerar uma chave aqui não instala esse conector. Veja a [revisão funcional e próximos passos](docs/PRODUCT_REVIEW.md).
 
 ## Rodar no computador
 
@@ -153,10 +160,14 @@ python -m pytest tests/test_api.py -v
 
 GitHub Actions verifica sintaxe, API no Linux e Windows, auditoria de dependências, container de produção e compra/gestão em Chromium. Cobre isolamento entre lojas, preços, estoque concorrente, CSRF, uploads, cupons e fluxo de pedidos. As capturas aparecem no pacote **telas-seucomercio** no resultado da execução.
 
+A suíte também verifica custos históricos, lucro com custos pendentes, permissões do dono da plataforma, lançamentos idempotentes e anulação, chaves de integração, eventos repetidos, revogação e limite por chave. O job PostgreSQL usa um banco descartável e testa o papel restrito do backend. Para usar um Chromium já instalado localmente, defina `PLAYWRIGHT_CHROMIUM_EXECUTABLE` com o caminho do executável.
+
 ## Estrutura
 
 ~~~text
 app.py                    Flask: API, páginas e regras de negócio
+business.py               Financeiro, dono da plataforma e API de entregas
+migrations.py             Atualizações aditivas SQLite/PostgreSQL
 schema.sql                Banco SQLite
 seed.py                   Demonstração opcional
 static/
@@ -164,6 +175,9 @@ static/
   app.js                  Página inicial e acesso
   menu.js                 Cardápio, checkout e acompanhamento
   dashboard.js            Painel do lojista
+  management.js           Gestão, clientes, estoque e plataforma
+  management.css          Painéis responsivos
+  api-docs.html           Contrato público da API de entregas
   ui.js                   Componentes e cliente HTTP
   styles.css              Desktop, celular e impressão
   logo.svg                Marca original
@@ -176,7 +190,7 @@ docs/API.md               Endpoints e exemplos
 
 ## Escopo
 
-Esta versão cobre cardápio, pedidos e gestão. Não integra emissão fiscal, impressoras via drivers, WhatsApp automático, apps de delivery ou conciliação bancária. A impressão usa o navegador.
+Esta versão cobre cardápio, pedidos, gestão financeira e administração da plataforma. Disponibiliza uma API de entregas para parceiros; conectores externos ainda precisam ser implementados no parceiro. Não integra emissão fiscal, impressoras via drivers, WhatsApp automático ou conciliação bancária. A impressão usa o navegador.
 
 As sessões são assinadas; senhas usam scrypt; alterações exigem CSRF; preços e estoque são validados pelo servidor; uploads são reprocessados; o painel limita os dados à loja autenticada. O link do pedido mostra itens, valores e status. Os relatórios usam a data de criação do pedido e excluem cancelados. Cancelamentos não executam reembolsos bancários.
 

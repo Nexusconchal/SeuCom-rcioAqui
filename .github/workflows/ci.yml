@@ -33,6 +33,7 @@ jobs:
           node --check static/app.js
           node --check static/menu.js
           node --check static/dashboard.js
+          node --check static/management.js
       - name: Testar API e navegador
         run: python -m pytest -v
       - name: Auditar dependências de produção
@@ -69,7 +70,7 @@ jobs:
       - name: Verificar sintaxe e API no Windows
         run: |
           python -m compileall -q app.py seed.py tests scripts
-          python -m pytest tests/test_api.py -v
+          python -m pytest tests/test_api.py tests/test_business.py -v
 
   postgres-api:
     runs-on: ubuntu-latest
@@ -98,7 +99,7 @@ jobs:
       - name: Instalar dependências
         run: python -m pip install -r requirements-dev.txt
       - name: Testar PostgreSQL, estoque concorrente e isolamento
-        run: python -m pytest tests/test_api.py tests/test_storage.py tests/test_postgres_access.py -v
+        run: python -m pytest tests/test_api.py tests/test_business.py tests/test_storage.py tests/test_postgres_access.py -v
 
   storage-security:
     runs-on: ubuntu-latest

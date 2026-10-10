@@ -6,6 +6,7 @@ from pathlib import Path
 import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
+from migrations import upgrade
 
 BASE = Path(__file__).resolve().parent
 SCHEMA_NAME = re.compile(r"[a-z][a-z0-9_]{0,62}\Z")
@@ -90,6 +91,7 @@ def initialize(config):
                 for statement in (BASE / "schema.postgres.sql").read_text(encoding="utf-8").split(";"):
                     if statement.strip():
                         conn.execute(statement)
+                upgrade(conn, postgres=True)
                 tables = conn.execute("SELECT tablename FROM pg_tables WHERE schemaname=%s", (schema,)).fetchall()
                 for (table,) in tables:
                     conn.execute(sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(sql.Identifier(table)))
@@ -99,3 +101,4 @@ def initialize(config):
         with sqlite3.connect(config["DATABASE_PATH"]) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript((BASE / "schema.sql").read_text(encoding="utf-8"))
+            upgrade(conn)

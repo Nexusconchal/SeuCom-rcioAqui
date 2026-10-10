@@ -1,0 +1,28 @@
+<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>API de parceiros • SeuComércioAqui</title><link rel="stylesheet" href="/static/styles.css"><link rel="stylesheet" href="/static/management.css"><body><main class="api-docs"><a href="/painel">← Voltar ao painel</a><h1>API de parceiros</h1><p>Versão 1 • Uma chave por loja • Valores em centavos de real (BRL)</p><div class="notice">Crie uma chave em <b>Painel → Integrações</b>. A chave completa aparece uma vez. Use apenas no servidor do parceiro; nunca em JavaScript público, URLs ou logs. Revogar a chave bloqueia imediatamente o acesso.</div><h2>Autenticação e permissões</h2><pre>Authorization: Bearer SUA_CHAVE
+Content-Type: application/json</pre><p><code>orders:read</code> permite consultar a loja e as entregas prontas ou em andamento. <code>deliveries:write</code> permite vincular e atualizar entregas. A chave não pode alterar produtos, pagamentos, custos ou outras lojas. Limite: 120 requisições por minuto por chave. HTTPS obrigatório em produção.</p><h2>1. Testar a conexão</h2><pre>curl 'https://seucomercio-aqui.onrender.com/api/v1/store' \
+  -H 'Authorization: Bearer SUA_CHAVE'</pre><h2>2. Buscar entregas</h2><pre>GET /api/v1/deliveries?after=0
+
+{
+  "deliveries": [{
+    "id": 123, "number": 1001, "status": "ready",
+    "customer": "Cliente", "phone": "19999999999",
+    "address": "Rua Exemplo, 10, Centro, Conchal - SP",
+    "mode": "delivery", "total": 3500, "delivery_fee": 500,
+    "paid": true, "payment": "pix", "notes": "",
+    "pickup": {"name": "Loja", "address": "Rua Origem, 20", "phone": "19999999999"},
+    "items": [{"name": "Lanche", "quantity": 1, "notes": "Sem cebola"}]
+  }],
+  "next_after": null
+}</pre><p>Até 100 registros por página, ordenados pelo ID. Continue com <code>next_after</code> enquanto ele não for nulo. Em cada ciclo de consulta, comece novamente em zero: pedidos antigos podem ficar prontos depois. Consulta sugerida a cada 30–60 segundos. O parceiro deve persistir os vínculos e deduplicar pelo ID da loja e do pedido; dados em memória não bastam.</p><h2>3. Vincular uma entrega</h2><pre>POST /api/v1/deliveries/123/claim
+
+{
+  "provider": "motoja",
+  "external_id": "ID_DA_ENTREGA_NO_MOTOJA",
+  "delivery_cost": 650
+}</pre><p>Vincula somente pedido de entrega no status <code>ready</code>. O custo é opcional, em centavos. Repita os mesmos dados para recuperar o vínculo (200 com <code>duplicate: true</code>); outro código, parceiro ou chave retorna 409. Um vínculo por pedido, e um código externo por parceiro e loja. Vincular não muda o status do pedido nem confirma pagamento.</p><h2>4. Informar saída e conclusão</h2><pre>POST /api/v1/deliveries/123/events
+
+{"event_id": "motoja-entrega123-saida-v1", "status": "delivering"}
+
+POST /api/v1/deliveries/123/events
+
+{"event_id": "motoja-entrega123-conclusao-v1", "status": "completed"}</pre><p>A mesma chave que vinculou a entrega deve enviar os eventos. A ordem permitida é <code>ready → delivering → completed</code>. Use um event_id estável por evento e persista-o antes do envio. Repetição idêntica é aceita sem duplicar efeitos; reutilização com dados diferentes retorna 409. O parceiro não pode cancelar pedidos, reabrir pedidos ou marcar pagamento.</p><h2>Erros e tentativas</h2><table><thead><tr><th>Código</th><th>Conduta</th></tr></thead><tbody><tr><td>400</td><td>Corrigir os dados enviados.</td></tr><tr><td>401 / 403</td><td>Verificar chave, permissões, loja e vínculo. Não repetir continuamente.</td></tr><tr><td>404</td><td>Pedido inexistente ou pertencente a outra loja.</td></tr><tr><td>409</td><td>Reconciliar estado, vínculo e identificador antes de repetir.</td></tr><tr><td>429 / 5xx / timeout</td><td>Repetir com espera progressiva, usando os mesmos identificadores (ex.: 5, 15, 60 segundos). O serviço gratuito pode levar cerca de um minuto para iniciar.</td></tr></tbody></table><h2>Conector MotoJá</h2><p>Esta API já define o contrato que o MotoJá deve consumir. O conector do MotoJá precisa guardar a chave no servidor, associá-la à empresa correta, buscar pedidos prontos, criar ou recuperar a entrega de forma idempotente, vincular o código externo e enviar os eventos. A criação de uma chave aqui não instala nem ativa esse conector no outro sistema.</p><p>Antes de ativar despacho real, validar vínculo da empresa, preço e saldo no MotoJá, idempotência na criação da corrida, rejeições, cancelamento pela loja, repetição de eventos e reconciliação após falhas. Não usar o valor do pedido como preço da corrida. Não incluir a chave em links ou parâmetros de navegação.</p></main></body></html>
