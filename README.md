@@ -2,6 +2,8 @@
 
 Cardápio digital e gestão de pedidos para pequenos comércios. Frontend responsivo e backend real, com identidade própria em verde-petróleo e lima.
 
+**Aplicação publicada:** [seucomercio-aqui.onrender.com](https://seucomercio-aqui.onrender.com). Para começar, clique em **Criar minha loja**. Veja a [configuração da publicação](docs/DEPLOYMENT.md).
+
 ## O que funciona
 
 - Cadastro de lojistas: cada conta tem uma loja e seus próprios dados.
