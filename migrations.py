@@ -51,6 +51,11 @@ CREATE TABLE IF NOT EXISTS store_members (
  id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), user_id INTEGER NOT NULL UNIQUE REFERENCES users(id),
  role TEXT NOT NULL CHECK(role IN ('manager','cashier','kitchen')), active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS platform_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+ id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), user_id INTEGER NOT NULL REFERENCES users(id),
+ endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS platform_notices (
  id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('info','promo','alert')),
  expires TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
@@ -94,6 +99,6 @@ def postgres_ddl():
         for column, definition in columns.items():
             statements.append(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition};')
     statements.extend(s+';' for s in TABLES.split(';') if s.strip() and not s.strip().startswith('CREATE TABLE'))
-    for table in ('api_keys', 'delivery_links', 'integration_events', 'stock_movements', 'platform_ledger', 'audit_log', 'platform_notices', 'store_members'):
+    for table in ('api_keys', 'delivery_links', 'integration_events', 'stock_movements', 'platform_ledger', 'audit_log', 'platform_notices', 'store_members', 'platform_settings', 'push_subscriptions'):
         statements.extend([f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;', f'REVOKE ALL ON {table} FROM PUBLIC,anon,authenticated;'])
     return '\n'.join(statements)

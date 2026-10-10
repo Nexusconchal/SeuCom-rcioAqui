@@ -33,13 +33,68 @@ async function watchOrders(){
   try{
     const list=(await api('/api/admin/orders?status=new')).orders;
     if(seen){const fresh=list.filter(o=>!seen.has(o.id));if(fresh.length){
-      chime();const first=fresh[0];toast(fresh.length>1?fresh.length+' novos pedidos chegaram!':'Novo pedido #'+first.number+' • '+money(first.total));
+      chime();if(autoPrint())fresh.slice().reverse().forEach(printTicket);const first=fresh[0];toast(fresh.length>1?fresh.length+' novos pedidos chegaram!':'Novo pedido #'+first.number+' • '+money(first.total));
       if('Notification' in window&&Notification.permission==='granted'&&document.hidden){try{new Notification('Novo pedido #'+first.number,{body:first.customer+' • '+money(first.total),icon:'/static/icon-192.png',tag:'pedido-'+first.id});}catch{}}
       if(['overview','orders','kitchen'].includes(tab))switchTab(tab,true);
     }}
     seen=new Set(list.map(o=>o.id));document.title=(list.length?'('+list.length+') ':'')+'Painel • '+store.name;
   }catch(e){if(e.status===401){location.href='/entrar';return;}}
   watchTimer=setTimeout(watchOrders,15000);
+}
+const autoPrint=()=>{try{return localStorage.getItem('sca.autoprint')==='1';}catch{return false;}};
+const b64=s=>{const p='='.repeat((4-s.length%4)%4);const raw=atob((s+p).replace(/-/g,'+').replace(/_/g,'/'));return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));};
+async function pushState(){
+  if(!('serviceWorker' in navigator)||!('PushManager' in window))return 'unsupported';
+  if(Notification.permission==='denied')return 'denied';
+  const reg=await navigator.serviceWorker.getRegistration('/');const sub=reg&&await reg.pushManager.getSubscription();
+  return sub?'on':'off';
+}
+async function enablePush(){
+  if(!('serviceWorker' in navigator)||!('PushManager' in window))throw new Error('Este navegador não aceita avisos. No iPhone, adicione o painel à Tela de Início e abra por lá.');
+  const permission=await Notification.requestPermission();
+  if(permission!=='granted')throw new Error('Permita as notificações para este site nas configurações do navegador.');
+  const reg=await navigator.serviceWorker.register('/sw.js',{scope:'/'});await navigator.serviceWorker.ready;
+  const {public_key}=await api('/api/admin/push/key');
+  let sub=await reg.pushManager.getSubscription();
+  if(sub&&sub.options.applicationServerKey&&btoa(String.fromCharCode(...new Uint8Array(sub.options.applicationServerKey))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')!==public_key){await sub.unsubscribe();sub=null;}
+  sub=sub||await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64(public_key)});
+  await api('/api/admin/push/subscribe',{method:'POST',body:JSON.stringify(sub.toJSON())});
+}
+async function disablePush(){
+  const reg=await navigator.serviceWorker.getRegistration('/');const sub=reg&&await reg.pushManager.getSubscription();
+  if(sub){await api('/api/admin/push/unsubscribe',{method:'POST',body:JSON.stringify({endpoint:sub.endpoint})}).catch(()=>{});await sub.unsubscribe();}
+}
+function ticketHTML(o){
+  const line=(a,b)=>'<div class="t-line"><span>'+a+'</span><span>'+b+'</span></div>';
+  return '<div class="ticket"><h1>'+esc(store.name)+'</h1><p class="t-center">PEDIDO <b>#'+o.number+'</b><br>'+date(o.created_at)+(o.source==='counter'?' • balcão':'')+'</p>'+
+    (o.scheduled_for?'<p class="t-box">AGENDADO: '+new Date(o.scheduled_for).toLocaleString('pt-BR',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</p>':'')+
+    '<p><b>'+esc(o.customer)+'</b><br>'+esc(o.phone)+'</p><p class="t-box">'+(o.mode==='delivery'?'ENTREGA'+(o.zone?' • '+esc(o.zone):'')+'<br>'+esc(o.address):'RETIRADA NO BALCÃO')+'</p><hr>'+
+    o.items.map(i=>'<div class="t-item"><b>'+i.quantity+'x '+esc(i.name)+'</b><span>'+money(i.unit_price*i.quantity)+'</span></div>'+i.extras.map(x=>'<div class="t-sub">+ '+esc(x.name)+'</div>').join('')+(i.notes?'<div class="t-sub">OBS: '+esc(i.notes)+'</div>':'')).join('')+
+    (o.notes?'<hr><p><b>Observações:</b> '+esc(o.notes)+'</p>':'')+'<hr>'+line('Produtos',money(o.subtotal))+(o.delivery_fee?line('Entrega',money(o.delivery_fee)):'')+(o.discount?line('Desconto','- '+money(o.discount)):'')+'<div class="t-line t-total"><span>TOTAL</span><span>'+money(o.total)+'</span></div>'+
+    line('Pagamento',pay[o.payment]+(o.paid?' (PAGO)':''))+(o.change_for?line('Troco para',money(o.change_for)):'')+'<p class="t-center t-foot">SeuComércioAqui</p></div>';
+}
+let printQueue=Promise.resolve();
+function printTicket(o){
+  printQueue=printQueue.then(()=>new Promise(resolve=>{
+    let area=$('#print-area');if(!area){area=document.createElement('div');area.id='print-area';document.body.appendChild(area);}
+    area.innerHTML=ticketHTML(o);document.body.classList.add('printing-ticket');
+    const done=()=>{document.body.classList.remove('printing-ticket');area.innerHTML='';window.removeEventListener('afterprint',done);setTimeout(resolve,300);};
+    window.addEventListener('afterprint',done);setTimeout(()=>window.print(),50);
+  }));
+}
+function alertsPanel(){
+  return '<section class="panel" id="alerts-panel"><div class="section-heading"><div><h2>Avisos e impressão neste aparelho</h2><p class="muted">Valem para este celular ou computador. Ative em cada aparelho que recebe pedidos.</p></div><span class="feature-icon">'+icon('bell')+'</span></div>'+
+    '<div class="alert-row"><div><b>Aviso de pedido novo, mesmo com o painel fechado</b><p class="muted" id="push-status">Verificando…</p></div><div class="row-actions"><button type="button" class="btn" id="push-toggle">Ativar avisos</button><button type="button" class="btn secondary" id="push-test" hidden>Testar</button></div></div>'+
+    '<div class="alert-row"><div><b>Imprimir automaticamente cada pedido novo</b><p class="muted">Com o painel aberto. Para imprimir sem a janela de confirmação, abra o Chrome com a opção <code>--kiosk-printing</code> e deixe a impressora térmica como padrão.</p></div><label class="switch"><input type="checkbox" id="autoprint" '+(autoPrint()?'checked':'')+'><span>'+(autoPrint()?'Ligado':'Desligado')+'</span></label></div></section>';
+}
+async function bindAlertsPanel(){
+  const status=$('#push-status'),toggle=$('#push-toggle'),test=$('#push-test');if(!status)return;
+  const labels={on:'Ativado neste aparelho.',off:'Desativado neste aparelho.',denied:'Bloqueado: libere as notificações deste site nas configurações do navegador.',unsupported:'Este navegador não aceita avisos. No iPhone, use “Adicionar à Tela de Início” e abra o painel por lá.'};
+  const draw=async()=>{const s=await pushState().catch(()=>'off');status.textContent=labels[s];toggle.textContent=s==='on'?'Desativar avisos':'Ativar avisos';toggle.disabled=s==='unsupported'||s==='denied';test.hidden=s!=='on';toggle.dataset.state=s;};
+  toggle.onclick=async()=>{toggle.disabled=true;try{if(toggle.dataset.state==='on'){await disablePush();toast('Avisos desativados neste aparelho.');}else{await enablePush();toast('Avisos ativados! Teste para conferir.');}}catch(e){toast(e.message);}await draw();};
+  test.onclick=async()=>{try{const r=await api('/api/admin/push/test',{method:'POST'});toast(r.sent?'Aviso de teste enviado.':'Nenhum aparelho ativo encontrado.');}catch(e){toast(e.message);}};
+  $('#autoprint').onchange=e=>{try{localStorage.setItem('sca.autoprint',e.target.checked?'1':'0');}catch{}e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';if(e.target.checked)toast('Pedidos novos serão impressos enquanto o painel estiver aberto.');};
+  draw();
 }
 async function platformNotices(){
   try{const r=await api('/api/admin/notices');
@@ -131,7 +186,7 @@ function orderDialog(o){
   (!['completed','cancelled'].includes(o.status)?'<button id="cancel-order" class="text-danger">Cancelar pedido</button>':'')+'<details class="help"><summary>Histórico do pedido</summary>'+o.events.map(e=>'<p>'+statuses[e.status]+' • '+date(e.created_at)+'</p>').join('')+'</details>','drawer');
   if($('#drawer-next'))$('#drawer-next').onclick=async e=>{e.target.disabled=true;try{await api('/api/admin/orders/'+o.id,{method:'PATCH',body:JSON.stringify({status:nextStatus(o)})});closeModal();toast('Pedido atualizado.');switchTab(tab,true);}catch(err){toast(err.message);e.target.disabled=false;}};
   $('.dialog-actions',d).insertAdjacentHTML('beforeend','<button id="order-costs" type="button" class="btn secondary">Conferir custos</button>');$('#order-costs').onclick=()=>costsDialog(o,()=>switchTab(tab,true));
-  $('#print-order').onclick=()=>window.print();$('#copy-track').onclick=()=>copy(location.origin+'/pedido/'+o.tracking_token);
+  $('#print-order').onclick=()=>printTicket(o);$('#copy-track').onclick=()=>copy(location.origin+'/pedido/'+o.tracking_token);
   bindForm($('#order-update'),async form=>{await api('/api/admin/orders/'+o.id,{method:'PATCH',body:JSON.stringify({paid:o.status==='cancelled'?!!o.paid:form.has('paid'),driver_id:form.get('driver_id')?Number(form.get('driver_id')):null})});closeModal();toast('Pedido atualizado.');switchTab(tab,true);});
   if($('#cancel-order'))$('#cancel-order').onclick=()=>{
     const confirm=modal('Cancelar este pedido?','<p>O pedido #'+o.number+' será cancelado. Os itens voltarão ao estoque. Se houve pagamento, combine a devolução diretamente com o cliente.</p><div class="dialog-actions"><button id="confirm-cancel" class="btn danger">Confirmar cancelamento</button><button id="keep-order" class="btn secondary">Manter pedido</button></div>');
@@ -242,11 +297,12 @@ function expenseEditor(){
 }
 function settingsPage(){
   if(!['owner','manager'].includes(role)){
-    $('#dashboard-content').innerHTML='<section class="panel"><h2>Sua conta</h2><p class="muted">Você entra como <b>'+esc(roleLabel)+'</b> na loja '+esc(store.name)+'. As configurações da loja ficam com o dono.</p><button id="change-password" class="btn secondary" type="button">Alterar minha senha</button></section>';
-    $('#change-password').onclick=passwordDialog;return;
+    $('#dashboard-content').innerHTML=alertsPanel()+'<section class="panel"><h2>Sua conta</h2><p class="muted">Você entra como <b>'+esc(roleLabel)+'</b> na loja '+esc(store.name)+'. As configurações da loja ficam com o dono.</p><button id="change-password" class="btn secondary" type="button">Alterar minha senha</button></section>';
+    $('#change-password').onclick=passwordDialog;bindAlertsPanel();return;
   }
   $('#dashboard-content').innerHTML='<form id="store-form"><section class="panel"><div class="section-heading"><div><h2>Identidade da loja</h2><p class="muted">A marca que seus clientes conhecem.</p></div><span class="feature-icon">'+icon('store')+'</span></div><div class="form-grid">'+field('name','Nome do comércio',store.name,'text','required minlength="2" maxlength="100"')+field('color','Cor principal',store.color,'color')+'</div><label>Descrição<textarea name="description" maxlength="500">'+esc(store.description)+'</textarea></label><div class="form-grid">'+uploadField('logo','Logo',store.logo)+uploadField('banner','Capa do cardápio',store.banner)+'</div><div class="notice">Seu link: <b>'+esc(location.origin+'/loja/'+store.slug)+'</b> <button class="text-link" type="button" id="settings-copy">'+icon('copy')+' Copiar</button></div></section><section class="panel"><h2>Contato e entrega</h2><div class="form-grid">'+field('phone','WhatsApp com DDD',store.phone,'tel','maxlength="20"')+field('delivery_minutes','Estimativa de entrega',store.delivery_minutes,'text','required maxlength="40"')+'</div><label>Endereço da loja<textarea name="address" maxlength="400">'+esc(store.address)+'</textarea></label><div class="form-grid">'+moneyInput('delivery_fee','Taxa de entrega',store.delivery_fee)+moneyInput('minimum_order','Pedido mínimo em produtos',store.minimum_order)+'</div></section><section class="panel"><div class="section-heading"><div><h2>Taxa por bairro</h2><p class="muted">Opcional. Com bairros cadastrados, o cliente escolhe o bairro e a taxa é calculada sozinha. Sem bairros, vale a taxa única acima.</p></div><span class="feature-icon">'+icon('truck')+'</span></div><div id="zone-rows" class="zone-rows">'+store.delivery_zones.map(zoneRow).join('')+'</div><button id="add-zone" class="btn secondary small" type="button">'+icon('plus')+' Adicionar bairro</button></section><section class="panel"><div class="section-heading"><div><h2>Horário de funcionamento</h2><p class="muted">A loja abre e fecha sozinha nesses horários. O botão Loja aberta/fechada continua valendo para fechar na hora que precisar.</p></div><span class="feature-icon">'+icon('clock')+'</span></div><label class="check-row"><span><input name="auto_hours" type="checkbox" '+(store.auto_hours?'checked':'')+'> Abrir e fechar automaticamente nestes horários</span></label><label class="check-row"><span><input name="allow_scheduling" type="checkbox" '+(store.allow_scheduling?'checked':'')+'> Aceitar pedidos agendados (até 7 dias, só dentro do horário)</span></label><div class="hours-editor">'+days.map((name,i)=>{const shifts=store.hours[String(i)]||[];const a=shifts[0]||['18:00','23:00'],b=shifts[1]||['',''];return '<div class="hours-row"><label class="check-row"><span><input type="checkbox" data-day="'+i+'" '+(shifts.length?'checked':'')+'> '+name+'</span></label><div class="hours-shifts"><input type="time" aria-label="'+name+': abre" data-start="'+i+'" value="'+a[0]+'"><span>às</span><input type="time" aria-label="'+name+': fecha" data-end="'+i+'" value="'+a[1]+'"><span class="muted">e</span><input type="time" aria-label="'+name+': abre no 2º turno" data-start2="'+i+'" value="'+b[0]+'"><span>às</span><input type="time" aria-label="'+name+': fecha no 2º turno" data-end2="'+i+'" value="'+b[1]+'"></div></div>';}).join('')+'</div><p class="muted">O 2º turno é opcional (ex.: almoço e jantar). Para virar a madrugada, use por exemplo 18:00 às 02:00.</p></section><section class="panel qr-panel"><div><h2>QR Code do cardápio</h2><p class="muted">Imprima e coloque no balcão, nas mesas, na sacola de entrega e no panfleto. O cliente aponta a câmera e cai direto no seu cardápio.</p><div class="qr-actions"><a class="btn" href="/api/admin/qrcode?format=png&amp;download=1">'+icon('print')+' Baixar para imprimir</a><a class="btn secondary" href="/api/admin/qrcode?download=1">Baixar em SVG</a></div></div><img src="/api/admin/qrcode" alt="QR Code que abre o cardápio da loja" width="180" height="180"></section><section class="panel"><h2>Pagamentos</h2><p class="muted">Pix é confirmado pela loja. Cartão é cobrado na entrega ou retirada.</p><div class="check-options">'+Object.entries(pay).map(([value,label])=>'<label><input name="payments" type="checkbox" value="'+value+'" '+(store.payments.includes(value)?'checked':'')+'> '+label+'</label>').join('')+'</div>'+field('pix_key','Chave Pix',store.pix_key,'text','maxlength="200"')+'</section><p class="form-error" role="alert" hidden></p><div class="settings-save"><button class="btn" type="submit">Salvar configurações '+icon('check')+'</button><button id="change-password" class="btn secondary" type="button">Alterar senha</button></div></form>';
   bindUploads($('#store-form'));$('#settings-copy').onclick=()=>copy(location.origin+'/loja/'+store.slug);$('#change-password').onclick=passwordDialog;
+  $('#dashboard-content').insertAdjacentHTML('afterbegin',alertsPanel());bindAlertsPanel();
   if(role==='owner'){$('#dashboard-content').insertAdjacentHTML('afterbegin','<section class="panel" id="team-panel"><div class="loading small-loading">Carregando equipe…</div></section>');teamPanel();}
   const bindZones=()=>$$('[data-remove-zone]').forEach(b=>b.onclick=()=>b.closest('.zone-row').remove());bindZones();
   $('#add-zone').onclick=()=>{$('#zone-rows').insertAdjacentHTML('beforeend',zoneRow({name:'',fee:store.delivery_fee}));bindZones();$('#zone-rows .zone-row:last-child input').focus();};

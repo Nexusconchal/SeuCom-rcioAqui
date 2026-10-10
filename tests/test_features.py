@@ -301,3 +301,33 @@ def test_team_roles_are_enforced_by_the_server(app, shop):
     assert register(other, "outra-loja", "other@example.com").status_code == 201
     assert other.get("/api/admin/team").json["members"] == []
     assert send(other, "PATCH", f"/api/admin/team/{kid}", {"active": False}).status_code == 404
+
+
+def test_push_subscription_and_new_order_alert(app, shop):
+    client, pid = shop
+    sent = []
+
+    def fake_deliver(config, subscriptions, message):
+        sent.append((len(subscriptions), message))
+        return [s["endpoint"] for s in subscriptions if "morto" in s["endpoint"]]
+
+    app.extensions["push_deliver"] = fake_deliver
+    worker = client.get("/sw.js")
+    assert worker.status_code == 200 and worker.headers["Service-Worker-Allowed"] == "/"
+    key = client.get("/api/admin/push/key").json["public_key"]
+    assert len(key) == 87 and client.get("/api/admin/push/key").json["public_key"] == key
+    sub = {"endpoint": "https://push.example.com/aparelho-1", "keys": {"p256dh": "B" * 87, "auth": "a" * 22}}
+    assert send(client, "POST", "/api/admin/push/subscribe", {**sub, "endpoint": "http://inseguro.example.com/x"}).status_code == 400
+    assert send(client, "POST", "/api/admin/push/subscribe", sub).status_code == 201
+    assert send(client, "POST", "/api/admin/push/subscribe", {**sub, "endpoint": "https://push.example.com/morto"}).status_code == 201
+    make_order(client, pid)
+    count, message = sent[-1]
+    assert count == 2 and message["title"].startswith("Novo pedido #") and "Cliente Teste" in message["body"]
+    # O aparelho que não existe mais é removido sozinho.
+    assert send(client, "POST", "/api/admin/push/test", {}).json["sent"] == 1
+    # Pedido de balcão não dispara aviso para a própria loja.
+    before = len(sent)
+    assert send(client, "POST", "/api/admin/orders", payload(pid), uuid.uuid4().hex).status_code == 201
+    assert len(sent) == before
+    assert send(client, "POST", "/api/admin/push/unsubscribe", {"endpoint": sub["endpoint"]}).status_code == 200
+    assert send(client, "POST", "/api/admin/push/test", {}).json["sent"] == 0

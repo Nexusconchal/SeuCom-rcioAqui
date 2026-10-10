@@ -19,6 +19,7 @@ import click
 from database import connect, initialize
 from business import register_business
 from storage import put_image
+from notify import notify_store, vapid_keys
 from flask import Flask, abort, g, jsonify, redirect, request, send_from_directory, session
 from markupsafe import escape
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -33,7 +34,8 @@ STATUSES = {"new": {"preparing", "cancelled"}, "preparing": {"ready", "cancelled
             "completed": set(), "cancelled": set()}
 ROLE_LABELS = {"owner": "Dono", "manager": "Gerente", "cashier": "Caixa", "kitchen": "Cozinha"}
 # O dono pode tudo. Os demais só acessam o que a função precisa (o servidor confere em cada chamada).
-ROLE_BASE = {"admin_store", "merchant_notices", "change_password", "admin_orders", "admin_products", "drivers", "set_open"}
+ROLE_BASE = {"admin_store", "merchant_notices", "change_password", "admin_orders", "admin_products", "drivers", "set_open",
+             "push_key", "push_subscribe", "push_unsubscribe", "push_test"}
 ROLE_ALLOWED = {
     "kitchen": ROLE_BASE | {"update_order"},
     "cashier": ROLE_BASE | {"update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
@@ -96,6 +98,7 @@ def create_app(test_config=None):
         DATABASE_URL=os.getenv("DATABASE_URL", ""), DATABASE_SCHEMA=os.getenv("DATABASE_SCHEMA", "seucomercio"),
         STORAGE_UPLOAD_URL=os.getenv("STORAGE_UPLOAD_URL", ""), STORAGE_UPLOAD_TOKEN=os.getenv("STORAGE_UPLOAD_TOKEN", ""),
         STORAGE_PUBLIC_URL=os.getenv("STORAGE_PUBLIC_URL", ""),
+        VAPID_PRIVATE_KEY=os.getenv("VAPID_PRIVATE_KEY", "").replace("\\n", "\n"), PUSH_CONTACT=os.getenv("PUSH_CONTACT", "suporte@seucomercioaqui.com.br"),
         UPLOAD_DIR=os.getenv("UPLOAD_DIR", str(BASE / "instance" / "uploads")),
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=production,
         PERMANENT_SESSION_LIFETIME=timedelta(hours=12), MAX_CONTENT_LENGTH=8 * 1024 * 1024,
@@ -694,6 +697,10 @@ def create_app(test_config=None):
             conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, "new", stamp))
             if coupon_id:
                 conn.execute("UPDATE coupons SET uses=uses+1 WHERE id=?", (coupon_id,))
+        if not getattr(g, "manual_order", False):
+            when = (" • agendado " + datetime.fromisoformat(scheduled).astimezone(ZONE).strftime("%d/%m %H:%M")) if scheduled else ""
+            notify_store(app, store["id"], {"title": f"Novo pedido #{number}", "tag": f"pedido-{oid}", "url": "/painel",
+                                            "body": f"{customer} • R$ {total/100:.2f}".replace(".", ",") + (" • entrega" if mode == "delivery" else " • retirada") + when})
         return jsonify(token=token, number=number, total=total), 201
 
     @app.post('/api/admin/orders')
@@ -740,6 +747,50 @@ def create_app(test_config=None):
     @owner
     def admin_store():
         return jsonify(store=store_dict(g.store, True), role=g.role, role_label=ROLE_LABELS[g.role])
+
+    @app.get("/sw.js")
+    def service_worker():
+        response = send_from_directory(app.static_folder, "sw.js", mimetype="text/javascript", max_age=0)
+        response.headers["Service-Worker-Allowed"] = "/"
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    @app.get("/api/admin/push/key")
+    @owner
+    def push_key():
+        return jsonify(public_key=vapid_keys(app.config, db())[1])
+
+    @app.post("/api/admin/push/subscribe")
+    @owner
+    def push_subscribe():
+        value = data()
+        endpoint = text(value, "endpoint", 20, 600)
+        keys = value.get("keys")
+        if not endpoint.startswith("https://") or not isinstance(keys, dict):
+            abort(400, description="Assinatura de aviso inválida.")
+        p256dh, auth_key = text(keys, "p256dh", 20, 200), text(keys, "auth", 10, 100)
+        with transaction() as conn:
+            conn.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (endpoint,))
+            if conn.execute("SELECT COUNT(*) FROM push_subscriptions WHERE user_id=?", (g.user["id"],)).fetchone()[0] >= 10:
+                conn.execute("DELETE FROM push_subscriptions WHERE id=(SELECT MIN(id) FROM push_subscriptions WHERE user_id=?)", (g.user["id"],))
+            conn.execute("INSERT INTO push_subscriptions(store_id,user_id,endpoint,p256dh,auth,created_at) VALUES(?,?,?,?,?,?)",
+                         (g.store["id"], g.user["id"], endpoint, p256dh, auth_key, now()))
+        return jsonify(ok=True), 201
+
+    @app.post("/api/admin/push/unsubscribe")
+    @owner
+    def push_unsubscribe():
+        endpoint = text(data(), "endpoint", 1, 600)
+        db().execute("DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=?", (endpoint, g.user["id"]))
+        return jsonify(ok=True)
+
+    @app.post("/api/admin/push/test")
+    @owner
+    def push_test():
+        limited("push-test", 10)
+        sent = notify_store(app, g.store["id"], {"title": "Teste de aviso", "body": "Tudo certo! Os pedidos novos vão chegar assim.",
+                                                 "tag": "teste", "url": "/painel"}, user_id=g.user["id"])
+        return jsonify(ok=True, sent=sent)
 
     @app.post("/api/admin/store/open")
     @owner
