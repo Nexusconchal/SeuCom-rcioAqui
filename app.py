@@ -19,7 +19,7 @@ import click
 from database import connect, initialize
 from business import register_business
 from storage import put_image
-from flask import Flask, abort, g, jsonify, request, send_from_directory, session
+from flask import Flask, abort, g, jsonify, redirect, request, send_from_directory, session
 from markupsafe import escape
 from PIL import Image, ImageOps, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException
@@ -314,7 +314,9 @@ def create_app(test_config=None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         if production:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
@@ -348,10 +350,21 @@ def create_app(test_config=None):
     @app.get("/")
     @app.get("/entrar")
     @app.get("/painel")
-    @app.get("/plataforma")
     @app.get("/pedido/<token>")
     def page(**kwargs):
         return send_from_directory(app.static_folder, "index.html")
+
+    @app.get("/admin")
+    def owner_site():
+        """Central do Dono: endereço próprio, fora de qualquer menu das lojas."""
+        response = send_from_directory(app.static_folder, "index.html")
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/plataforma")
+    def old_platform_address():
+        return redirect("/admin", 301)
 
     @app.get("/loja/<slug>")
     def store_page(slug):
@@ -438,9 +451,14 @@ def create_app(test_config=None):
         limited("login", 15)
         value = data()
         email, password = text(value, "email", 1, 254).lower(), text(value, "password", 1, 128)
+        # Além do limite por IP, limita tentativas por conta (protege contra ataque distribuído).
+        limited("login-account:" + hashlib.sha256(email.encode()).hexdigest(), 10, 900, per_ip=False)
         user = one("SELECT * FROM users WHERE email=?", (email,))
         if not user or not check_password_hash(user["password_hash"], password):
             abort(401, description="E-mail ou senha incorretos.")
+        if user["platform_admin"]:
+            db().execute("INSERT INTO audit_log(actor_id,store_id,action,detail,created_at) VALUES(?,?,?,?,?)",
+                         (user["id"], None, "auth.admin_login", request.remote_addr or "", now()))
         return establish(user)
 
     @app.post("/api/auth/logout")

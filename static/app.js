@@ -1,4 +1,4 @@
-import { renderPlatform } from './management.js';
+import { renderOwnerSite } from './management.js';
 import { $, icon, brand, auth, bootstrap, api, bindForm, esc, toast, attachFallbacks } from './ui.js';
 import { renderMenu, renderTracking } from './menu.js';
 import { renderDashboard } from './dashboard.js';
@@ -9,7 +9,7 @@ async function start(){
     const path=location.pathname.split('/').filter(Boolean);
     if(path[0]==='loja')return await renderMenu(decodeURIComponent(path[1]||''));
     if(path[0]==='pedido')return await renderTracking(path[1]||'');
-    if(path[0]==='plataforma')return auth.user?await renderPlatform():location.replace('/entrar');
+    if(path[0]==='admin'||path[0]==='plataforma')return await renderOwnerSite();
     if(path[0]==='painel')return auth.user?await renderDashboard():location.replace('/entrar');
     if(path[0]==='entrar')return loginPage();
     landing();

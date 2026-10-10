@@ -11,7 +11,16 @@ from zoneinfo import ZoneInfo
 import click
 from flask import abort, g, jsonify, request, session
 
+import reports
+
 ZONE = ZoneInfo('America/Sao_Paulo')
+MONTHS = ('janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro')
+PAY = {'pix': 'Pix', 'cash': 'Dinheiro', 'card': 'Cartão'}
+STATUS = {'new': 'Novo', 'preparing': 'Em preparo', 'ready': 'Pronto', 'delivering': 'Em entrega', 'completed': 'Concluído', 'cancelled': 'Cancelado'}
+
+
+def month_label(label):
+    return MONTHS[int(label[5:]) - 1].capitalize() + ' de ' + label[:4]
 SCOPES = {'orders:read', 'deliveries:write'}
 
 
@@ -235,16 +244,7 @@ def register_business(app, helpers):
                        gross_store_sales=sum(s['revenue'] for s in stores),
                        audit=h.rows('SELECT action,detail,created_at FROM audit_log ORDER BY id DESC LIMIT 30'))
 
-    @app.get('/api/platform/monthly')
-    @platform
-    def platform_monthly():
-        """Evolução mês a mês e ranking das lojas no mês escolhido."""
-        try:
-            count=int(request.args.get('months','12'))
-        except ValueError:
-            abort(400,description='Quantidade de meses inválida.')
-        if not 1<=count<=36:
-            abort(400,description='Use de 1 a 36 meses.')
+    def monthly_rows(count):
         current=datetime.now(ZONE).replace(day=1)
         labels=[]
         year,mon=current.year,current.month
@@ -264,6 +264,19 @@ def register_business(app, helpers):
             months.append(dict(month=label,orders=o['orders'],gmv=o['gmv'],commission=o['commission'],active_stores=o['active_stores'],
                                cancelled=c,received=l['received'],expenses=l['expenses'],result=l['received']-l['expenses'],new_stores=n,
                                ticket=o['gmv']//o['orders'] if o['orders'] else 0))
+        return labels,months
+
+    @app.get('/api/platform/monthly')
+    @platform
+    def platform_monthly():
+        """Evolução mês a mês e ranking das lojas no mês escolhido."""
+        try:
+            count=int(request.args.get('months','12'))
+        except ValueError:
+            abort(400,description='Quantidade de meses inválida.')
+        if not 1<=count<=36:
+            abort(400,description='Use de 1 a 36 meses.')
+        labels,months=monthly_rows(count)
         selected=request.args.get('month',labels[0])
         start,end=month_bounds(selected)
         ranking=h.rows('''SELECT s.id,s.name,s.enabled,COUNT(o.id) AS orders,COALESCE(SUM(o.total),0) AS gmv,
@@ -409,7 +422,10 @@ def register_business(app, helpers):
     @h.owner
     def integrations():
         return jsonify(base_url=app.config['PUBLIC_URL'] or request.host_url.rstrip('/'), scopes=sorted(SCOPES),
-            keys=h.rows('SELECT id,name,prefix,scopes,created_at,last_used_at,revoked_at FROM api_keys WHERE store_id=? ORDER BY id DESC',(g.store['id'],)),
+            keys=h.rows('''SELECT k.id,k.name,k.prefix,k.scopes,k.created_at,k.last_used_at,k.revoked_at,
+                (SELECT COUNT(*) FROM delivery_links l WHERE l.key_id=k.id) AS deliveries,
+                (SELECT COUNT(*) FROM integration_events e WHERE e.key_id=k.id) AS events
+                FROM api_keys k WHERE k.store_id=? AND k.deleted_at IS NULL ORDER BY CASE WHEN k.revoked_at IS NULL THEN 0 ELSE 1 END,k.id DESC''',(g.store['id'],)),
             deliveries=h.rows('''SELECT l.id,l.order_id,o.number,l.external_id,l.provider,l.status,l.updated_at
              FROM delivery_links l JOIN orders o ON o.id=l.order_id WHERE l.store_id=? ORDER BY l.id DESC LIMIT 100''',(g.store['id'],)))
 
@@ -420,7 +436,7 @@ def register_business(app, helpers):
         scopes=value.get('scopes',[])
         if not isinstance(scopes,list) or not scopes or any(not isinstance(s,str) or s not in SCOPES for s in scopes):
             abort(400,description='Selecione permissões válidas.')
-        if h.one('SELECT COUNT(*) FROM api_keys WHERE store_id=? AND revoked_at IS NULL',(g.store['id'],))[0]>=10:
+        if h.one('SELECT COUNT(*) FROM api_keys WHERE store_id=? AND revoked_at IS NULL AND deleted_at IS NULL',(g.store['id'],))[0]>=10:
             abort(409,description='Revogue uma chave antes de criar outra (limite de 10 ativas).')
         token='sca_'+secrets.token_urlsafe(32)
         with h.transaction() as conn:
@@ -438,12 +454,172 @@ def register_business(app, helpers):
             audit('key.revoke',str(kid),g.store['id'])
         return jsonify(ok=True)
 
+    def store_key(kid):
+        key=h.one('SELECT * FROM api_keys WHERE id=? AND store_id=? AND deleted_at IS NULL',(kid,g.store['id']))
+        if not key:
+            abort(404,description='Chave não encontrada.')
+        return key
+
+    @app.patch('/api/admin/integrations/keys/<int:kid>')
+    @h.owner
+    def rename_key(kid):
+        store_key(kid)
+        name=h.text(h.data(),'name',2,80)
+        with h.transaction() as conn:
+            conn.execute('UPDATE api_keys SET name=? WHERE id=?',(name,kid))
+            audit('key.rename',str(kid),g.store['id'])
+        return jsonify(ok=True)
+
+    @app.post('/api/admin/integrations/keys/<int:kid>/rotate')
+    @h.owner
+    def rotate_key(kid):
+        """Nova chave no mesmo cadastro: a antiga para de funcionar e as entregas vinculadas continuam ligadas."""
+        key=store_key(kid)
+        if key['revoked_at'] and h.one('SELECT COUNT(*) FROM api_keys WHERE store_id=? AND revoked_at IS NULL AND deleted_at IS NULL',(g.store['id'],))[0]>=10:
+            abort(409,description='Revogue uma chave antes de reativar outra (limite de 10 ativas).')
+        token='sca_'+secrets.token_urlsafe(32)
+        with h.transaction() as conn:
+            conn.execute('UPDATE api_keys SET token_hash=?,prefix=?,revoked_at=NULL,last_used_at=NULL WHERE id=?',
+                         (hashlib.sha256(token.encode()).hexdigest(),token[:12],kid))
+            audit('key.rotate',str(kid),g.store['id'])
+        return jsonify(id=kid,token=token)
+
+    @app.delete('/api/admin/integrations/keys/<int:kid>/permanent')
+    @h.owner
+    def delete_key(kid):
+        """Exclui da lista. Se a chave já vinculou entregas, o registro fica guardado só para o histórico."""
+        key=store_key(kid)
+        with h.transaction() as conn:
+            used=conn.execute('SELECT (SELECT COUNT(*) FROM delivery_links WHERE key_id=?)+(SELECT COUNT(*) FROM integration_events WHERE key_id=?)',(kid,kid)).fetchone()[0]
+            if used:
+                conn.execute('UPDATE api_keys SET revoked_at=COALESCE(revoked_at,?),deleted_at=? WHERE id=?',(h.now(),h.now(),kid))
+            else:
+                conn.execute('DELETE FROM api_keys WHERE id=?',(kid,))
+            audit('key.delete',key['name'],g.store['id'])
+        return jsonify(ok=True)
+
+    @app.post('/api/admin/integrations/test')
+    @h.owner
+    def test_key():
+        token=h.text(h.data(),'token',1,100)
+        if not re.fullmatch(r'sca_[A-Za-z0-9_-]{43}',token):
+            return jsonify(ok=False,message='Isso não parece uma chave do SeuComércioAqui. Ela começa com sca_ e tem 47 caracteres.')
+        key=h.one('SELECT * FROM api_keys WHERE token_hash=? AND store_id=? AND deleted_at IS NULL',(hashlib.sha256(token.encode()).hexdigest(),g.store['id']))
+        if not key:
+            return jsonify(ok=False,message='Chave não encontrada nesta loja. Ela pode ter sido trocada ou ser de outra loja.')
+        if key['revoked_at']:
+            return jsonify(ok=False,message='Esta chave foi revogada e não funciona mais. Gere uma nova chave.')
+        if not g.store['enabled']:
+            return jsonify(ok=False,message='A chave está certa, mas a loja está bloqueada pela plataforma.')
+        return jsonify(ok=True,message='Chave válida e ativa: '+key['name']+'.',scopes=json.loads(key['scopes']))
+
+    def report_period():
+        month=request.args.get('month')
+        if month:
+            start,end=month_bounds(month)
+            return start,end,month_label(month),month
+        span=days()
+        end=(datetime.now(timezone.utc)+timedelta(days=1)).isoformat(timespec='seconds')
+        return start_of_period(span),end,'Hoje' if span==1 else f'Últimos {span} dias',f'{span}-dias'
+
+    def report_format():
+        fmt=request.args.get('format','pdf')
+        if fmt not in ('pdf','xlsx'):
+            abort(400,description='Use format=pdf ou format=xlsx.')
+        return fmt
+
+    def send_report(fmt,filename,title,subtitle,summary,tables):
+        content,mimetype,extension=reports.build(fmt,title,subtitle,summary,tables)
+        response=app.response_class(content,mimetype=mimetype)
+        response.headers['Content-Disposition']=f'attachment; filename="{filename}.{extension}"'
+        return response
+
+    @app.get('/api/admin/report')
+    @h.owner
+    def merchant_report():
+        fmt=report_format()
+        start,end,label,slug=report_period()
+        sid=g.store['id']
+        orders=h.rows('SELECT * FROM orders WHERE store_id=? AND created_at>=? AND created_at<? ORDER BY id',(sid,start,end))
+        valid=[o for o in orders if o['status']!='cancelled']
+        done=[o for o in valid if o['status']=='completed']
+        expenses=h.rows('SELECT description,amount,category,created_at FROM expenses WHERE store_id=? AND created_at>=? AND created_at<? ORDER BY id',(sid,start,end))
+        revenue=sum(o['total'] for o in done)
+        received=sum(o['total'] for o in valid if o['paid'])
+        spent=sum(e['amount'] for e in expenses)
+        by_day={}
+        for o in done:
+            day=datetime.fromisoformat(o['created_at']).astimezone(ZONE).strftime('%d/%m/%Y')
+            count,total=by_day.get(day,(0,0))
+            by_day[day]=(count+1,total+o['total'])
+        products=h.rows('''SELECT i.name,SUM(i.quantity) AS quantity,SUM(i.quantity*i.unit_price) AS total FROM order_items i JOIN orders o ON o.id=i.order_id
+            WHERE o.store_id=? AND o.status='completed' AND o.created_at>=? AND o.created_at<? GROUP BY i.name ORDER BY total DESC LIMIT 30''',(sid,start,end))
+        summary=[('Vendas concluídas',revenue,'money'),('Pedidos',len(valid),'int'),('Concluídos',len(done),'int'),('Ticket médio',revenue//len(done) if done else 0,'money'),
+                 ('Recebido',received,'money'),('A receber',sum(o['total'] for o in valid if not o['paid']),'money'),('Despesas',spent,'money'),('Saldo (recebido - despesas)',received-spent,'money'),
+                 ('Cancelados',len(orders)-len(valid),'int'),('Entregas',sum(o['mode']=='delivery' for o in valid),'int'),('Retiradas',sum(o['mode']=='pickup' for o in valid),'int'),
+                 ('Taxas de entrega',sum(o['delivery_fee'] for o in done),'money')]
+        tables=[
+            {'title':'Vendas por dia','columns':[('Dia','text'),('Pedidos concluídos','int'),('Vendas','money')],'rows':[[d,c,t] for d,(c,t) in by_day.items()]},
+            {'title':'Formas de pagamento','columns':[('Forma','text'),('Pedidos','int'),('Valor','money'),('Já recebido','money')],
+             'rows':[[PAY[m],sum(o['payment']==m for o in valid),sum(o['total'] for o in valid if o['payment']==m),
+                      sum(o['total'] for o in valid if o['payment']==m and o['paid'])] for m in ('pix','cash','card')]},
+            {'title':'Produtos mais vendidos','columns':[('Produto','text'),('Quantidade','int'),('Vendas','money')],'rows':[[p['name'],p['quantity'],p['total']] for p in products]},
+            {'title':'Pedidos','columns':[('Nº','int'),('Data','date'),('Cliente','text'),('Tipo','text'),('Bairro','text'),('Pagamento','text'),('Situação','text'),('Pago','text'),('Total','money')],
+             'rows':[[o['number'],o['created_at'],o['customer'],'Entrega' if o['mode']=='delivery' else 'Retirada',o['zone'],PAY[o['payment']],STATUS[o['status']],
+                      'Sim' if o['paid'] else 'Não',o['total']] for o in orders]},
+            {'title':'Despesas','columns':[('Data','date'),('Descrição','text'),('Tipo','text'),('Valor','money')],
+             'rows':[[e['created_at'],e['description'],'Compra de estoque' if e['category']=='inventory' else 'Operação',e['amount']] for e in expenses]},
+        ]
+        return send_report(fmt,f"relatorio-{g.store['slug']}-{slug}",'Relatório de vendas • '+g.store['name'],label,summary,tables)
+
+    @app.get('/api/platform/report')
+    @platform
+    def platform_report():
+        fmt=report_format()
+        month=request.args.get('month',datetime.now(ZONE).strftime('%Y-%m'))
+        start,end=month_bounds(month)
+        _,months=monthly_rows(12)
+        current=next((m for m in months if m['month']==month),None)
+        if current is None:
+            abort(400,description='Escolha um dos últimos 12 meses.')
+        today=datetime.now(ZONE).date().isoformat()
+        stores=h.rows('''SELECT s.*,u.email,COALESCE(o.orders,0) AS orders,COALESCE(o.gmv,0) AS gmv,COALESCE(o.commission,0) AS commission,COALESCE(r.received,0) AS received
+            FROM stores s JOIN users u ON u.id=s.owner_id
+            LEFT JOIN (SELECT store_id,COUNT(*) AS orders,SUM(total) AS gmv,SUM(platform_fee) AS commission FROM orders
+              WHERE status='completed' AND created_at>=? AND created_at<? GROUP BY store_id) o ON o.store_id=s.id
+            LEFT JOIN (SELECT store_id,SUM(amount) AS received FROM platform_ledger WHERE kind='receipt' AND voided_at IS NULL
+              AND created_at>=? AND created_at<? GROUP BY store_id) r ON r.store_id=s.id
+            ORDER BY COALESCE(o.gmv,0) DESC,s.name''',(start,end,start,end))
+        for x in stores:
+            x['fee']=effective_fee(x,today)
+        due=sum(x['fee'] for x in stores if x['enabled'])
+        open_fees=sum(max(0,x['fee']-x['received']) for x in stores if x['enabled'])
+        ledger=h.rows('''SELECT l.*,s.name AS store_name FROM platform_ledger l LEFT JOIN stores s ON s.id=l.store_id
+            WHERE l.created_at>=? AND l.created_at<? AND l.voided_at IS NULL ORDER BY l.id''',(start,end))
+        m=current
+        summary=[('Vendas das lojas',m['gmv'],'money'),('Pedidos concluídos',m['orders'],'int'),('Ticket médio',m['ticket'],'money'),('Comissões geradas',m['commission'],'money'),
+                 ('Recebido pela plataforma',m['received'],'money'),('Despesas da plataforma',m['expenses'],'money'),('Resultado',m['result'],'money'),('Lojas vendendo',m['active_stores'],'int'),
+                 ('Lojas novas',m['new_stores'],'int'),('Lojas cadastradas',len(stores),'int'),('Mensalidades vigentes',due,'money'),('Mensalidades em aberto',open_fees,'money')]
+        tables=[
+            {'title':'Últimos 12 meses','columns':[('Mês','text'),('Pedidos','int'),('Vendas das lojas','money'),('Ticket','money'),('Comissões','money'),('Recebido','money'),
+                                                    ('Despesas','money'),('Resultado','money'),('Lojas ativas','int'),('Novas','int')],
+             'rows':[[month_label(x['month']),x['orders'],x['gmv'],x['ticket'],x['commission'],x['received'],x['expenses'],x['result'],x['active_stores'],x['new_stores']] for x in reversed(months)]},
+            {'title':'Ranking das lojas no mês','columns':[('Loja','text'),('Pedidos','int'),('Vendas','money'),('Comissão','money'),('Pagou à plataforma','money')],
+             'rows':[[x['name'],x['orders'],x['gmv'],x['commission'],x['received']] for x in stores if x['orders'] or x['received']]},
+            {'title':'Lojas e mensalidades','columns':[('Loja','text'),('E-mail','text'),('Situação','text'),('Mensalidade','money'),('Pago no mês','money'),('Em aberto','money'),('Observação','text')],
+             'rows':[[x['name'],x['email'],'Ativa' if x['enabled'] else 'Bloqueada',x['fee'],x['received'],max(0,x['fee']-x['received']) if x['enabled'] else 0,
+                      x['blocked_reason'] if not x['enabled'] else (('Promoção: '+(x['promo_label'] or 'mensalidade promocional')) if x['fee']!=x['monthly_fee'] else '')] for x in stores]},
+            {'title':'Recebimentos e despesas do mês','columns':[('Data','date'),('Loja','text'),('Tipo','text'),('Descrição','text'),('Valor','money')],
+             'rows':[[l['created_at'],l['store_name'] or 'Plataforma','Recebimento' if l['kind']=='receipt' else 'Despesa',l['description'],l['amount']] for l in ledger]},
+        ]
+        return send_report(fmt,f'relatorio-plataforma-{month}','Relatório da plataforma',month_label(month),summary,tables)
+
     def partner_auth():
         header=request.headers.get('Authorization','')
         if not re.fullmatch(r'Bearer sca_[A-Za-z0-9_-]{43}',header):
             abort(401,description='Informe Authorization: Bearer com uma chave de integração.')
         token=header[7:]
-        key=h.one('SELECT * FROM api_keys WHERE token_hash=? AND revoked_at IS NULL',(hashlib.sha256(token.encode()).hexdigest(),))
+        key=h.one('SELECT * FROM api_keys WHERE token_hash=? AND revoked_at IS NULL AND deleted_at IS NULL',(hashlib.sha256(token.encode()).hexdigest(),))
         if not key:
             abort(401,description='Chave inválida ou revogada.')
         store=h.one('SELECT * FROM stores WHERE id=? AND enabled=1',(key['store_id'],))

@@ -13,6 +13,7 @@ ADDITIONS = {
     'order_items': {'unit_cost': 'INTEGER'},
     'expenses': {'category': "TEXT NOT NULL DEFAULT 'operating'"},
     'platform_ledger': {'idempotency_key': 'TEXT', 'payload_hash': 'TEXT', 'voided_at': 'TEXT'},
+    'api_keys': {'deleted_at': 'TEXT'},
 }
 
 TABLES = """

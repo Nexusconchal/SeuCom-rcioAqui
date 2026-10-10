@@ -50,7 +50,7 @@ export function toast(message){
 }
 export function modal(title,html,wide=false){
   const el=$('#modal');if(el.open)el.close();
-  el.className=wide?'wide':'';
+  el.className=wide==='drawer'?'drawer':wide?'wide':'';
   el.innerHTML='<div class="dialog-head"><h2 id="modal-title">'+esc(title)+'</h2><button class="icon-btn" data-close aria-label="Fechar">'+icon('close')+'</button></div>'+html;
   el.showModal();$('[data-close]',el).addEventListener('click',()=>el.close());
   el.onclick=e=>{if(e.target===el)el.close();};

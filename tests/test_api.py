@@ -236,9 +236,14 @@ def test_parallel_orders_reserve_last_stock_atomically(app, shop):
 def test_rate_limiter(app):
     app.config["RATE_LIMIT_ENABLED"] = True
     client = app.test_client()
-    for _ in range(15):
+    # Por conta: 10 tentativas erradas bloqueiam aquele e-mail, mesmo vindo de vários IPs.
+    for _ in range(10):
         assert send(client, "POST", "/api/auth/login", {"email": "none@example.com", "password": "wrong"}).status_code == 401
     assert send(client, "POST", "/api/auth/login", {"email": "none@example.com", "password": "wrong"}).status_code == 429
+    # Por IP: depois de 15 tentativas no total, outros e-mails também são bloqueados.
+    for i in range(4):
+        assert send(client, "POST", "/api/auth/login", {"email": f"other{i}@example.com", "password": "wrong"}).status_code == 401
+    assert send(client, "POST", "/api/auth/login", {"email": "last@example.com", "password": "wrong"}).status_code == 429
 
 
 def test_price_change_requires_new_confirmation(shop):

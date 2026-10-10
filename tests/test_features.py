@@ -123,3 +123,66 @@ def test_platform_monthly_block_promo_and_notices(app, shop):
     assert [n["title"] for n in notices] == ["Indique e ganhe"]
     assert send(client, "PATCH", f"/api/platform/notices/{created.json['id']}", {"active": False}).status_code == 200
     assert other.get("/api/admin/notices").json["notices"] == []
+
+
+def test_owner_site_is_separate_and_not_indexed(app, shop):
+    client, _ = shop
+    page = client.get("/admin")
+    assert page.status_code == 200 and "noindex" in page.headers["X-Robots-Tag"]
+    old = client.get("/plataforma")
+    assert old.status_code == 301 and old.headers["Location"].endswith("/admin")
+    assert client.get("/api/platform/report").status_code == 403
+
+
+def test_merchant_and_platform_reports_in_pdf_and_excel(app, shop):
+    import io
+    from openpyxl import load_workbook
+    client, pid = shop
+    order = make_order(client, pid)
+    advance(client, order["id"], "preparing", "ready", "delivering", "completed")
+    send(client, "POST", "/api/admin/expenses", {"description": "Gás de cozinha", "amount": 12000})
+    pdf = client.get("/api/admin/report?days=30&format=pdf")
+    assert pdf.status_code == 200 and pdf.data[:5] == b"%PDF-" and pdf.mimetype == "application/pdf"
+    assert "relatorio-minha-loja-30-dias.pdf" in pdf.headers["Content-Disposition"]
+    excel = client.get("/api/admin/report?month=" + datetime.now(ZONE).strftime("%Y-%m") + "&format=xlsx")
+    book = load_workbook(io.BytesIO(excel.data))
+    assert {"Resumo", "Pedidos", "Despesas", "Produtos mais vendidos"} <= set(book.sheetnames)
+    assert book["Pedidos"].max_row == 2 and book["Pedidos"]["I2"].value == order["total"] / 100
+    assert client.get("/api/admin/report?days=30&format=doc").status_code == 400
+    app.test_cli_runner().invoke(args=["grant-platform-admin", "--email", "owner@example.com"])
+    platform_pdf = client.get("/api/platform/report?format=pdf")
+    assert platform_pdf.status_code == 200 and platform_pdf.data[:5] == b"%PDF-"
+    platform_xlsx = load_workbook(io.BytesIO(client.get("/api/platform/report?format=xlsx").data))
+    assert platform_xlsx["Últimos 12 meses"].max_row == 13
+    assert client.get("/api/platform/report?month=2001-01").status_code == 400
+
+
+def test_api_keys_rename_rotate_test_and_delete(app, shop):
+    client, pid = shop
+    created = send(client, "POST", "/api/admin/integrations/keys", {"name": "MotoJá", "scopes": ["orders:read", "deliveries:write"]}).json
+    kid, token = created["id"], created["token"]
+    assert send(client, "POST", "/api/admin/integrations/test", {"token": token}).json["ok"] is True
+    assert send(client, "POST", "/api/admin/integrations/test", {"token": "abc"}).json["ok"] is False
+    assert send(client, "PATCH", f"/api/admin/integrations/keys/{kid}", {"name": "MotoJá Conchal"}).status_code == 200
+    rotated = send(client, "POST", f"/api/admin/integrations/keys/{kid}/rotate", {}).json["token"]
+    partner = app.test_client()
+    assert partner.get("/api/v1/store", headers={"Authorization": "Bearer " + token}).status_code == 401
+    assert partner.get("/api/v1/store", headers={"Authorization": "Bearer " + rotated}).status_code == 200
+    # Uma chave já usada em entrega sai da lista, mas o vínculo do pedido continua.
+    order = make_order(client, pid)
+    advance(client, order["id"], "preparing", "ready")
+    auth = {"Authorization": "Bearer " + rotated}
+    assert partner.post(f"/api/v1/deliveries/{order['id']}/claim", json={"external_id": "c-1", "provider": "motoja"}, headers=auth).status_code == 201
+    listed = client.get("/api/admin/integrations").json
+    assert listed["keys"][0]["name"] == "MotoJá Conchal" and listed["keys"][0]["deliveries"] == 1
+    assert send(client, "DELETE", f"/api/admin/integrations/keys/{kid}/permanent", {}).status_code == 200
+    after = client.get("/api/admin/integrations").json
+    assert after["keys"] == [] and len(after["deliveries"]) == 1
+    assert partner.get("/api/v1/store", headers=auth).status_code == 401
+    assert send(client, "POST", "/api/admin/integrations/test", {"token": rotated}).json["ok"] is False
+    # Chave nunca usada é apagada de vez; outra loja não consegue mexer.
+    unused = send(client, "POST", "/api/admin/integrations/keys", {"name": "Teste", "scopes": ["orders:read"]}).json["id"]
+    other = app.test_client()
+    assert register(other, "outra-loja", "other@example.com").status_code == 201
+    assert send(other, "DELETE", f"/api/admin/integrations/keys/{unused}/permanent", {}).status_code == 404
+    assert send(client, "DELETE", f"/api/admin/integrations/keys/{unused}/permanent", {}).status_code == 200

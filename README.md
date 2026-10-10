@@ -26,7 +26,10 @@ Cardápio digital e gestão de pedidos para pequenos comércios. Frontend respon
 - Alerta sonoro, notificação do navegador e contador no título quando chega pedido novo no painel.
 - Botão para o cliente enviar o resumo do pedido no WhatsApp da loja; prévia do link da loja (nome, descrição e foto) ao compartilhar no WhatsApp.
 - QR Code do cardápio para imprimir (PNG ou SVG) e ícones para instalar o painel no celular.
-- Área do dono da plataforma em **/plataforma**: vendas mês a mês com gráfico e ranking das lojas, exportação CSV, bloqueio/desbloqueio com motivo exibido ao lojista, mensalidade promocional com prazo, mensalidades em aberto no mês, saúde das lojas e avisos/promoções exibidos no painel de todos os lojistas.
+- Relatórios em **PDF e Excel** para o lojista (Vendas e caixa) e para o dono da plataforma (mês escolhido).
+- Integrações: renomear, trocar (rotacionar), revogar, excluir e testar chaves de API; exemplos prontos para o parceiro.
+- Pedidos em andamento com rolagem por coluna e detalhes em gaveta lateral (WhatsApp do cliente, imprimir e avançar status).
+- Central do Dono em **/admin**, separada do painel das lojas, com login próprio e sem link no painel dos lojistas (o endereço antigo /plataforma redireciona). Conteúdo: vendas mês a mês com gráfico e ranking das lojas, exportação CSV, bloqueio/desbloqueio com motivo exibido ao lojista, mensalidade promocional com prazo, mensalidades em aberto no mês, saúde das lojas e avisos/promoções exibidos no painel de todos os lojistas.
 - Alteração de senha, logout e recuperação administrativa por comando.
 
 **Pagamentos:** Pix é confirmado manualmente pelo lojista. Dinheiro e cartão são recebidos na entrega ou retirada. Não há gateway bancário, captura de cartão ou confirmação automática de Pix. O link do WhatsApp abre uma conversa com a loja; não envia mensagens automaticamente.
@@ -198,6 +201,6 @@ docs/API.md               Endpoints e exemplos
 
 Esta versão cobre cardápio, pedidos, gestão financeira e administração da plataforma. Disponibiliza uma API de entregas para parceiros; conectores externos ainda precisam ser implementados no parceiro. Não integra emissão fiscal, impressoras via drivers, WhatsApp automático ou conciliação bancária. A impressão usa o navegador.
 
-As sessões são assinadas; senhas usam scrypt; alterações exigem CSRF; preços e estoque são validados pelo servidor; uploads são reprocessados; o painel limita os dados à loja autenticada. O link do pedido mostra itens, valores e status. Os relatórios usam a data de criação do pedido e excluem cancelados. Cancelamentos não executam reembolsos bancários.
+As sessões são assinadas; senhas usam scrypt; login limitado por IP e por conta (10 tentativas/15 min); entradas na Central do Dono ficam no histórico; alterações exigem CSRF; preços e estoque são validados pelo servidor; uploads são reprocessados; o painel limita os dados à loja autenticada. O link do pedido mostra itens, valores e status. Os relatórios usam a data de criação do pedido e excluem cancelados. Cancelamentos não executam reembolsos bancários.
 
 Referências: [segurança no Flask](https://flask.palletsprojects.com/en/stable/web-security/), [uploads](https://flask.palletsprojects.com/en/stable/patterns/fileuploads/), [SQLite](https://docs.python.org/3/library/sqlite3.html).
