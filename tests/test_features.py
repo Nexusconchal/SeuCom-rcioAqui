@@ -95,7 +95,7 @@ def test_platform_monthly_block_promo_and_notices(app, shop):
     assert client.get("/api/platform/monthly?month=2026-13").status_code == 400
 
     # Promoção na mensalidade e inadimplência do mês.
-    contract = {"commission_bps": 0, "monthly_fee": 9900, "enabled": True}
+    contract = {"commission_bps": 0, "monthly_fee": 9900, "enabled": True, "trial_until": ""}
     assert send(client, "PUT", f"/api/platform/stores/{sid}", {**contract, "promo_fee": 0}).status_code == 400
     assert send(client, "PUT", f"/api/platform/stores/{sid}", {**contract, "promo_fee": 4900, "promo_until": "2999-12-31", "promo_label": "Lançamento"}).status_code == 200
     summary = client.get("/api/platform/summary").json
@@ -405,3 +405,63 @@ def test_pix_online_with_mercado_pago(app, shop):
     # Desconectar remove o Pix automático das formas de pagamento.
     assert send(client, "DELETE", "/api/admin/payments/mercadopago", {}).status_code == 200
     assert client.get("/api/store/minha-loja").json["store"]["payments"] == ["cash"]
+
+
+def test_terms_trial_loyalty_and_first_order_coupon(app, shop):
+    client, pid = shop
+    fresh = app.test_client()
+    body = {"name": "Nova", "email": "nova@example.com", "password": "uma-senha-segura", "store_name": "Nova", "slug": "nova-loja"}
+    assert send(fresh, "POST", "/api/auth/register", body).status_code == 400
+    assert send(fresh, "POST", "/api/auth/register", {**body, "accept_terms": True}).status_code == 201
+    assert fresh.get("/api/admin/notices").json["trial_until"] > datetime.now(ZONE).date().isoformat()
+    app.test_cli_runner().invoke(args=["grant-platform-admin", "--email", "owner@example.com"])
+    nova = next(s for s in client.get("/api/platform/summary").json["stores"] if s["slug"] == "nova-loja")
+    assert nova["trial"] and not nova["overdue"]
+    # Cupom de primeira compra.
+    assert send(client, "POST", "/api/admin/coupons", {"code": "PRIMEIRA", "kind": "fixed", "value": 500, "first_order": True}).status_code == 201
+    quote = lambda **v: send(client, "POST", "/api/store/minha-loja/quote", payload(pid, **v))
+    assert quote(coupon="PRIMEIRA", phone="").status_code == 400
+    assert quote(coupon="PRIMEIRA", phone="(11) 98888-7777").json["discount"] == 500
+    assert send(client, "POST", "/api/store/minha-loja/orders", payload(pid, phone="11988887777", coupon="PRIMEIRA"), uuid.uuid4().hex).status_code == 201
+    assert quote(coupon="PRIMEIRA", phone="+55 11 98888-7777").status_code == 400
+    # Fidelidade: a cada 2 pedidos concluídos, R$ 7 de desconto no próximo.
+    store = client.get("/api/admin/store").json["store"]
+    assert send(client, "PUT", "/api/admin/store", {**store, "loyalty_enabled": True, "loyalty_goal": 2, "loyalty_reward": 700}).status_code == 200
+    phone = "11977776666"
+    for _ in range(2):
+        order = make_order(client, pid, phone=phone)
+        advance(client, order["id"], "preparing", "ready", "delivering", "completed")
+    q = quote(phone="(11) 97777-6666").json
+    assert q["loyalty_discount"] == 700 and q["loyalty"]["available"]
+    created = send(client, "POST", "/api/store/minha-loja/orders", payload(pid, phone=phone), uuid.uuid4().hex)
+    assert created.json["total"] == q["total"]
+    again = quote(phone=phone).json
+    assert again["loyalty_discount"] == 0 and again["loyalty"]["remaining"] == 2
+    assert client.get("/api/track/" + created.json["token"]).json["order"]["loyalty_discount"] == 700
+
+
+def test_lgpd_anonymize_and_spreadsheet_import(app, shop):
+    import io as _io
+    client, pid = shop
+    make_order(client, pid, phone="11966665555", customer="Maria Privada")
+    assert send(client, "POST", "/api/admin/customers/11966665555/anonymize", {}).json["orders"] == 1
+    order = client.get("/api/admin/orders").json["orders"][0]
+    assert order["customer"] == "Cliente removido" and order["address"] == "" and order["total"] > 0
+    assert send(client, "POST", "/api/admin/customers/11966665555/anonymize", {}).status_code == 404
+    template = client.get("/api/admin/products/template")
+    assert template.status_code == 200
+    csv_data = ("Categoria;Produto;Descrição;Preço;Foto (link https);Estoque;Destaque\n"
+                "Pizzas;Calabresa;Molho e calabresa;R$ 45,90;;;sim\n"
+                "Pizzas;X;curto;10;;;\n"
+                "Bebidas;Suco;;abc;;;\n"
+                "Bebidas;Água;500 ml;3.5;http://inseguro.com/a.jpg;;\n"
+                "Bebidas;Refri;Lata;6;;12;\n").encode("utf-8")
+    result = client.post("/api/admin/products/import", data={"file": (_io.BytesIO(csv_data), "cardapio.csv")},
+                         headers={"X-CSRF-Token": client.get("/api/session").json["csrf"]}, content_type="multipart/form-data")
+    assert result.status_code == 200, result.json
+    assert result.json["created"] == 2 and [s["line"] for s in result.json["skipped"]] == [3, 4, 5]
+    products = {p["name"]: p for p in client.get("/api/admin/products").json["products"]}
+    assert products["Calabresa"]["price"] == 4590 and products["Calabresa"]["featured"] and products["Refri"]["stock"] == 12
+    xlsx = client.post("/api/admin/products/import", data={"file": (_io.BytesIO(template.data), "modelo.xlsx")},
+                       headers={"X-CSRF-Token": client.get("/api/session").json["csrf"]}, content_type="multipart/form-data")
+    assert xlsx.json["created"] == 3

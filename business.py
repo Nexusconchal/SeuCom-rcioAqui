@@ -1,5 +1,6 @@
 """Private management, platform accounting and tenant-scoped partner API."""
 import hashlib
+import io
 import json
 import re
 import secrets
@@ -214,7 +215,7 @@ def register_business(app, helpers):
         month=month_bounds(datetime.now(ZONE).strftime('%Y-%m'))
         today=datetime.now(ZONE).date().isoformat()
         stores=h.rows('''SELECT s.id,s.name,s.slug,s.open,s.enabled,s.blocked_reason,s.commission_bps,s.monthly_fee,
-             s.promo_fee,s.promo_until,s.promo_label,s.created_at,s.phone,s.pix_key,s.address,u.email,
+             s.promo_fee,s.promo_until,s.promo_label,s.trial_until,s.created_at,s.phone,s.pix_key,s.address,u.email,
              COALESCE(o.orders,0) AS orders,COALESCE(o.revenue,0) AS revenue,COALESCE(o.commission,0) AS commission,
              COALESCE(o.missing,0) AS missing_fees,COALESCE(l.received,0) AS received,COALESCE(l.expenses,0) AS expenses,
              COALESCE(m.received,0) AS received_month,a.last_order,COALESCE(p.products,0) AS products
@@ -233,7 +234,8 @@ def register_business(app, helpers):
         for s in stores:
             s['effective_fee']=effective_fee(s,today)
             s['promo_active']=s['effective_fee']!=s['monthly_fee']
-            s['overdue']=bool(s['enabled'] and s['effective_fee'] and s['received_month']<s['effective_fee'])
+            s['trial']=bool(s['trial_until'] and s['trial_until']>=today)
+            s['overdue']=bool(s['enabled'] and not s['trial'] and s['effective_fee'] and s['received_month']<s['effective_fee'])
             s['setup']={'products':s['products']>0,'phone':bool(s.pop('phone')),'pix':bool(s.pop('pix_key')),'address':bool(s.pop('address'))}
         ledger=h.rows('SELECT l.*,s.name AS store_name FROM platform_ledger l LEFT JOIN stores s ON s.id=l.store_id WHERE l.created_at>=? ORDER BY l.id DESC LIMIT 200',(start,))
         totals=h.one("SELECT COALESCE(SUM(CASE WHEN kind='receipt' THEN amount ELSE 0 END),0) AS received,COALESCE(SUM(CASE WHEN kind='expense' THEN amount ELSE 0 END),0) AS expenses FROM platform_ledger WHERE created_at>=? AND voided_at IS NULL",(start,))
@@ -302,6 +304,12 @@ def register_business(app, helpers):
             promo_fee=h.integer({'promo_fee':promo_fee},'promo_fee')
         promo_until=h.text(value,'promo_until',0,10) if 'promo_until' in value else store['promo_until']
         promo_label=h.text(value,'promo_label',0,80) if 'promo_label' in value else store['promo_label']
+        trial_until=h.text(value,'trial_until',0,10) if 'trial_until' in value else store['trial_until']
+        if trial_until:
+            try:
+                datetime.strptime(trial_until,'%Y-%m-%d')
+            except ValueError:
+                abort(400,description='Data do teste grátis inválida.')
         if promo_until:
             try:
                 datetime.strptime(promo_until,'%Y-%m-%d')
@@ -310,6 +318,7 @@ def register_business(app, helpers):
         if promo_fee is not None and not promo_until:
             abort(400,description='Informe até quando vale a promoção.')
         with h.transaction() as conn:
+            conn.execute('UPDATE stores SET trial_until=? WHERE id=?',(trial_until,sid))
             conn.execute('''UPDATE stores SET commission_bps=?,monthly_fee=?,enabled=?,promo_fee=?,promo_until=?,promo_label=?,
                 blocked_reason=CASE WHEN ?=1 THEN '' ELSE blocked_reason END WHERE id=?''',
                 (commission,fee,enabled,promo_fee,promo_until if promo_fee is not None else '',promo_label if promo_fee is not None else '',enabled,sid))
@@ -375,7 +384,135 @@ def register_business(app, helpers):
     def merchant_notices():
         today=datetime.now(ZONE).date().isoformat()
         return jsonify(notices=h.rows("SELECT id,title,body,kind,created_at FROM platform_notices WHERE active=1 AND (expires='' OR expires>=?) ORDER BY id DESC LIMIT 5",(today,)),
-                       blocked_reason='' if g.store['enabled'] else (g.store['blocked_reason'] or 'Loja suspensa pela plataforma.'))
+                       blocked_reason='' if g.store['enabled'] else (g.store['blocked_reason'] or 'Loja suspensa pela plataforma.'),
+                       trial_until=g.store['trial_until'] if g.store['trial_until']>=today else '')
+
+    IMPORT_HEADERS = ('Categoria', 'Produto', 'Descrição', 'Preço', 'Foto (link https)', 'Estoque', 'Destaque')
+
+    @app.get('/api/admin/products/template')
+    @h.owner
+    def products_template():
+        rows = [['Lanches', 'X-Burger', 'Pão, carne 150 g, queijo e salada', 29.9, '', '', 'sim'],
+                ['Lanches', 'X-Bacon', 'Pão, carne, queijo e bacon crocante', 34.9, '', 20, ''],
+                ['Bebidas', 'Refrigerante lata', '350 ml', 6, '', '', '']]
+        content, mimetype, extension = reports.build('xlsx', 'Modelo de cardápio', 'Preencha uma linha por produto e importe no painel',
+            [], [{'title': 'Cardápio', 'columns': [(h, 'text') for h in IMPORT_HEADERS], 'rows': rows}])
+        response = app.response_class(content, mimetype=mimetype)
+        response.headers['Content-Disposition'] = 'attachment; filename="modelo-cardapio.xlsx"'
+        return response
+
+    def read_sheet(upload):
+        name = (upload.filename or '').lower()
+        raw = upload.read(2 * 1024 * 1024 + 1)
+        if len(raw) > 2 * 1024 * 1024:
+            abort(400, description='Planilha muito grande (máximo 2 MB).')
+        if name.endswith('.xlsx'):
+            from openpyxl import load_workbook
+            try:
+                book = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+            except Exception:
+                abort(400, description='Não consegui abrir a planilha. Salve como .xlsx ou .csv.')
+            sheet = book['Cardápio'] if 'Cardápio' in book.sheetnames else book.worksheets[-1]
+            return [list(r) for r in sheet.iter_rows(values_only=True)]
+        if name.endswith('.csv'):
+            import csv
+            text_data = None
+            for encoding in ('utf-8-sig', 'cp1252'):
+                try:
+                    text_data = raw.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if text_data is None:
+                abort(400, description='Não consegui ler o arquivo CSV.')
+            delimiter = ';' if text_data.split('\n', 1)[0].count(';') >= text_data.split('\n', 1)[0].count(',') else ','
+            return list(csv.reader(io.StringIO(text_data), delimiter=delimiter))
+        abort(400, description='Envie um arquivo .xlsx ou .csv.')
+
+    def parse_price(value):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return round(float(value) * 100)
+        cleaned = re.sub(r'[^\d,.]', '', str(value or ''))
+        if not cleaned:
+            raise ValueError
+        if ',' in cleaned:
+            cleaned = cleaned.replace('.', '').replace(',', '.')
+        return round(float(cleaned) * 100)
+
+    @app.post('/api/admin/products/import')
+    @h.owner
+    def import_products():
+        upload = request.files.get('file')
+        if not upload:
+            abort(400, description='Selecione a planilha.')
+        table_rows = read_sheet(upload)
+        start = next((i for i, r in enumerate(table_rows[:15]) if r and str(r[0] or '').strip().lower() == 'categoria'), None)
+        if start is None:
+            abort(400, description='Não achei a linha de títulos. Use o modelo (primeira coluna "Categoria").')
+        data_rows = [r for r in table_rows[start + 1:] if any(str(c or '').strip() for c in r)]
+        if len(data_rows) > 500:
+            abort(400, description='Importe até 500 produtos por vez.')
+        created, skipped = 0, []
+        with h.transaction() as conn:
+            categories = {r['name'].lower(): r['id'] for r in conn.execute('SELECT id,name FROM categories WHERE store_id=?', (g.store['id'],)).fetchall()}
+            for offset, r in enumerate(data_rows):
+                line = start + offset + 2
+                r = list(r) + [None] * 7
+                category, name, description = (str(r[0] or '').strip()[:80], str(r[1] or '').strip()[:120], str(r[2] or '').strip()[:500])
+                try:
+                    price = parse_price(r[3])
+                except (ValueError, TypeError):
+                    skipped.append({'line': line, 'error': 'preço inválido'})
+                    continue
+                if len(name) < 2:
+                    skipped.append({'line': line, 'error': 'nome do produto vazio'})
+                    continue
+                if not 1 <= price <= 100_000_00:
+                    skipped.append({'line': line, 'error': 'preço precisa ser maior que zero'})
+                    continue
+                photo = str(r[4] or '').strip()
+                if photo and not re.fullmatch(r'https://[^\s]{4,1990}', photo):
+                    skipped.append({'line': line, 'error': 'link da foto precisa começar com https://'})
+                    continue
+                stock_raw = str(r[5] if r[5] is not None else '').strip()
+                try:
+                    stock = None if stock_raw == '' else int(float(stock_raw.replace(',', '.')))
+                    if stock is not None and not 0 <= stock <= 1_000_000:
+                        raise ValueError
+                except ValueError:
+                    skipped.append({'line': line, 'error': 'estoque inválido'})
+                    continue
+                cid = None
+                if category:
+                    cid = categories.get(category.lower())
+                    if cid is None:
+                        cid = conn.execute('INSERT INTO categories(store_id,name,position) VALUES(?,?,?)', (g.store['id'], category, len(categories))).lastrowid
+                        categories[category.lower()] = cid
+                featured = str(r[6] or '').strip().lower() in ('sim', 's', 'x', '1', 'yes', 'true')
+                pid = conn.execute('''INSERT INTO products(store_id,category_id,name,description,price,image,featured,stock,extras,position)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)''', (g.store['id'], cid, name, description, price, photo, int(featured), stock, '[]', offset)).lastrowid
+                if stock is not None:
+                    conn.execute('INSERT INTO stock_movements(store_id,product_id,delta,balance,reason,created_at) VALUES(?,?,?,?,?,?)',
+                                 (g.store['id'], pid, stock, stock, 'Importação de planilha', h.now()))
+                created += 1
+            audit('products.import', f'{created} produtos', g.store['id'])
+        return jsonify(created=created, skipped=skipped)
+
+    @app.post('/api/admin/customers/<phone>/anonymize')
+    @h.owner
+    def anonymize_customer(phone):
+        """Pedido de exclusão (LGPD): apaga nome, telefone e endereço do cliente, mantendo os valores para a contabilidade."""
+        if not re.fullmatch(r'\d{10,13}',phone):
+            abort(400,description='Telefone inválido.')
+        normalized="REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'(',''),')',''),'+','')"
+        with h.transaction() as conn:
+            found=conn.execute(f'SELECT COUNT(*) FROM orders WHERE store_id=? AND {normalized}=?',(g.store['id'],phone)).fetchone()[0]
+            if not found:
+                abort(404,description='Cliente não encontrado.')
+            conn.execute(f"""UPDATE orders SET customer='Cliente removido',phone='00000000000',address='',notes='',review=''
+                WHERE store_id=? AND {normalized}=?""",(g.store['id'],phone))
+            audit('customer.anonymize',str(found)+' pedidos',g.store['id'])
+        return jsonify(ok=True,orders=found)
 
     @app.post('/api/platform/ledger')
     @platform

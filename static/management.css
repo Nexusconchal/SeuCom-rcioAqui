@@ -83,3 +83,8 @@ dialog.drawer{margin:0 0 0 auto;height:100dvh;max-height:100dvh;width:500px;max-
 .ticket{width:72mm;font:12px/1.35 "Courier New",monospace;color:#000}.ticket h1{font-size:16px;text-align:center;margin:0 0 4px;letter-spacing:0}.ticket p{color:#000;margin:4px 0}.ticket hr{border:0;border-top:1px dashed #000;margin:6px 0}.t-center{text-align:center}.t-box{border:1px solid #000;padding:4px;font-weight:700}.t-item{display:flex;justify-content:space-between;gap:6px;margin-top:4px}.t-sub{padding-left:10px}.t-line{display:flex;justify-content:space-between}.t-total{font-size:15px;font-weight:700;margin:4px 0}.t-foot{margin-top:8px;font-size:10px}
 @media(max-width:760px){.alert-row{flex-direction:column;align-items:flex-start}}
 .pix-qr{display:block;margin:10px auto;border-radius:12px;background:#fff}
+
+.legal{max-width:760px;margin:0 auto;padding:30px 18px 60px}.legal h1{font-size:34px;margin-bottom:16px}.legal h2{font-size:19px;margin:22px 0 6px}.legal p{color:var(--ink);line-height:1.7}
+.terms{font-size:13px}.terms a,.checkout-consent a,.legal-links a,footer a{text-decoration:underline}
+.loyalty-hint{margin-top:10px;font-size:13px;color:#9a4a07;display:flex;gap:6px;align-items:center}
+.loyalty-card h2{display:flex;gap:8px;align-items:center}.loyalty-dots{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.loyalty-dots span{width:26px;height:26px;border-radius:50%;border:2px dashed #ffb27a}.loyalty-dots span.on{background:#ff7a1a;border-style:solid;border-color:#ff7a1a}

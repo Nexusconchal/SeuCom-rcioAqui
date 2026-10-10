@@ -126,6 +126,7 @@ def test_new_store_registration_settings_and_product(live):
         page.get_by_label("Nome do comércio", exact=True).fill("Minha Loja Nova")
         page.get_by_label("E-mail", exact=True).fill("new@example.com")
         page.get_by_label("Senha", exact=True).fill("senha-muito-segura")
+        page.locator("[name=accept_terms]").check()
         page.get_by_role("button", name="Criar minha loja", exact=True).click()
         page.wait_for_url("**/painel")
         expect(page.get_by_role("button", name="Loja fechada")).to_be_visible()

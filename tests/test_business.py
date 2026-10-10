@@ -41,7 +41,7 @@ def test_platform_role_cannot_be_self_granted_and_tenant_isolation(app,shop):
     # A newly registered account cannot promote itself through request fields.
     visitor=app.test_client()
     response=send(visitor,'POST','/api/auth/register',{'name':'Visitante','email':'visit@example.com','password':'senha-segura-123',
-        'store_name':'Visitante','slug':'visitante','platform_admin':True})
+        'store_name':'Visitante','slug':'visitante','platform_admin':True,'accept_terms':True})
     assert response.status_code==201 and response.json['user']['platform_admin'] is False
 
 

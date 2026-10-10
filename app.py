@@ -52,6 +52,15 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+PHONE_SQL = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'(',''),')',''),'+','')"
+
+
+def phone_key(phone):
+    """Telefone só com números e sem o 55 do Brasil, para reconhecer o mesmo cliente."""
+    digits = re.sub(r"\D", "", phone or "")
+    return digits[2:] if len(digits) > 11 and digits.startswith("55") else digits
+
+
 WEEKDAYS = ("segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo")
 HHMM = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 
@@ -98,7 +107,7 @@ def create_app(test_config=None):
         SECRET_KEY=key or secrets.token_hex(32), DATABASE_PATH=os.getenv("DATABASE_PATH", str(BASE / "instance" / "seucomercio.sqlite3")),
         DATABASE_URL=os.getenv("DATABASE_URL", ""), DATABASE_SCHEMA=os.getenv("DATABASE_SCHEMA", "seucomercio"),
         STORAGE_UPLOAD_URL=os.getenv("STORAGE_UPLOAD_URL", ""), STORAGE_UPLOAD_TOKEN=os.getenv("STORAGE_UPLOAD_TOKEN", ""),
-        STORAGE_PUBLIC_URL=os.getenv("STORAGE_PUBLIC_URL", ""),
+        STORAGE_PUBLIC_URL=os.getenv("STORAGE_PUBLIC_URL", ""), TRIAL_DAYS=int(os.getenv("TRIAL_DAYS", "14")),
         VAPID_PRIVATE_KEY=os.getenv("VAPID_PRIVATE_KEY", "").replace("\\n", "\n"), PUSH_CONTACT=os.getenv("PUSH_CONTACT", "suporte@seucomercioaqui.com.br"),
         UPLOAD_DIR=os.getenv("UPLOAD_DIR", str(BASE / "instance" / "uploads")),
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=production,
@@ -229,7 +238,7 @@ def create_app(test_config=None):
         value["hours"] = json.loads(value["hours"] or "{}")
         value["delivery_zones"] = json.loads(value["delivery_zones"] or "[]")
         value["open"], value["auto_hours"] = bool(value["open"]), bool(value["auto_hours"])
-        value["allow_scheduling"] = bool(value["allow_scheduling"])
+        value["allow_scheduling"], value["loyalty_enabled"] = bool(value["allow_scheduling"]), bool(value["loyalty_enabled"])
         value["open_now"], value["status_text"] = store_status(store)
         value["mp_connected"] = bool(value.pop("mp_token", ""))
         value.pop("mp_webhook_key", None)
@@ -443,6 +452,11 @@ def create_app(test_config=None):
     def page(**kwargs):
         return send_from_directory(app.static_folder, "index.html")
 
+    @app.get("/termos")
+    @app.get("/privacidade")
+    def legal_page():
+        return send_from_directory(app.static_folder, "index.html")
+
     @app.get("/admin")
     def owner_site():
         """Central do Dono: endereço próprio, fora de qualquer menu das lojas."""
@@ -527,12 +541,15 @@ def create_app(test_config=None):
             abort(400, description="Use letras sem acentos, números e hífens no endereço da loja.")
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
             abort(400, description="E-mail inválido.")
+        if value.get("accept_terms") is not True:
+            abort(400, description="Para criar a loja, aceite os Termos de uso e a Política de privacidade.")
         hashed = generate_password_hash(password)
+        trial = (datetime.now(ZONE).date() + timedelta(days=app.config["TRIAL_DAYS"])).isoformat() if app.config["TRIAL_DAYS"] > 0 else ""
         with transaction() as conn:
-            uid = conn.execute("INSERT INTO users(name,email,password_hash,created_at) VALUES(?,?,?,?)",
-                               (name, email, hashed, now())).lastrowid
-            sid = conn.execute("INSERT INTO stores(owner_id,name,slug,created_at) VALUES(?,?,?,?)",
-                               (uid, store_name, slug, now())).lastrowid
+            uid = conn.execute("INSERT INTO users(name,email,password_hash,created_at,terms_accepted_at) VALUES(?,?,?,?,?)",
+                               (name, email, hashed, now(), now())).lastrowid
+            sid = conn.execute("INSERT INTO stores(owner_id,name,slug,created_at,trial_until) VALUES(?,?,?,?,?)",
+                               (uid, store_name, slug, now(), trial)).lastrowid
             conn.execute("INSERT INTO categories(store_id,name) VALUES(?,?)", (sid, "Destaques"))
         return establish(one("SELECT * FROM users WHERE id=?", (uid,))), 201
 
@@ -576,7 +593,26 @@ def create_app(test_config=None):
         return jsonify(store=store_dict(store), categories=rows("SELECT id,name,position FROM categories WHERE store_id=? ORDER BY position,id", (store["id"],)),
                        products=[product_dict(p) for p in db().execute("SELECT * FROM products WHERE store_id=? AND active=1 ORDER BY featured DESC,position,id", (store["id"],))])
 
-    def coupon_discount(conn, sid, code, subtotal):
+    def customer_orders_by_phone(conn, sid, phone):
+        key = phone_key(phone)
+        if len(key) < 10:
+            return []
+        found = conn.execute(f"SELECT id,phone,status,loyalty_discount FROM orders WHERE store_id=? AND {PHONE_SQL} LIKE ?",
+                             (sid, "%" + key[-9:])).fetchall()
+        return [o for o in found if phone_key(o["phone"]) == key]
+
+    def loyalty_status(conn, store, phone):
+        if not store["loyalty_enabled"] or not phone:
+            return None
+        history = customer_orders_by_phone(conn, store["id"], phone)
+        completed = sum(o["status"] == "completed" for o in history)
+        used = sum(o["status"] != "cancelled" and o["loyalty_discount"] > 0 for o in history)
+        goal = max(1, store["loyalty_goal"])
+        available = completed // goal > used
+        return {"goal": goal, "reward": store["loyalty_reward"], "completed": completed, "available": available,
+                "remaining": 0 if available else goal - completed % goal}
+
+    def coupon_discount(conn, sid, code, subtotal, phone=""):
         if not code:
             return 0, None
         coupon = conn.execute("SELECT * FROM coupons WHERE store_id=? AND code=? AND active=1", (sid, code.upper())).fetchone()
@@ -585,6 +621,11 @@ def create_app(test_config=None):
             abort(400, description="Cupom inválido, vencido ou esgotado.")
         if subtotal < coupon["minimum"]:
             abort(400, description=f"Este cupom exige R$ {coupon['minimum']/100:.2f} em produtos.")
+        if coupon["first_order"]:
+            if len(phone_key(phone)) < 10:
+                abort(400, description="Informe seu WhatsApp para usar o cupom de primeira compra.")
+            if any(o["status"] != "cancelled" for o in customer_orders_by_phone(conn, sid, phone)):
+                abort(400, description="Este cupom é só para a primeira compra na loja.")
         discount = subtotal * coupon["value"] // 100 if coupon["kind"] == "percent" else coupon["value"]
         return min(discount, subtotal), coupon["id"]
 
@@ -622,9 +663,13 @@ def create_app(test_config=None):
                 abort(409, description=f"Estoque insuficiente: {product['name']}.")
         if subtotal < store["minimum_order"]:
             abort(400, description=f"Pedido mínimo de R$ {store['minimum_order']/100:.2f} em produtos.")
-        discount, _ = coupon_discount(db(), store["id"], text(value, "coupon", 0, 30).upper(), subtotal)
+        phone = text(value, "phone", 0, 20)
+        discount, _ = coupon_discount(db(), store["id"], text(value, "coupon", 0, 30).upper(), subtotal, phone)
+        loyalty = loyalty_status(db(), store, phone)
+        reward = min(loyalty["reward"], subtotal - discount) if loyalty and loyalty["available"] else 0
         fee, zone = delivery_fee(store, mode, value)
-        return jsonify(subtotal=subtotal, discount=discount, delivery_fee=fee, zone=zone, total=subtotal-discount+fee)
+        return jsonify(subtotal=subtotal, discount=discount + reward, loyalty_discount=reward, loyalty=loyalty,
+                       delivery_fee=fee, zone=zone, total=subtotal-discount-reward+fee)
 
     @app.post("/api/store/<slug>/orders")
     def create_order(slug):
@@ -673,7 +718,10 @@ def create_app(test_config=None):
                     if quantity > product["stock"]:
                         abort(409, description=f"Estoque insuficiente: {product['name']}.")
                     conn.execute("UPDATE products SET stock=stock-? WHERE id=?", (quantity, pid))
-            discount, coupon_id = coupon_discount(conn, store["id"], coupon_code, subtotal)
+            discount, coupon_id = coupon_discount(conn, store["id"], coupon_code, subtotal, phone)
+            loyalty = loyalty_status(conn, store, phone)
+            reward = min(loyalty["reward"], subtotal - discount) if loyalty and loyalty["available"] else 0
+            discount += reward
             fee, zone = delivery_fee(store, mode, value)
             total = subtotal - discount + fee
             if "expected_total" in value and integer(value, "expected_total", maximum=10**14) != total:
@@ -688,6 +736,7 @@ def create_app(test_config=None):
                 customer, phone, mode, address if mode == "delivery" else "", payment, change_for if payment == "cash" else None, notes,
                 subtotal, discount, fee, total, coupon_id, key, digest, token, stamp, stamp)).lastrowid
             fees=json.loads(store['payment_fees'])
+            conn.execute("UPDATE orders SET loyalty_discount=? WHERE id=?", (reward, oid))
             conn.execute("UPDATE orders SET delivery_cost=?,payment_fee=?,platform_fee=?,source=?,zone=?,scheduled_for=? WHERE id=?",
                 (store['default_delivery_cost'] if mode=='delivery' else 0,
                  (total*fees.get(payment,0)+5000)//10000,
@@ -738,6 +787,8 @@ def create_app(test_config=None):
                     pass
                 order = one("SELECT * FROM orders WHERE id=?", (order["id"],))
         public = order_dict(order, False)
+        public["loyalty"] = loyalty_status(db(), store, order["phone"])
+        public["loyalty_discount"] = order["loyalty_discount"]
         if order["payment"] == "pix_online":
             public["pix"] = {"code": order["pix_code"] if not order["paid"] else "", "expires": order["pix_expires"],
                              "expired": bool(order["pix_expires"] and datetime.fromisoformat(order["pix_expires"]) < datetime.now(timezone.utc))}
@@ -1018,14 +1069,17 @@ def create_app(test_config=None):
         zones = zones_field(value) if "delivery_zones" in value else json.loads(g.store["delivery_zones"] or "[]")
         auto_hours = boolean(value, "auto_hours", bool(g.store["auto_hours"]))
         allow_scheduling = boolean(value, "allow_scheduling", bool(g.store["allow_scheduling"]))
+        loyalty_enabled = boolean(value, "loyalty_enabled", bool(g.store["loyalty_enabled"]))
+        loyalty_goal = integer(value, "loyalty_goal", g.store["loyalty_goal"], minimum=2, maximum=100)
+        loyalty_reward = integer(value, "loyalty_reward", g.store["loyalty_reward"], minimum=100, maximum=100_000)
         if auto_hours and not hours:
             abort(400, description="Informe ao menos um dia de funcionamento ou desative o horário automático.")
         db().execute("""UPDATE stores SET name=?,description=?,phone=?,address=?,color=?,logo=?,banner=?,open=?,
-            delivery_fee=?,minimum_order=?,delivery_minutes=?,pix_key=?,payments=?,hours=?,auto_hours=?,delivery_zones=?,allow_scheduling=? WHERE id=?""",
+            delivery_fee=?,minimum_order=?,delivery_minutes=?,pix_key=?,payments=?,hours=?,auto_hours=?,delivery_zones=?,allow_scheduling=?,loyalty_enabled=?,loyalty_goal=?,loyalty_reward=? WHERE id=?""",
             (name, description, phone, address, color, image_url(value.get("logo", "")), image_url(value.get("banner", "")),
              boolean(value, "open"), integer(value, "delivery_fee"), integer(value, "minimum_order"),
              text(value, "delivery_minutes", 2, 40), pix, json.dumps(list(dict.fromkeys(payments))),
-             json.dumps(hours), int(auto_hours), json.dumps(zones, ensure_ascii=False), int(allow_scheduling), g.store["id"]))
+             json.dumps(hours), int(auto_hours), json.dumps(zones, ensure_ascii=False), int(allow_scheduling), loyalty_enabled, loyalty_goal, loyalty_reward, g.store["id"]))
         return jsonify(store=store_dict(one("SELECT * FROM stores WHERE id=?", (g.store["id"],)), True))
 
     @app.post("/api/admin/upload")
@@ -1286,8 +1340,8 @@ def create_app(test_config=None):
         maximum = value.get("max_uses")
         if maximum is not None:
             maximum = integer(value, "max_uses", minimum=1, maximum=1_000_000)
-        cid = db().execute("INSERT INTO coupons(store_id,code,kind,value,minimum,expires,max_uses) VALUES(?,?,?,?,?,?,?)",
-                           (g.store["id"], code, kind, amount, integer(value, "minimum"), expires, maximum)).lastrowid
+        cid = db().execute("INSERT INTO coupons(store_id,code,kind,value,minimum,expires,max_uses,first_order) VALUES(?,?,?,?,?,?,?,?)",
+                           (g.store["id"], code, kind, amount, integer(value, "minimum"), expires, maximum, boolean(value, "first_order"))).lastrowid
         return jsonify(id=cid), 201
 
     @app.patch("/api/admin/coupons/<int:cid>")

@@ -43,7 +43,7 @@ def send(client, method, url, value, key=None):
 
 def register(client, slug="minha-loja", email="owner@example.com"):
     return send(client, "POST", "/api/auth/register",
-                {"name": "Dona da Loja", "email": email, "password": "uma-senha-segura", "store_name": "Minha Loja", "slug": slug})
+                {"name": "Dona da Loja", "email": email, "password": "uma-senha-segura", "store_name": "Minha Loja", "slug": slug, "accept_terms": True})
 
 
 @pytest.fixture
