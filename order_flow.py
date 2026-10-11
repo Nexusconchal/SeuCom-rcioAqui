@@ -8,6 +8,7 @@ from flask import abort, g, jsonify, request
 
 from connectors import Evolution, MotoJa, background, qr_image, seal, unseal, valid_motoja_url
 from database import connect
+from notify import notify_store
 
 FLOW = ["new", "preparing", "ready", "delivering", "completed"]
 ACTIVE_MOTOJA = ("chamado", "aceito", "retirado", "na_fila")
@@ -109,9 +110,20 @@ def register_order_flow(app, helpers):
             "deliveryFee": round(order["delivery_fee"] / 100, 2), "note": note[:300]}}
 
     def save_motoja(conn, order_id, status, info, delivery_id=None):
-        current = conn.execute("SELECT motoja_delivery_id FROM orders WHERE id=?", (order_id,)).fetchone()
+        current = conn.execute("SELECT motoja_delivery_id,motoja_status,store_id,number FROM orders WHERE id=?", (order_id,)).fetchone()
         conn.execute("UPDATE orders SET motoja_status=?,motoja_info=?,motoja_delivery_id=?,motoja_checked_at=? WHERE id=?",
                      (status, json.dumps(info, ensure_ascii=False), delivery_id or current[0] or "", h.now(), order_id))
+        if status != current[1]:
+            push_motoja(current[2], order_id, current[3], status, info)
+
+    def push_motoja(store_id, order_id, number, status, info):
+        """Aviso no celular da loja (mesmo com o painel fechado) quando o motoboy aceita ou algo dá errado."""
+        who = f"O motoboy {info['motoboy']}" if info.get("motoboy") else "Um motoboy"
+        message = {"aceito": (f"Motoboy a caminho • pedido #{number}", f"{who} aceitou e está vindo buscar o pedido."),
+                   "cancelado": (f"Corrida cancelada • pedido #{number}", "Abra o pedido e chame o MotoJá de novo."),
+                   "erro": (f"MotoJá: pedido #{number} não foi enviado", info.get("message") or "Abra o pedido e use Chamar MotoJá.")}.get(status)
+        if message:
+            notify_store(app, store_id, {"title": message[0], "body": message[1], "tag": f"motoja-{order_id}", "url": "/painel"})
 
     def advance(conn, order, target):
         """Avança o pedido pelo caminho normal, registrando cada etapa, sem voltar atrás."""

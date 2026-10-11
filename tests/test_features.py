@@ -610,8 +610,11 @@ class FakeEvolution:
 MOTOJA_URL = "https://motoboy-conchal.onrender.com/api/integrations/orders/19999990000/seucomercio"
 
 
-def test_motoja_switch_calls_driver_and_follows_delivery(app, shop):
+def test_motoja_switch_calls_driver_and_follows_delivery(app, shop, monkeypatch):
     client, pid = shop
+    import order_flow
+    pushes = []
+    monkeypatch.setattr(order_flow, "notify_store", lambda app_, store_id, message, user_id=None: pushes.append(message))
     moto = FakeMotoJa()
     app.extensions["motoja"] = moto
     assert send(client, "PUT", "/api/admin/motoja", {"url": "https://evil.example.com/api/integrations/orders/19999990000/seucomercio", "key": moto.key}).status_code == 400
@@ -629,8 +632,17 @@ def test_motoja_switch_calls_driver_and_follows_delivery(app, shop):
     assert payload["order"]["orderTotal"] == order["total"] / 100
     ext = payload["order"]["externalId"]
     # Motoboy aceita, retira e entrega: o pedido acompanha sozinho.
-    moto.deliveries[ext].update(deliveryStatus="retirada", motoboy="João")
     from database import connect
+    # Motoboy aceitou: a loja recebe aviso com o nome de quem está vindo buscar.
+    moto.deliveries[ext].update(deliveryStatus="aceita", motoboy="João")
+    conn = connect(app.config)
+    conn.execute("UPDATE orders SET motoja_checked_at='' WHERE id=?", (order["id"],))
+    conn.close()
+    client.get("/api/admin/orders?status=active")
+    active = client.get("/api/admin/orders?status=active").json["orders"]
+    assert [o["motoja"]["status"] for o in active if o["id"] == order["id"]] == ["aceito"]
+    assert any(p["title"] == f"Motoboy a caminho • pedido #{order['number']}" and "João" in p["body"] for p in pushes)
+    moto.deliveries[ext].update(deliveryStatus="retirada", motoboy="João")
     conn = connect(app.config)
     conn.execute("UPDATE orders SET motoja_checked_at='' WHERE id=?", (order["id"],))
     conn.close()

@@ -19,7 +19,7 @@ export async function renderDashboard(){
 }
 function updateStoreButton(){const b=$('#store-toggle');const paused=store.billing_state&&!['exempt','active','paid','trial'].includes(store.billing_state);b.className='badge '+(store.open_now?'green':store.open&&!paused?'amber':'gray');b.innerHTML='<i></i>'+(paused?'Loja pausada (assinatura)':!store.open?'Loja fechada':store.open_now?'Loja aberta':'Aberta • fora do horário');b.title=store.open?'Clique para fechar a loja agora':'Clique para abrir a loja';}
 const days=['Segunda','Terça','Quarta','Quinta','Sexta','Sábado','Domingo'];
-let seen=null,watchTimer,audio;
+let seen=null,motojaSeen=null,watchTimer,audio;
 const soundOn=()=>{try{return localStorage.getItem('sca.sound')!=='0';}catch{return true;}};
 function unlockAudio(){try{audio=audio||new (window.AudioContext||window.webkitAudioContext)();audio.resume();}catch{}}
 function chime(){
@@ -28,11 +28,46 @@ function chime(){
     g.gain.setValueAtTime(.0001,audio.currentTime+delay);g.gain.exponentialRampToValueAtTime(.35,audio.currentTime+delay+.02);g.gain.exponentialRampToValueAtTime(.0001,audio.currentTime+delay+.35);
     o.connect(g).connect(audio.destination);o.start(audio.currentTime+delay);o.stop(audio.currentTime+delay+.4);});
 }
+function tone(notes,type='sine'){
+  if(!soundOn()||!audio)return;
+  notes.forEach(([freq,delay])=>{const o=audio.createOscillator(),g=audio.createGain();o.type=type;o.frequency.value=freq;
+    g.gain.setValueAtTime(.0001,audio.currentTime+delay);g.gain.exponentialRampToValueAtTime(.3,audio.currentTime+delay+.02);g.gain.exponentialRampToValueAtTime(.0001,audio.currentTime+delay+.3);
+    o.connect(g).connect(audio.destination);o.start(audio.currentTime+delay);o.stop(audio.currentTime+delay+.35);});
+}
+// Avisos do MotoJá: compara o status de cada pedido com a última consulta e mostra (com som) o que mudou.
+function motojaAlert(o){
+  const m=o.motoja,who=m.motoboy?'O motoboy '+esc(m.motoboy):'Um motoboy',n='#'+o.number;
+  const text={chamado:['ok','Pedido '+n+' enviado ao MotoJá','Deu certo! Agora é só aguardar um motoboy aceitar.'],
+    na_fila:['ok','Pedido '+n+' chegou no MotoJá','Está aguardando a conferência no MotoJá para ir aos motoboys.'],
+    aceito:['go','Motoboy a caminho!',who+' aceitou o pedido '+n+' e está vindo buscar.'],
+    retirado:['go','Pedido '+n+' saiu para entrega',who+' já retirou o pedido.'],
+    cancelado:['error','Corrida cancelada no MotoJá','Pedido '+n+': abra o pedido e chame o MotoJá de novo.'],
+    erro:['error','Pedido '+n+' não foi enviado ao MotoJá',esc(m.message||'Abra o pedido e use Chamar MotoJá.')]}[m.status];
+  if(!text)return;
+  const [kind,title,body]=text;
+  tone(kind==='error'?[[330,0],[262,.25]]:kind==='go'?[[660,0],[880,.15],[1320,.3]]:[[784,0],[1046,.16]],kind==='error'?'triangle':'sine');
+  let box=$('#live-alerts');if(!box){box=document.createElement('div');box.id='live-alerts';box.setAttribute('aria-live','polite');document.body.appendChild(box);}
+  const card=document.createElement('div');card.className='live-alert '+kind;card.setAttribute('role','status');
+  card.innerHTML='<span class="live-alert-icon">'+icon('truck')+'</span><div><b>'+title+'</b><p>'+body+'</p><button type="button" class="link-btn" data-open>Ver pedido</button></div><button type="button" class="live-alert-close" aria-label="Fechar aviso">×</button>';
+  box.prepend(card);[...box.children].slice(4).forEach(x=>x.remove());
+  const close=()=>card.remove();
+  card.querySelector('.live-alert-close').onclick=close;card.querySelector('[data-open]').onclick=()=>{close();orderDialog(o);};
+  if(kind!=='error')setTimeout(close,15000);
+  if('Notification' in window&&Notification.permission==='granted'&&document.hidden){try{new Notification(title,{body:body.replace(/<[^>]+>/g,''),icon:'/static/icon-192.png',tag:'motoja-'+o.id+'-'+m.status});}catch{}}
+}
+function motojaWatch(list){
+  const now=new Map(list.filter(o=>o.motoja&&o.motoja.status).map(o=>[o.id,o.motoja.status]));
+  let moved=false;
+  if(motojaSeen)list.forEach(o=>{const s=now.get(o.id);if(s&&motojaSeen.get(o.id)!==s){moved=true;motojaAlert(o);}});
+  motojaSeen=now;return moved;
+}
 function updateSoundButton(){const b=$('#sound-toggle');if(!b)return;b.classList.toggle('active',soundOn());b.setAttribute('aria-pressed',String(soundOn()));b.title=soundOn()?'Som de novos pedidos ligado':'Som de novos pedidos desligado';}
 async function watchOrders(){
   clearTimeout(watchTimer);
   try{
-    const list=(await api('/api/admin/orders?status=new')).orders;
+    const active=(await api('/api/admin/orders?status=active')).orders,list=active.filter(o=>o.status==='new');
+    const moved=motojaWatch(active);
+    if(moved&&['overview','orders','drivers'].includes(tab))switchTab(tab,true);
     if(seen){const fresh=list.filter(o=>!seen.has(o.id));if(fresh.length){
       chime();if(autoPrint())fresh.slice().reverse().forEach(printTicket);const first=fresh[0];toast(fresh.length>1?fresh.length+' novos pedidos chegaram!':'Novo pedido #'+first.number+' • '+money(first.total));
       if('Notification' in window&&Notification.permission==='granted'&&document.hidden){try{new Notification('Novo pedido #'+first.number,{body:first.customer+' • '+money(first.total),icon:'/static/icon-192.png',tag:'pedido-'+first.id});}catch{}}

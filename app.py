@@ -1280,10 +1280,12 @@ def create_app(test_config=None):
     @owner
     def admin_orders():
         status = request.args.get("status", "")
-        if status and status not in STATUSES:
+        if status and status not in STATUSES and status != "active":
             abort(400, description="Status inválido.")
         sql, params = "SELECT * FROM orders WHERE store_id=?", [g.store["id"]]
-        if status:
+        if status == "active":
+            sql += " AND status NOT IN ('completed','cancelled')"
+        elif status:
             sql += " AND status=?"
             params.append(status)
         else:
