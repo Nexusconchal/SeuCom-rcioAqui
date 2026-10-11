@@ -168,6 +168,10 @@ def test_tenant_isolation_in_every_owner_entity(app, shop):
     assert send(second, "PATCH", f"/api/admin/coupons/{coupon_id}", {"active": False}).status_code == 404
     assert send(second, "DELETE", f"/api/admin/expenses/{expense_id}", {}).status_code == 404
     assert send(second, "POST", "/api/admin/products", {"name": "Teste", "price": 100, "category_id": first_category}).status_code == 404
+    assert second.get(f"/api/admin/orders/{order_id}/map-qr").status_code == 404
+    qr = first.get(f"/api/admin/orders/{order_id}/map-qr")
+    assert qr.status_code == 200 and qr.mimetype == "image/svg+xml" and b"<svg" in qr.data
+    assert first.get("/api/admin/orders/0/map-qr").status_code == 200
 
 
 def test_transitions_cancel_restock_exactly_once(shop):

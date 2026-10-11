@@ -67,26 +67,57 @@ async function disablePush(){
 }
 function ticketHTML(o){
   const line=(a,b)=>'<div class="t-line"><span>'+a+'</span><span>'+b+'</span></div>';
-  return '<div class="ticket"><h1>'+esc(store.name)+'</h1><p class="t-center">PEDIDO <b>#'+o.number+'</b><br>'+date(o.created_at)+(o.source==='counter'?' • balcão':'')+'</p>'+
+  return '<div class="ticket"><h1>'+esc(store.name)+'</h1><p class="t-center">PEDIDO <b class="t-big">#'+o.number+'</b><br>'+date(o.created_at)+(o.source==='counter'?' • balcão':'')+'</p>'+
     (o.scheduled_for?'<p class="t-box">AGENDADO: '+new Date(o.scheduled_for).toLocaleString('pt-BR',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</p>':'')+
     '<p><b>'+esc(o.customer)+'</b><br>'+esc(o.phone)+'</p><p class="t-box">'+(o.mode==='delivery'?'ENTREGA'+(o.zone?' • '+esc(o.zone):'')+'<br>'+esc(o.address):'RETIRADA NO BALCÃO')+'</p><hr>'+
     o.items.map(i=>'<div class="t-item"><b>'+i.quantity+'x '+esc(i.name)+'</b><span>'+money(i.unit_price*i.quantity)+'</span></div>'+i.extras.map(x=>'<div class="t-sub">+ '+esc(x.name)+'</div>').join('')+(i.notes?'<div class="t-sub">OBS: '+esc(i.notes)+'</div>':'')).join('')+
     (o.notes?'<hr><p><b>Observações:</b> '+esc(o.notes)+'</p>':'')+'<hr>'+line('Produtos',money(o.subtotal))+(o.delivery_fee?line('Entrega',money(o.delivery_fee)):'')+(o.discount?line('Desconto','- '+money(o.discount)):'')+'<div class="t-line t-total"><span>TOTAL</span><span>'+money(o.total)+'</span></div>'+
     line('Pagamento',pay[o.payment]+(o.paid?' (PAGO)':''))+(o.change_for?line('Troco para',money(o.change_for)):'')+'<p class="t-center t-foot">SeuComércioAqui</p></div>';
 }
+// Via do motoboy: só o que ele precisa na rua, em letra grande, com QR code que abre o endereço no mapa.
+function driverSlipHTML(o){
+  const driver=drivers.find(x=>x.id===o.driver_id),volumes=o.items.reduce((n,i)=>n+i.quantity,0),change=o.change_for?o.change_for-o.total:0;
+  return '<div class="ticket"><p class="t-tag">VIA DO MOTOBOY</p><h1>'+esc(store.name)+'</h1><p class="t-center t-big">PEDIDO #'+o.number+'</p>'+
+    '<p class="t-big">'+esc(o.customer)+'<br>'+esc(o.phone)+'</p><p class="t-box t-big">'+(o.zone?esc(o.zone)+'<br>':'')+esc(o.address)+'</p>'+
+    '<div class="t-qr"><img src="/api/admin/orders/'+o.id+'/map-qr" alt=""><span>Aponte a câmera do celular para abrir o endereço no mapa.</span></div><hr>'+
+    (o.paid?'<p class="t-box t-center">JÁ PAGO • NÃO COBRAR</p>':'<p class="t-box t-center t-big">COBRAR '+money(o.total)+'</p><p class="t-center">'+pay[o.payment]+(change>0?'<br>Cliente paga com '+money(o.change_for)+'<br><b>Levar troco: '+money(change)+'</b>':'')+'</p>')+
+    '<p>'+volumes+(volumes===1?' item':' itens')+(driver?' • Entregador: '+esc(driver.name):'')+'</p>'+(o.notes?'<p><b>Obs.:</b> '+esc(o.notes)+'</p>':'')+'<p class="t-center t-foot">SeuComércioAqui</p></div>';
+}
+const pref=(k,d)=>{try{return localStorage.getItem('sca.'+k)??d;}catch{return d;}};
+const setPref=(k,v)=>{try{localStorage.setItem('sca.'+k,v);}catch{}};
+const paperWidth=()=>pref('paper','80')==='58'?'58':'80';
+const driverCopy=()=>pref('driverslip','0')==='1';
 let printQueue=Promise.resolve();
-function printTicket(o){
+// what: 'all' = notinha da loja (+ via do motoboy, se ligada e for entrega); 'driver' = só a via do motoboy.
+function printTicket(o,what='all'){
   printQueue=printQueue.then(()=>new Promise(resolve=>{
     let area=$('#print-area');if(!area){area=document.createElement('div');area.id='print-area';document.body.appendChild(area);}
-    area.innerHTML=ticketHTML(o);document.body.classList.add('printing-ticket');
+    const slip=o.mode==='delivery'&&(what==='driver'||driverCopy());
+    area.className='paper-'+paperWidth();area.innerHTML=(what==='driver'?'':ticketHTML(o))+(slip?(what==='driver'?'':'<div class="t-cut"></div>')+driverSlipHTML(o):'');
+    document.body.classList.add('printing-ticket');
     const done=()=>{document.body.classList.remove('printing-ticket');area.innerHTML='';window.removeEventListener('afterprint',done);setTimeout(resolve,300);};
-    window.addEventListener('afterprint',done);setTimeout(()=>window.print(),50);
+    window.addEventListener('afterprint',done);
+    // Espera o QR code carregar (até 3 s) para ele não sair em branco.
+    const images=[...area.querySelectorAll('img')].filter(img=>!img.complete).map(img=>new Promise(r=>{img.onload=img.onerror=r;}));
+    Promise.race([Promise.all(images),new Promise(r=>setTimeout(r,3000))]).then(()=>setTimeout(()=>window.print(),50));
   }));
 }
+const sampleOrder=()=>({id:0,number:123,created_at:new Date().toISOString(),customer:'Cliente Teste',phone:'(19) 99999-0000',mode:'delivery',zone:'Centro',address:store.address||'Rua Exemplo, 100 - Centro',
+  items:[{quantity:2,name:'Produto de teste',unit_price:2500,extras:[{name:'Adicional'}],notes:'Sem cebola'}],notes:'Notinha de teste',subtotal:5000,delivery_fee:500,discount:0,total:5500,payment:'cash',paid:false,change_for:10000});
 function alertsPanel(){
+  const chromeCmd='"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --kiosk-printing '+location.origin+'/painel';
   return '<section class="panel" id="alerts-panel"><div class="section-heading"><div><h2>Avisos e impressão neste aparelho</h2><p class="muted">Valem para este celular ou computador. Ative em cada aparelho que recebe pedidos.</p></div><span class="feature-icon">'+icon('bell')+'</span></div>'+
     '<div class="alert-row"><div><b>Aviso de pedido novo, mesmo com o painel fechado</b><p class="muted" id="push-status">Verificando…</p></div><div class="row-actions"><button type="button" class="btn" id="push-toggle">Ativar avisos</button><button type="button" class="btn secondary" id="push-test" hidden>Testar</button></div></div>'+
-    '<div class="alert-row"><div><b>Imprimir automaticamente cada pedido novo</b><p class="muted">Com o painel aberto. Para imprimir sem a janela de confirmação, abra o Chrome com a opção <code>--kiosk-printing</code> e deixe a impressora térmica como padrão.</p></div><label class="switch"><input type="checkbox" id="autoprint" '+(autoPrint()?'checked':'')+'><span>'+(autoPrint()?'Ligado':'Desligado')+'</span></label></div></section>';
+    '<div class="alert-row"><div><b>Imprimir automaticamente cada pedido novo</b><p class="muted">A notinha sai assim que o pedido chega, com o painel aberto. Veja abaixo como imprimir sem a janela de confirmação.</p></div><label class="switch"><input type="checkbox" id="autoprint" '+(autoPrint()?'checked':'')+'><span>'+(autoPrint()?'Ligado':'Desligado')+'</span></label></div>'+
+    '<div class="alert-row"><div><b>Largura do papel</b><p class="muted">Confira na bobina: 80 mm é a impressora de balcão; 58 mm é a mini impressora e a maioria das Bluetooth.</p></div><select id="paper-width" aria-label="Largura do papel"><option value="80" '+(paperWidth()==='80'?'selected':'')+'>80 mm</option><option value="58" '+(paperWidth()==='58'?'selected':'')+'>58 mm</option></select></div>'+
+    '<div class="alert-row"><div><b>Via do motoboy</b><p class="muted">Nos pedidos de entrega, sai uma segunda notinha com o endereço em letra grande, QR code do mapa e quanto cobrar (com o troco).</p></div><label class="switch"><input type="checkbox" id="driverslip" '+(driverCopy()?'checked':'')+'><span>'+(driverCopy()?'Ligado':'Desligado')+'</span></label></div>'+
+    '<div class="alert-row"><div><b>Testar a impressora</b><p class="muted">Imprime um pedido de exemplo com as opções acima.</p></div><button type="button" class="btn secondary" id="print-test">'+icon('print')+' Imprimir teste</button></div>'+
+    '<details class="help print-help"><summary>Como configurar a impressora de notinha</summary>'+
+      '<h3>Computador com impressora térmica (USB)</h3><ol><li>Instale o driver da impressora (vem na caixa ou no site do fabricante) e deixe ela como <b>impressora padrão</b> do Windows.</li><li>Clique em <b>Imprimir teste</b>. Na janela do Chrome, escolha a impressora e, em <b>Mais definições</b>, deixe <b>Margens: Nenhuma</b> e desmarque <b>Cabeçalhos e rodapés</b>. O Chrome guarda essa escolha.</li>'+
+      '<li>Para imprimir <b>sem perguntar nada</b>: clique com o botão direito na Área de Trabalho → <b>Novo → Atalho</b>, cole o comando abaixo, avance e dê o nome <b>Painel de pedidos</b>. Feche todas as janelas do Chrome e abra o painel sempre por esse atalho.<div class="copy-line"><code id="kiosk-cmd">'+esc(chromeCmd)+'</code><button type="button" class="btn secondary small" id="copy-kiosk">'+icon('copy')+' Copiar</button></div></li></ol>'+
+      '<h3>Celular Android com impressora Bluetooth</h3><ol><li>Instale o app <b>RawBT</b> na Play Store e pareie a impressora por ele.</li><li>Em <b>Configurações do Android → Impressão</b>, ative o serviço do <b>RawBT</b>.</li><li>Abra este painel no Chrome, escolha <b>58 mm</b> acima, toque em <b>Imprimir teste</b> e selecione a impressora do RawBT.</li></ol><p class="muted">No celular o Android sempre mostra a tela de impressão: com a impressão automática ligada, ela abre sozinha e é só confirmar.</p>'+
+      '<h3>Maquininha de cartão</h3><p class="muted">As maquininhas Smart (Stone, PagBank, Cielo LIO, Mercado Pago Point) só aceitam os apps da própria empresa e não abrem o painel. Para a notinha, use uma impressora térmica USB ou Bluetooth.</p>'+
+      '<h3>iPhone</h3><p class="muted">O iPhone só imprime em impressoras AirPrint; mini impressoras Bluetooth não funcionam pelo navegador. Use um computador ou um celular Android para imprimir.</p></details></section>';
 }
 async function bindAlertsPanel(){
   const status=$('#push-status'),toggle=$('#push-toggle'),test=$('#push-test');if(!status)return;
@@ -94,7 +125,11 @@ async function bindAlertsPanel(){
   const draw=async()=>{const s=await pushState().catch(()=>'off');status.textContent=labels[s];toggle.textContent=s==='on'?'Desativar avisos':'Ativar avisos';toggle.disabled=s==='unsupported'||s==='denied';test.hidden=s!=='on';toggle.dataset.state=s;};
   toggle.onclick=async()=>{toggle.disabled=true;try{if(toggle.dataset.state==='on'){await disablePush();toast('Avisos desativados neste aparelho.');}else{await enablePush();toast('Avisos ativados! Teste para conferir.');}}catch(e){toast(e.message);}await draw();};
   test.onclick=async()=>{try{const r=await api('/api/admin/push/test',{method:'POST'});toast(r.sent?'Aviso de teste enviado.':'Nenhum aparelho ativo encontrado.');}catch(e){toast(e.message);}};
-  $('#autoprint').onchange=e=>{try{localStorage.setItem('sca.autoprint',e.target.checked?'1':'0');}catch{}e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';if(e.target.checked)toast('Pedidos novos serão impressos enquanto o painel estiver aberto.');};
+  $('#autoprint').onchange=e=>{setPref('autoprint',e.target.checked?'1':'0');e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';if(e.target.checked)toast('Pedidos novos serão impressos enquanto o painel estiver aberto.');};
+  $('#driverslip').onchange=e=>{setPref('driverslip',e.target.checked?'1':'0');e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';};
+  $('#paper-width').onchange=e=>{setPref('paper',e.target.value);toast('Papel de '+e.target.value+' mm neste aparelho.');};
+  $('#print-test').onclick=()=>printTicket(sampleOrder());
+  $('#copy-kiosk').onclick=()=>copy($('#kiosk-cmd').textContent);
   draw();
 }
 async function platformNotices(){
@@ -222,7 +257,7 @@ function ordersPage(){
   });$('#order-search').oninput=show;bindOrderButtons();
 }
 function orderDialog(o){
-  const d=modal('Pedido #'+o.number,'<div class="order-dialog-top"><div><h3>'+esc(o.customer)+'</h3><p>'+esc(o.phone)+' • '+date(o.created_at)+'</p><span class="badge">'+statuses[o.status]+'</span></div><div class="drawer-tools"><a class="btn secondary small" target="_blank" rel="noopener" href="https://wa.me/'+o.phone.replace(/\D/g,'').replace(/^(?!55)/,'55')+'?text='+encodeURIComponent('Olá, '+o.customer.split(' ')[0]+'! Sobre o seu pedido #'+o.number+':')+'">WhatsApp</a><button id="print-order" class="btn secondary small">'+icon('print')+' Imprimir</button></div></div>'+(nextStatus(o)?'<button id="drawer-next" class="btn full drawer-next">'+actionLabel(o)+' '+icon('arrow')+'</button>':'')+'<div class="notice">'+icon(o.mode==='delivery'?'truck':'store')+' '+(o.mode==='delivery'?'Entrega: '+esc(o.address)+(o.zone?' • Bairro '+esc(o.zone):''):'Retirada no balcão')+'</div>'+(o.mode==='delivery'&&(store.motoja_connected||o.motoja.status)?'<div class="motoja-box"><div><b>'+icon('truck')+' MotoJá</b><span>'+esc(o.motoja.label||'Motoboy ainda não chamado')+(o.motoja.motoboy?' • '+esc(o.motoja.motoboy):'')+'</span>'+(o.motoja.message&&['erro','na_fila','cancelado'].includes(o.motoja.status)?'<small>'+esc(o.motoja.message)+'</small>':'')+'</div><div class="row-actions">'+(o.motoja.trackingUrl?'<a class="btn secondary small" href="'+esc(o.motoja.trackingUrl)+'" target="_blank" rel="noopener">Ver motoboy</a>':'')+(store.motoja_connected&&!['chamado','aceito','retirado','entregue'].includes(o.motoja.status)&&!['completed','cancelled'].includes(o.status)?'<button class="btn small" id="call-motoja">Chamar MotoJá</button>':'')+'</div></div>':'')+o.items.map(x=>'<div class="tracking-item"><div><b>'+x.quantity+' × '+esc(x.name)+'</b><small>'+x.extras.map(e=>esc(e.name)).join(', ')+'</small><small>'+esc(x.notes)+'</small></div><b>'+money(x.unit_price*x.quantity)+'</b></div>').join('')+
+  const d=modal('Pedido #'+o.number,'<div class="order-dialog-top"><div><h3>'+esc(o.customer)+'</h3><p>'+esc(o.phone)+' • '+date(o.created_at)+'</p><span class="badge">'+statuses[o.status]+'</span></div><div class="drawer-tools"><a class="btn secondary small" target="_blank" rel="noopener" href="https://wa.me/'+o.phone.replace(/\D/g,'').replace(/^(?!55)/,'55')+'?text='+encodeURIComponent('Olá, '+o.customer.split(' ')[0]+'! Sobre o seu pedido #'+o.number+':')+'">WhatsApp</a><button id="print-order" class="btn secondary small">'+icon('print')+' Imprimir</button>'+(o.mode==='delivery'?'<button id="print-driver" class="btn secondary small">'+icon('truck')+' Via do motoboy</button>':'')+'</div></div>'+(nextStatus(o)?'<button id="drawer-next" class="btn full drawer-next">'+actionLabel(o)+' '+icon('arrow')+'</button>':'')+'<div class="notice">'+icon(o.mode==='delivery'?'truck':'store')+' '+(o.mode==='delivery'?'Entrega: '+esc(o.address)+(o.zone?' • Bairro '+esc(o.zone):''):'Retirada no balcão')+'</div>'+(o.mode==='delivery'&&(store.motoja_connected||o.motoja.status)?'<div class="motoja-box"><div><b>'+icon('truck')+' MotoJá</b><span>'+esc(o.motoja.label||'Motoboy ainda não chamado')+(o.motoja.motoboy?' • '+esc(o.motoja.motoboy):'')+'</span>'+(o.motoja.message&&['erro','na_fila','cancelado'].includes(o.motoja.status)?'<small>'+esc(o.motoja.message)+'</small>':'')+'</div><div class="row-actions">'+(o.motoja.trackingUrl?'<a class="btn secondary small" href="'+esc(o.motoja.trackingUrl)+'" target="_blank" rel="noopener">Ver motoboy</a>':'')+(store.motoja_connected&&!['chamado','aceito','retirado','entregue'].includes(o.motoja.status)&&!['completed','cancelled'].includes(o.status)?'<button class="btn small" id="call-motoja">Chamar MotoJá</button>':'')+'</div></div>':'')+o.items.map(x=>'<div class="tracking-item"><div><b>'+x.quantity+' × '+esc(x.name)+'</b><small>'+x.extras.map(e=>esc(e.name)).join(', ')+'</small><small>'+esc(x.notes)+'</small></div><b>'+money(x.unit_price*x.quantity)+'</b></div>').join('')+
   (o.notes?'<p class="notice">Observações: '+esc(o.notes)+'</p>':'')+'<div class="checkout-totals"><div><span>Produtos</span><b>'+money(o.subtotal)+'</b></div><div><span>Entrega</span><b>'+money(o.delivery_fee)+'</b></div><div><span>Desconto</span><b>− '+money(o.discount)+'</b></div><div class="total-row"><span>Total</span><strong>'+money(o.total)+'</strong></div></div><p>'+pay[o.payment]+(o.change_for?' • Troco para '+money(o.change_for):'')+'</p><form id="order-update">'+
   '<label class="check-row"><span><input name="paid" type="checkbox" '+(o.paid?'checked':'')+' '+(o.status==='cancelled'?'disabled':'')+'>Pagamento confirmado</span></label>'+
   (o.mode==='delivery'?'<label>Entregador<select name="driver_id"><option value="">Sem entregador</option>'+drivers.filter(x=>x.active||x.id===o.driver_id).map(x=>'<option value="'+x.id+'" '+(x.id===o.driver_id?'selected':'')+'>'+esc(x.name)+'</option>').join('')+'</select></label>':'')+
@@ -231,7 +266,7 @@ function orderDialog(o){
   if($('#call-motoja'))$('#call-motoja').onclick=async e=>{e.target.disabled=true;e.target.textContent='Chamando…';try{const r=await api('/api/admin/orders/'+o.id+'/motoja',{method:'POST'});toast(r.label+(r.message&&r.status!=='chamado'?': '+r.message:''));closeModal();switchTab(tab,true);}catch(err){toast(err.message);e.target.disabled=false;e.target.textContent='Chamar MotoJá';}};
   if($('#drawer-next'))$('#drawer-next').onclick=async e=>{e.target.disabled=true;try{await api('/api/admin/orders/'+o.id,{method:'PATCH',body:JSON.stringify({status:nextStatus(o)})});closeModal();toast('Pedido atualizado.');switchTab(tab,true);}catch(err){toast(err.message);e.target.disabled=false;}};
   $('.dialog-actions',d).insertAdjacentHTML('beforeend','<button id="order-costs" type="button" class="btn secondary">Conferir custos</button>');$('#order-costs').onclick=()=>costsDialog(o,()=>switchTab(tab,true));
-  $('#print-order').onclick=()=>printTicket(o);$('#copy-track').onclick=()=>copy(location.origin+'/pedido/'+o.tracking_token);
+  $('#print-order').onclick=()=>printTicket(o);if($('#print-driver'))$('#print-driver').onclick=()=>printTicket(o,'driver');$('#copy-track').onclick=()=>copy(location.origin+'/pedido/'+o.tracking_token);
   bindForm($('#order-update'),async form=>{await api('/api/admin/orders/'+o.id,{method:'PATCH',body:JSON.stringify({paid:o.status==='cancelled'?!!o.paid:form.has('paid'),driver_id:form.get('driver_id')?Number(form.get('driver_id')):null})});closeModal();toast('Pedido atualizado.');switchTab(tab,true);});
   if($('#cancel-order'))$('#cancel-order').onclick=()=>{
     const confirm=modal('Cancelar este pedido?','<p>O pedido #'+o.number+' será cancelado. Os itens voltarão ao estoque. Se houve pagamento, combine a devolução diretamente com o cliente.</p><div class="dialog-actions"><button id="confirm-cancel" class="btn danger">Confirmar cancelamento</button><button id="keep-order" class="btn secondary">Manter pedido</button></div>');

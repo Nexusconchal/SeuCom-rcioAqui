@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote as url_quote, urlparse
 from zoneinfo import ZoneInfo
 
 import click
@@ -38,7 +38,7 @@ STATUSES = {"new": {"preparing", "cancelled"}, "preparing": {"ready", "cancelled
 ROLE_LABELS = {"owner": "Dono", "manager": "Gerente", "cashier": "Caixa", "kitchen": "Cozinha"}
 # O dono pode tudo. Os demais só acessam o que a função precisa (o servidor confere em cada chamada).
 ROLE_BASE = {"admin_store", "merchant_notices", "change_password", "admin_orders", "admin_products", "drivers", "set_open",
-             "push_key", "push_subscribe", "push_unsubscribe", "push_test"}
+             "push_key", "push_subscribe", "push_unsubscribe", "push_test", "order_map_qr"}
 ROLE_ALLOWED = {
     "kitchen": ROLE_BASE | {"update_order"},
     "cashier": ROLE_BASE | {"motoja_send", "update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
@@ -531,6 +531,23 @@ def create_app(test_config=None):
         if request.args.get("download"):
             response.headers["Content-Disposition"] = f'attachment; filename="qrcode-{g.store["slug"]}.{extension}"'
         return response
+
+    @app.get("/api/admin/orders/<int:oid>/map-qr")
+    @owner
+    def order_map_qr(oid):
+        # QR code da via do motoboy: abre o endereço da entrega no mapa. oid=0 é a notinha de teste (endereço da loja).
+        import segno
+        if oid:
+            order = one("SELECT address FROM orders WHERE id=? AND store_id=?", (oid, g.store["id"]))
+            if not order or not order["address"]:
+                abort(404)
+            place = order["address"]
+        else:
+            place = g.store["address"] or g.store["name"]
+        code = segno.make("https://www.google.com/maps/search/?api=1&query=" + url_quote(place), error="m")
+        output = io.BytesIO()
+        code.save(output, kind="svg", scale=4, border=1, xmldecl=False)
+        return app.response_class(output.getvalue(), mimetype="image/svg+xml")
 
     @app.get("/media/<filename>")
     def media(filename):
