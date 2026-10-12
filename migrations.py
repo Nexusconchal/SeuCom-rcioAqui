@@ -75,7 +75,13 @@ CREATE TABLE IF NOT EXISTS platform_notices (
  id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('info','promo','alert')),
  expires TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS support_messages (
+ id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), author_id INTEGER REFERENCES users(id),
+ from_platform INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT 'chat', topic TEXT NOT NULL DEFAULT '',
+ body TEXT NOT NULL, created_at TEXT NOT NULL, read_at TEXT
+);
 CREATE INDEX IF NOT EXISTS ix_api_keys_store ON api_keys(store_id);
+CREATE INDEX IF NOT EXISTS ix_support_store ON support_messages(store_id,id);
 CREATE INDEX IF NOT EXISTS ix_delivery_store ON delivery_links(store_id,updated_at);
 CREATE INDEX IF NOT EXISTS ix_delivery_key ON delivery_links(key_id);
 CREATE INDEX IF NOT EXISTS ix_integration_event_order ON integration_events(order_id);
@@ -114,6 +120,6 @@ def postgres_ddl():
         for column, definition in columns.items():
             statements.append(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition};')
     statements.extend(s+';' for s in TABLES.split(';') if s.strip() and not s.strip().startswith('CREATE TABLE'))
-    for table in ('api_keys', 'delivery_links', 'integration_events', 'stock_movements', 'platform_ledger', 'audit_log', 'platform_notices', 'store_members', 'platform_settings', 'push_subscriptions'):
+    for table in ('api_keys', 'delivery_links', 'integration_events', 'stock_movements', 'platform_ledger', 'audit_log', 'platform_notices', 'store_members', 'platform_settings', 'push_subscriptions', 'support_messages'):
         statements.extend([f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;', f'REVOKE ALL ON {table} FROM PUBLIC,anon,authenticated;'])
     return '\n'.join(statements)

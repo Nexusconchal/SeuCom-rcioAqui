@@ -22,6 +22,7 @@ from storage import put_image
 from notify import notify_store, vapid_keys
 from payments import MercadoPago, PaymentError, seal, unseal
 from order_flow import MOTOJA_LABEL, register_order_flow
+from support import register_support
 from billing import apply_exemptions, billing_ok, billing_state, first_billing_migration, register_billing
 from flask import Flask, abort, g, has_request_context, jsonify, redirect, request, send_from_directory, session
 from markupsafe import escape
@@ -38,7 +39,8 @@ STATUSES = {"new": {"preparing", "cancelled"}, "preparing": {"ready", "cancelled
 ROLE_LABELS = {"owner": "Dono", "manager": "Gerente", "cashier": "Caixa", "kitchen": "Cozinha"}
 # O dono pode tudo. Os demais só acessam o que a função precisa (o servidor confere em cada chamada).
 ROLE_BASE = {"admin_store", "merchant_notices", "change_password", "admin_orders", "admin_products", "drivers", "set_open",
-             "push_key", "push_subscribe", "push_unsubscribe", "push_test", "order_map_qr"}
+             "push_key", "push_subscribe", "push_unsubscribe", "push_test", "order_map_qr",
+             "support_thread", "support_unread", "support_send"}
 ROLE_ALLOWED = {
     "kitchen": ROLE_BASE | {"update_order"},
     "cashier": ROLE_BASE | {"motoja_send", "update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
@@ -1478,6 +1480,7 @@ def create_app(test_config=None):
 
     register_order_flow(app, dict(db=db, one=one, owner=owner, owned=owned, data=data, text=text, boolean=boolean,
                                   limited=limited, now=now, public_base_static=public_base_static))
+    register_support(app, dict(db=db, one=one, rows=rows, owner=owner, data=data, text=text, limited=limited, now=now))
 
     register_billing(app, dict(db=db, one=one, rows=rows, owner=owner, data=data, text=text, transaction=transaction,
                                limited=limited, now=now, public_base=public_base, audit=audit_entry))

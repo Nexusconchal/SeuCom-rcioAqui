@@ -1,3 +1,4 @@
+import { platformSupportView } from './support.js';
 import { $, $$, api, auth, brand, icon, esc, money, date, modal, closeModal, bindForm, field, moneyInput, cents, toast, empty, copy, statuses, optionFields, readOptions, bindOptionLimits, fromPrice, hasChoices } from './ui.js';
 
 const amount = value => value === null || value === undefined ? 'A informar' : money(value);
@@ -161,12 +162,12 @@ export async function renderOwnerSite(){
 }
 async function renderPlatform(){
   document.title='Central do Dono • SeuComércioAqui';
-  const tabs=[['monthly','Visão mês a mês'],['stores','Lojas e contas'],['promos','Promoções e avisos'],['cash','Recebimentos e despesas'],['history','Histórico']];
+  const tabs=[['monthly','Visão mês a mês'],['stores','Lojas e contas'],['promos','Promoções e avisos'],['cash','Recebimentos e despesas'],['history','Histórico'],['support','Suporte']];
   $('#app').innerHTML='<div class="dashboard platform"><header class="dashboard-head">'+ownerBrand()+'<nav class="dashboard-nav">'+tabs.map(([id,label])=>'<button data-ptab="'+id+'">'+label+'</button>').join('')+'</nav><div class="head-actions"><span class="owner-user">'+esc(auth.user.email)+'</span><button class="icon-btn" id="platform-logout" aria-label="Sair">'+icon('logout')+'</button></div></header><main class="dashboard-main" id="main"><section class="dashboard-title"><div><span class="eyebrow">GESTÃO DA PLATAFORMA</span><h1 id="platform-title">Seu negócio por inteiro</h1><p id="platform-subtitle">Lojas, contratos e resultados do SeuComércioAqui.</p></div><span class="badge green">Acesso do proprietário</span></section><section id="platform-content"></section></main></div>';
   $('#platform-logout').onclick=async()=>{await api('/api/auth/logout',{method:'POST'});location.href='/admin';};
   $$('[data-ptab]').forEach(b=>b.onclick=()=>{platformTab=b.dataset.ptab;draw();});
   const root=$('#platform-content');
-  const titles={monthly:['Suas vendas mês a mês','Quanto as lojas venderam e quanto a plataforma recebeu em cada mês.'],stores:['Lojas e contas','Contratos, pagamentos do mês, bloqueios e saúde de cada loja.'],promos:['Promoções e avisos','Mensalidades promocionais e recados que aparecem no painel de todos os lojistas.'],cash:['Recebimentos e despesas','O dinheiro que entrou e saiu da plataforma.'],history:['Histórico administrativo','Tudo o que foi alterado, com data.']};
+  const titles={monthly:['Suas vendas mês a mês','Quanto as lojas venderam e quanto a plataforma recebeu em cada mês.'],stores:['Lojas e contas','Contratos, pagamentos do mês, bloqueios e saúde de cada loja.'],promos:['Promoções e avisos','Mensalidades promocionais e recados que aparecem no painel de todos os lojistas.'],cash:['Recebimentos e despesas','O dinheiro que entrou e saiu da plataforma.'],history:['Histórico administrativo','Tudo o que foi alterado, com data.'],support:['Suporte às lojas','Mensagens e problemas enviados pelos lojistas. Prazo de resposta combinado: até 12 horas.']};
   async function draw(){
     $$('[data-ptab]').forEach(b=>b.classList.toggle('active',b.dataset.ptab===platformTab));
     $('#platform-title').textContent=titles[platformTab][0];$('#platform-subtitle').textContent=titles[platformTab][1];
@@ -174,11 +175,14 @@ async function renderPlatform(){
     try{
       if(platformTab==='monthly')await monthlyView(root,draw);
       else if(platformTab==='promos')await promosView(root,draw);
+      else if(platformTab==='support')await platformSupportView(root,supportCount);
       else await summaryView(root,draw);
     }catch(e){if(e.status===401||e.status===403){auth.user=null;renderOwnerSite();return;}root.innerHTML=empty('Não foi possível carregar',e.message,'<button id="platform-retry" class="btn secondary">Tentar novamente</button>');$('#platform-retry').onclick=draw;}
   }
   await draw();
+  const check=()=>{if(!$('[data-ptab="support"]'))return;api('/api/platform/support').then(r=>supportCount(r.unread)).catch(()=>{});setTimeout(check,60000);};check();
 }
+function supportCount(n){const b=$('[data-ptab="support"]');if(!b)return;b.querySelector('.nav-count')?.remove();if(n)b.insertAdjacentHTML('beforeend','<span class="nav-count">'+n+'</span>');}
 
 async function monthlyView(root,draw){
   const r=await api('/api/platform/monthly?months=12'+(selectedMonth?'&month='+selectedMonth:''));

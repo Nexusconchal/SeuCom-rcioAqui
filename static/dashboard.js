@@ -1,10 +1,11 @@
 import { managementView, costsDialog, manualOrder, overviewDetails } from './management.js';
+import { supportPage } from './support.js';
 import { $, $$, icon, brand, money, esc, image, api, auth, modal, closeModal, bindForm, empty, toast, pay, date, attachFallbacks, copy, cents, field, moneyInput, statuses } from './ui.js';
 let store, products=[], categories=[], drivers=[], orders=[], tab='overview', period=7, timer, generation=0, role='owner', roleLabel='Dono';
-const ROLE_TABS={kitchen:['kitchen','orders','settings'],cashier:['overview','orders','kitchen','customers','drivers','sales','settings'],manager:null,owner:null};
+const ROLE_TABS={kitchen:['kitchen','orders','settings','support'],cashier:['overview','orders','kitchen','customers','drivers','sales','settings','support'],manager:null,owner:null};
 export async function renderDashboard(){
   const me=await api('/api/admin/store');store=me.store;role=me.role;roleLabel=me.role_label;document.title='Painel • '+store.name;
-  $('#app').innerHTML='<div class="dashboard"><header class="dashboard-head">'+brand()+'<nav class="dashboard-nav">'+[['overview','Visão geral'],['orders','Pedidos'],['kitchen','Cozinha'],['products','Cardápio'],['stock','Estoque'],['customers','Clientes'],['drivers','Entregas'],['sales','Vendas e caixa'],['finance','Lucro e custos'],['integrations','Integrações']].filter(([id])=>role==='owner'||(role==='manager'?id!=='integrations':ROLE_TABS[role].includes(id))).map(([id,label])=>'<button data-tab="'+id+'">'+label+'</button>').join('')+'</nav>'+'<div class="head-actions"><button id="sound-toggle" class="icon-btn sound-toggle" aria-label="Som de novos pedidos">'+icon('bell')+'</button><button class="icon-btn" data-tab="settings" aria-label="Configurações">'+icon('gear')+'</button><button id="logout" class="icon-btn" aria-label="Sair">'+icon('logout')+'</button></div></header><main id="main" class="dashboard-main"><section class="dashboard-title"><div><span class="eyebrow" id="page-kicker">SEU COMÉRCIO EM MOVIMENTO</span><h1 id="page-title">Seu dia em um olhar</h1><p id="page-subtitle">Tudo pronto para vender mais.</p></div><div class="title-actions"><button id="store-toggle" class="badge gray"><i></i>Loja fechada</button><a class="btn" href="/loja/'+esc(store.slug)+'" target="_blank" rel="noopener">Ver minha loja '+icon('eye')+'</a></div></section><section id="platform-notices"></section><section id="dashboard-content" aria-live="polite"></section></main><footer class="dashboard-footer"><span>SeuComércioAqui</span><span>'+esc(store.name)+' • '+esc(auth.user.name)+' ('+esc(roleLabel)+')</span></footer></div>';
+  $('#app').innerHTML='<div class="dashboard"><header class="dashboard-head">'+brand()+'<nav class="dashboard-nav">'+[['overview','Visão geral'],['orders','Pedidos'],['kitchen','Cozinha'],['products','Cardápio'],['stock','Estoque'],['customers','Clientes'],['drivers','Entregas'],['sales','Vendas e caixa'],['finance','Lucro e custos'],['integrations','Integrações'],['support','Suporte']].filter(([id])=>role==='owner'||(role==='manager'?id!=='integrations':ROLE_TABS[role].includes(id))).map(([id,label])=>'<button data-tab="'+id+'">'+label+'</button>').join('')+'</nav>'+'<div class="head-actions"><button id="sound-toggle" class="icon-btn sound-toggle" aria-label="Som de novos pedidos">'+icon('bell')+'</button><button class="icon-btn" data-tab="settings" aria-label="Configurações">'+icon('gear')+'</button><button id="logout" class="icon-btn" aria-label="Sair">'+icon('logout')+'</button></div></header><main id="main" class="dashboard-main"><section class="dashboard-title"><div><span class="eyebrow" id="page-kicker">SEU COMÉRCIO EM MOVIMENTO</span><h1 id="page-title">Seu dia em um olhar</h1><p id="page-subtitle">Tudo pronto para vender mais.</p></div><div class="title-actions"><button id="store-toggle" class="badge gray"><i></i>Loja fechada</button><a class="btn" href="/loja/'+esc(store.slug)+'" target="_blank" rel="noopener">Ver minha loja '+icon('eye')+'</a></div></section><section id="platform-notices"></section><section id="dashboard-content" aria-live="polite"></section></main><footer class="dashboard-footer"><span>SeuComércioAqui</span><span>'+esc(store.name)+' • '+esc(auth.user.name)+' ('+esc(roleLabel)+')</span></footer></div>';
   $$('[data-tab]').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
   $('#logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'});location.href='/entrar';}catch(e){toast(e.message);}};
   $('#store-toggle').onclick=async()=>{try{const result=await api('/api/admin/store/open',{method:'POST',body:JSON.stringify({open:!store.open})});store=result.store;updateStoreButton();toast(store.open?'Loja aberta para pedidos.':'Loja fechada.');platformNotices();}catch(e){toast(e.message);}};
@@ -15,7 +16,9 @@ export async function renderDashboard(){
     toast(soundOn()?'Som de novos pedidos ligado.':'Som de novos pedidos desligado.');};
   if(new URLSearchParams(location.search).has('assinatura')){history.replaceState(null,'','/painel');refreshBilling();}else platformNotices();
   watchOrders();
-  await switchTab(role==='kitchen'?'kitchen':'overview');
+  const startTab=new URLSearchParams(location.search).get('aba')==='suporte'?'support':role==='kitchen'?'kitchen':'overview';
+  if(startTab==='support')history.replaceState(null,'','/painel');
+  await switchTab(startTab);
 }
 function updateStoreButton(){const b=$('#store-toggle');const paused=store.billing_state&&!['exempt','active','paid','trial'].includes(store.billing_state);b.className='badge '+(store.open_now?'green':store.open&&!paused?'amber':'gray');b.innerHTML='<i></i>'+(paused?'Loja pausada (assinatura)':!store.open?'Loja fechada':store.open_now?'Loja aberta':'Aberta • fora do horário');b.title=store.open?'Clique para fechar a loja agora':'Clique para abrir a loja';}
 const days=['Segunda','Terça','Quarta','Quinta','Sexta','Sábado','Domingo'];
@@ -55,6 +58,15 @@ function motojaAlert(o){
   if(kind!=='error')setTimeout(close,15000);
   if('Notification' in window&&Notification.permission==='granted'&&document.hidden){try{new Notification(title,{body:body.replace(/<[^>]+>/g,''),icon:'/static/icon-192.png',tag:'motoja-'+o.id+'-'+m.status});}catch{}}
 }
+// Resposta nova do suporte: bolinha no menu, som e aviso (a tela de suporte aberta já mostra a mensagem).
+let supportUnread=0;
+function supportBadge(n){supportUnread=n;const b=$('[data-tab="support"]');if(!b)return;b.querySelector('.nav-count')?.remove();if(n)b.insertAdjacentHTML('beforeend','<span class="nav-count">'+n+'</span>');}
+async function supportCheck(){
+  if(tab==='support')return;
+  const n=(await api('/api/admin/support/unread').catch(()=>({unread:supportUnread}))).unread;
+  if(n>supportUnread){tone([[523,0],[659,.15],[784,.3]]);toast('O suporte respondeu sua mensagem. Abra Suporte para ver.');}
+  supportBadge(n);
+}
 function motojaWatch(list){
   const now=new Map(list.filter(o=>o.motoja&&o.motoja.status).map(o=>[o.id,o.motoja.status]));
   let moved=false;
@@ -73,6 +85,7 @@ async function watchOrders(){
       if('Notification' in window&&Notification.permission==='granted'&&document.hidden){try{new Notification('Novo pedido #'+first.number,{body:first.customer+' • '+money(first.total),icon:'/static/icon-192.png',tag:'pedido-'+first.id});}catch{}}
       if(['overview','orders','kitchen'].includes(tab))switchTab(tab,true);
     }}
+    supportCheck();
     seen=new Set(list.map(o=>o.id));document.title=(list.length?'('+list.length+') ':'')+'Painel • '+store.name;
   }catch(e){if(e.status===401){location.href='/entrar';return;}}
   watchTimer=setTimeout(watchOrders,15000);
@@ -218,7 +231,7 @@ function bindPlanPanel(){
 }
 async function switchTab(next,quiet=false){
   clearTimeout(timer);$('#new-manual-order')?.remove();tab=next;$('#dashboard-content').dataset.management=next;const v=++generation;
-  const titles={kitchen:['Fila de produção','Produtos e observações para preparar os pedidos.'],finance:['Seu lucro, com clareza','Custos, taxas e resultado estimado da loja.'],stock:['Estoque sob controle','Reposição, perdas e histórico de movimentações.'],customers:['Conheça seus clientes','Compras e histórico de quem pede na sua loja.'],integrations:['Conecte seus parceiros','Chaves de API e acompanhamento das entregas.'],overview:['Seu dia em um olhar','Os pedidos e números que importam agora.'],orders:['Cada pedido, no seu tempo','Do primeiro clique à última entrega.'],products:['Seu cardápio, sua assinatura','Organize seus produtos e deixe tudo com a sua cara.'],drivers:['Entrega bem cuidada','Sua equipe e os pedidos a caminho.'],sales:['Os números do seu negócio','Acompanhe vendas, recebimentos e despesas.'],settings:['A sua loja, do seu jeito','Identidade, contato e operação em um só lugar.']};
+  const titles={kitchen:['Fila de produção','Produtos e observações para preparar os pedidos.'],finance:['Seu lucro, com clareza','Custos, taxas e resultado estimado da loja.'],stock:['Estoque sob controle','Reposição, perdas e histórico de movimentações.'],customers:['Conheça seus clientes','Compras e histórico de quem pede na sua loja.'],integrations:['Conecte seus parceiros','Chaves de API e acompanhamento das entregas.'],support:['Fale com o suporte','Dúvidas, problemas e sugestões direto com a equipe SeuComércioAqui.'],overview:['Seu dia em um olhar','Os pedidos e números que importam agora.'],orders:['Cada pedido, no seu tempo','Do primeiro clique à última entrega.'],products:['Seu cardápio, sua assinatura','Organize seus produtos e deixe tudo com a sua cara.'],drivers:['Entrega bem cuidada','Sua equipe e os pedidos a caminho.'],sales:['Os números do seu negócio','Acompanhe vendas, recebimentos e despesas.'],settings:['A sua loja, do seu jeito','Identidade, contato e operação em um só lugar.']};
   $('#page-title').textContent=titles[tab][0];$('#page-subtitle').textContent=titles[tab][1];$$('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
   if(!quiet)$('#dashboard-content').innerHTML='<div class="loading small-loading">Carregando…</div>';
   try{
@@ -233,7 +246,8 @@ async function switchTab(next,quiet=false){
       const [result,team]=await Promise.all([api('/api/admin/orders'),api('/api/admin/drivers')]);if(v!==generation)return;orders=result.orders;drivers=team.drivers;driversPage();
     }else if(tab==='sales'){
       const summary=await api('/api/admin/summary?days='+period);if(v!==generation)return;salesPage(summary);
-    }else if(['finance','stock','customers','integrations'].includes(tab)){await managementView(tab,$('#dashboard-content'));}else settingsPage();
+    }else if(['finance','stock','customers','integrations'].includes(tab)){await managementView(tab,$('#dashboard-content'));}
+    else if(tab==='support'){await supportPage($('#dashboard-content'));if(v===generation)supportBadge(0);}else settingsPage();
     attachFallbacks($('#dashboard-content'));
   }catch(e){if(v!==generation)return;if(e.status===401){location.href='/entrar';return;}$('#dashboard-content').innerHTML=empty('Não foi possível carregar',e.message,'<button id="retry-tab" class="btn secondary">Tentar novamente</button>');$('#retry-tab').onclick=()=>switchTab(tab);}
 }
