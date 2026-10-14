@@ -76,6 +76,19 @@ def register_operations(app, helpers):
         conn.execute('INSERT INTO audit_log(actor_id,store_id,action,detail,created_at) VALUES(?,?,?,?,?)',
                      (g.user['id'], g.store['id'], action, detail, h.now()))
 
+    def confirm_from_order(conn,order,status):
+        current=conn.execute('SELECT * FROM cash_sessions WHERE store_id=? AND closed_at IS NULL',(order['store_id'],)).fetchone()
+        if not current or not order['total']:return
+        if status=='cancelled':abort(409,description='Não receba um pedido cancelado. Use recebimento e estorno no Caixa.')
+        if order['payment'] not in ('cash','pix','card'):return
+        value={'amount':order['total'],'method':order['payment'],'kind':'receipt','reason':'Confirmado pelo pedido'}
+        digest=hashlib.sha256(json.dumps({'order':order['id'],'value':value},sort_keys=True).encode()).hexdigest()
+        conn.execute("""INSERT INTO order_receipts(store_id,order_id,session_id,amount,method,kind,actor_id,reason,key,payload_hash,created_at)
+            VALUES(?,?,?,?,?,'receipt',?,?,?,?,?)""",(order['store_id'],order['id'],current['id'],order['total'],order['payment'],g.user['id'],value['reason'],f"confirm-order-{order['id']}-paid",digest,h.now()))
+        audit(conn,'cash.receipt',str(order['id'])+':'+str(order['total']))
+
+    app.extensions['cash_confirm_from_order']=confirm_from_order
+
     def session_info(row):
         result = dict(row)
         totals = h.rows("""SELECT method,COALESCE(SUM(CASE WHEN kind='receipt' THEN amount ELSE -amount END),0) AS amount

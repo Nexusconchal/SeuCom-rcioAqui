@@ -89,6 +89,17 @@ def test_concurrent_receipts_cannot_overpay(shop):
     assert c.get('/api/admin/cash').json['orders'][0]['received']==2000
 
 
+def test_existing_payment_confirmation_enters_open_shift_once(shop):
+    c,pid=shop
+    send(c,'POST','/api/admin/cash/open',{'opening':10000})
+    o=order(c,pid,payment='cash')
+    for _ in range(2):
+        assert send(c,'PATCH',f"/api/admin/orders/{o['id']}",{'paid':True}).status_code==200
+    state=c.get('/api/admin/cash').json
+    assert state['current']['expected_now']==13400 and len(state['receipts'])==1
+    assert send(c,'PATCH',f"/api/admin/orders/{o['id']}",{'paid':False}).status_code==409
+
+
 def test_dining_orders_transfer_close_and_public_account_rejection(shop):
     c,pid=shop
     t1=send(c,'POST','/api/admin/dining/tables',{'name':'Mesa 1'}).json['id']

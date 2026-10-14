@@ -1471,6 +1471,8 @@ def create_app(test_config=None):
                 abort(409, description='Receba o fiado pelo Caixa para manter a conta conciliada.')
             if paid != bool(order['paid']) and order['payment']=='pix_online':
                 abort(409, description='Pix online é confirmado pela integração de pagamentos.')
+            if paid and not order['paid']:
+                app.extensions['cash_confirm_from_order'](conn,order,status)
             driver = value.get("driver_id", order["driver_id"])
             if driver is not None:
                 if not isinstance(driver, int) or isinstance(driver, bool):
