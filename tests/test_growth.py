@@ -12,7 +12,8 @@ from tests.test_business import advance
 def sql(client, query, params=()):
     conn = connect(client.application.config)
     try:
-        return conn.execute(query, params).fetchall()
+        cursor = conn.execute(query, params)
+        return cursor.fetchall() if query.lstrip().upper().startswith('SELECT') else []
     finally:
         conn.close()
 
