@@ -66,6 +66,7 @@ def test_cashback_otp_checkout_driver_location_and_inbox_ui(connected_live):
         expect(admin.locator('.inbox-history')).to_contain_text('Gostaria de pedir um lanche')
         admin.get_by_role('button',name='Assumir conversa',exact=True).click();admin.get_by_label('Resposta',exact=True).fill('Olá! Vou ajudar com seu pedido.')
         admin.get_by_role('button',name='Enviar resposta',exact=True).click();expect(admin.locator('.inbox-history')).to_contain_text('Na fila')
+        admin.evaluate('window.scrollTo(0,0)')
         admin.screenshot(path=str(artifacts/'atendimento-desktop.png'),full_page=True)
         admin.get_by_role('button',name='Mapa de entregas',exact=True).click();expect(admin.get_by_role('heading',name='Pedidos de entrega',exact=True)).to_be_visible()
         admin.screenshot(path=str(artifacts/'entregas-desktop.png'),full_page=True)

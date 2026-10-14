@@ -2,6 +2,7 @@ import uuid
 
 from inbox import dispatch_inbox
 from tests.test_api import app,shop,send,register
+from tests.test_api import payload
 from tests.test_growth import sql
 from tests.test_wallet_campaigns import Provider,provider
 
@@ -64,3 +65,15 @@ def test_keyword_response_and_uncertain_reply_are_not_sent_twice(shop):
     fake.fail=True
     assert dispatch_inbox(c.application)['uncertain']==1
     assert dispatch_inbox(c.application)['sent']==0 and len(fake.calls)==2
+
+
+def test_contact_erasure_clears_destination_item_notes_and_conversation(shop):
+    c,pid=shop;fake=setup(c)
+    body=payload(pid,latitude=-22.32,longitude=-47.17)
+    assert send(c,'POST','/api/store/minha-loja/orders',body,uuid.uuid4().hex).status_code==201
+    assert c.post('/webhooks/inbox/1',json=event('Dados pessoais na conversa'),headers={'X-Webhook-Token':fake.token}).status_code==200
+    assert send(c,'POST','/api/admin/customers/11999999999/anonymize',{}).status_code==200
+    o=sql(c,'SELECT total,phone,latitude,longitude FROM orders')[0]
+    assert o['total']==3900 and o['phone']=='00000000000' and o['latitude'] is None and o['longitude'] is None
+    assert sql(c,'SELECT notes FROM order_items')[0]['notes']==''
+    assert c.get('/api/admin/inbox').json['threads']==[]

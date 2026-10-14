@@ -53,9 +53,9 @@ def dispatcher(app, limit=20):
                     job=dict(candidate)
                     conn.execute("UPDATE marketing_jobs SET status='processing',claimed_at=? WHERE id=?",(stamp.isoformat(timespec='seconds'),job['id']))
                     break
-                conn.commit()
+                conn.execute('COMMIT')
             except Exception:
-                conn.rollback();raise
+                conn.execute('ROLLBACK');raise
             if not job:
                 break
             # Nenhum segredo, telefone ou texto de campanha é escrito em logs.
@@ -102,10 +102,12 @@ def register_campaign_queue(app,helpers):
             abort(400,description='Escolha uma data de envio entre agora e os próximos 30 dias.')
         recipients=app.extensions['campaign_recipients'](campaign)
         with h.transaction() as conn:
+            before=conn.execute('SELECT COUNT(*) FROM marketing_jobs WHERE campaign_id=?',(cid,)).fetchone()[0]
             for recipient in recipients:
                 conn.execute('''INSERT INTO marketing_jobs(store_id,campaign_id,phone,message,due_at,created_at) VALUES(?,?,?,?,?,?)
                     ON CONFLICT(campaign_id,phone) DO NOTHING''',(g.store['id'],cid,recipient['phone'],recipient['message'],due.astimezone(timezone.utc).isoformat(timespec='seconds'),h.now()))
-        return jsonify(queued=len(recipients))
+            queued=conn.execute('SELECT COUNT(*) FROM marketing_jobs WHERE campaign_id=?',(cid,)).fetchone()[0]-before
+        return jsonify(queued=queued,selected=len(recipients))
 
     @app.post('/api/admin/marketing/campaigns/<int:cid>/cancel-queue')
     @h.owner

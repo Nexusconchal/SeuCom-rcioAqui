@@ -91,7 +91,8 @@ def test_dynamic_segments_campaign_queue_cancel_and_uncertain_delivery(shop):
     cid=send(c,'POST','/api/admin/marketing/campaigns',body).json['id']
     due={'due_at':datetime.now(timezone.utc).isoformat(timespec='seconds')}
     assert send(c,'POST',f'/api/admin/marketing/campaigns/{cid}/queue',due).json['queued']==1
-    assert send(c,'POST',f'/api/admin/marketing/campaigns/{cid}/queue',due).status_code==200
+    repeated=send(c,'POST',f'/api/admin/marketing/campaigns/{cid}/queue',due)
+    assert repeated.status_code==200 and repeated.json['queued']==0
     assert len(c.get('/api/admin/marketing/queue').json['jobs'])==1
     result=dispatcher(c.application)
     assert result['sent']==1 and len(fake.calls)==1

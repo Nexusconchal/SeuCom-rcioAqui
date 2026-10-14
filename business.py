@@ -522,7 +522,8 @@ def register_business(app, helpers):
             if not found:
                 abort(404,description='Cliente não encontrado.')
             conn.execute(f"UPDATE obligations SET description='Fiado • Cliente removido' WHERE store_id=? AND order_id IN (SELECT id FROM orders WHERE store_id=? AND {normalized}=?)",(g.store['id'],g.store['id'],phone))
-            conn.execute(f"""UPDATE orders SET customer='Cliente removido',phone='00000000000',address='',notes='',review=''
+            conn.execute(f"UPDATE order_items SET notes='' WHERE order_id IN (SELECT id FROM orders WHERE store_id=? AND {normalized}=?)",(g.store['id'],phone))
+            conn.execute(f"""UPDATE orders SET customer='Cliente removido',phone='00000000000',address='',notes='',review='',latitude=NULL,longitude=NULL
                 WHERE store_id=? AND {normalized}=?""",(g.store['id'],phone))
             key = phone_key(phone)
             conn.execute('DELETE FROM customer_opt_ins WHERE store_id=? AND phone=?', (g.store['id'], key))

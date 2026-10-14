@@ -26,7 +26,7 @@ Revisão de 14/10/2026. Referência: páginas oficiais, imagens de telas e trech
 | Relatórios | **Gerar relatório** separado; PDF, Excel, CSV, mês e datas | Vendas por criação do pedido; tabela de recebimentos por operação; custos desconhecidos continuam desconhecidos |
 | Brasil | Fuso, horários, agendamento e relatórios por loja | Piloto, carga, restauração e observabilidade antes de prometer capacidade/SLA nacional |
 
-Emissão de NFC-e/NF-e, integração oficial de pedidos com iFood/99/outros marketplaces, cartão online/TEF, drivers/gaveta e IA não foram implementados. Não há telas que simulem conexão com esses fornecedores. O usuário informou não possuir fornecedores/credenciais para ativação.
+Emissão de NFC-e/NF-e, integração oficial de pedidos com iFood/99/outros marketplaces, cartão online/TEF, drivers/gaveta e IA não foram implementados. Não há telas que simulem conexão com esses fornecedores.
 
 Superar os concorrentes ainda exige validar operação em restaurantes, medir atendimento/conversão, implementar as lacunas explicitadas e testar carga/restauração. Quantidade de funções e imagens não comprovam superioridade operacional.
 

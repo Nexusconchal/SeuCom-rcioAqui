@@ -28,7 +28,8 @@ class Cursor:
     def __init__(self, cursor, inserted=False):
         self.cursor = cursor
         self.rowcount = cursor.rowcount
-        self.lastrowid = cursor.fetchone()["id"] if inserted else None
+        returned=cursor.fetchone() if inserted else None
+        self.lastrowid = returned['id'] if returned is not None else None
 
     def fetchone(self):
         value = self.cursor.fetchone()

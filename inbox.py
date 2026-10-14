@@ -42,10 +42,10 @@ def dispatch_inbox(app,limit=20):
                 row=conn.execute("""SELECT m.*,t.phone,s.wa_instance FROM inbox_messages m JOIN inbox_threads t ON t.id=m.thread_id
                     JOIN stores s ON s.id=m.store_id WHERE m.status='queued' AND s.enabled=1 AND s.wa_instance!=''
                     AND (m.automated=0 OR (t.assigned_to IS NULL AND t.state='open' AND s.inbox_bot=1)) ORDER BY m.id LIMIT 1""").fetchone()
-                if not row:conn.commit();break
+                if not row:conn.execute('COMMIT');break
                 conn.execute("UPDATE inbox_messages SET status='processing',claimed_at=? WHERE id=?",(now,row['id']))
-                conn.commit()
-            except Exception:conn.rollback();raise
+                conn.execute('COMMIT')
+            except Exception:conn.execute('ROLLBACK');raise
             try:
                 code,_=provider.send_text(row['wa_instance'],row['phone'],row['body'])
                 if code not in (200,201):raise RuntimeError('not confirmed')
