@@ -132,7 +132,40 @@ CREATE INDEX IF NOT EXISTS ix_audit_actor ON audit_log(actor_id);
 """
 
 
+from operations import DDL as OPERATIONS_DDL
+from merchandising import DDL as MERCHANDISING_DDL
+from purchasing import DDL as PURCHASING_DDL
+from campaign_queue import DDL as CAMPAIGN_DDL
+from customer_segments import DDL as SEGMENTS_DDL
+from cashback import DDL as CASHBACK_DDL
+from inbox import DDL as INBOX_DDL
+from credit import DDL as CREDIT_DDL
+from store_network import DDL as NETWORK_DDL
+
+TABLES += OPERATIONS_DDL + MERCHANDISING_DDL + PURCHASING_DDL
+TABLES += CAMPAIGN_DDL
+TABLES += SEGMENTS_DDL
+TABLES += CASHBACK_DDL
+TABLES += INBOX_DDL
+TABLES += CREDIT_DDL
+TABLES += NETWORK_DDL
+TABLES += "CREATE UNIQUE INDEX IF NOT EXISTS ix_driver_gps ON drivers(gps_hash) WHERE gps_hash!='';"
+ADDITIONS['stores'].update({'timezone': "TEXT NOT NULL DEFAULT 'America/Sao_Paulo'", 'auto_accept': 'INTEGER NOT NULL DEFAULT 0'})
+ADDITIONS['stores'].update({'cashback_enabled': 'INTEGER NOT NULL DEFAULT 0', 'cashback_bps': 'INTEGER NOT NULL DEFAULT 500'})
+ADDITIONS['orders'].update({'cashback_discount': 'INTEGER NOT NULL DEFAULT 0', 'cashback_earned': 'INTEGER NOT NULL DEFAULT 0'})
+ADDITIONS['stores'].update({'inbox_hook_hash': "TEXT NOT NULL DEFAULT ''", 'inbox_bot': 'INTEGER NOT NULL DEFAULT 0'})
+ADDITIONS['obligations']={'order_id':'INTEGER REFERENCES orders(id)'}
+ADDITIONS['orders'].update({'latitude':'REAL','longitude':'REAL'})
+ADDITIONS['drivers']={'gps_hash':"TEXT NOT NULL DEFAULT ''",'gps_lat':'REAL','gps_lon':'REAL','gps_accuracy':'REAL','gps_at':'TEXT'}
+ADDITIONS['stores'].update({'postal_zones':"TEXT NOT NULL DEFAULT '[]'"})
+ADDITIONS['orders'].update({'postal_code':"TEXT NOT NULL DEFAULT ''"})
+ADDITIONS['orders'].update({'route_position':'INTEGER NOT NULL DEFAULT 0'})
+ADDITIONS['products'].update({'production_sector':"TEXT NOT NULL DEFAULT 'Cozinha'"})
+ADDITIONS['order_items'].update({'production_sector':"TEXT NOT NULL DEFAULT 'Cozinha'",'kitchen_state':"TEXT NOT NULL DEFAULT 'new'"})
+
+
 def upgrade(conn, postgres=False):
+    kitchen_added=False
     statements = TABLES.replace('id INTEGER PRIMARY KEY', 'id BIGSERIAL PRIMARY KEY') if postgres else TABLES
     for statement in statements.split(';'):
         if statement.strip().startswith('CREATE TABLE'):
@@ -143,6 +176,10 @@ def upgrade(conn, postgres=False):
         for column, definition in columns.items():
             if column not in existing:
                 conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+                kitchen_added=kitchen_added or (table=='order_items' and column=='kitchen_state')
+    if kitchen_added:
+        conn.execute("UPDATE order_items SET kitchen_state='ready' WHERE order_id IN (SELECT id FROM orders WHERE status IN ('ready','delivering','completed'))")
+        conn.execute("UPDATE order_items SET kitchen_state='preparing' WHERE order_id IN (SELECT id FROM orders WHERE status='preparing')")
     for statement in statements.split(';'):
         if statement.strip() and not statement.strip().startswith('CREATE TABLE'):
             conn.execute(statement)
@@ -154,8 +191,18 @@ def postgres_ddl():
     statements = [s+';' for s in TABLES.replace('id INTEGER PRIMARY KEY', 'id BIGSERIAL PRIMARY KEY').split(';') if s.strip().startswith('CREATE TABLE')]
     for table, columns in ADDITIONS.items():
         for column, definition in columns.items():
-            statements.append(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition};')
+            if table=='order_items' and column=='kitchen_state':
+                statements.append("""DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='order_items' AND column_name='kitchen_state') THEN
+                    ALTER TABLE order_items ADD COLUMN kitchen_state TEXT NOT NULL DEFAULT 'new';
+                    UPDATE order_items SET kitchen_state='ready' WHERE order_id IN (SELECT id FROM orders WHERE status IN ('ready','delivering','completed'));
+                    UPDATE order_items SET kitchen_state='preparing' WHERE order_id IN (SELECT id FROM orders WHERE status='preparing');
+                    END IF; END $$;""")
+            else:
+                statements.append(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition};')
     statements.extend(s+';' for s in TABLES.split(';') if s.strip() and not s.strip().startswith('CREATE TABLE'))
+    for table in ('cash_sessions', 'cash_adjustments', 'order_receipts', 'dining_tables', 'dining_accounts', 'dining_orders',
+                  'catalog_rules', 'option_recipes', 'suppliers', 'obligations', 'obligation_settlements', 'production_recipes', 'production_batches', 'marketing_jobs', 'customer_segments', 'wallet_challenges', 'wallet_sessions', 'cashback_movements', 'inbox_threads', 'inbox_messages', 'credit_accounts', 'store_networks', 'network_stores', 'network_invites'):
+        statements.append(f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; REVOKE ALL ON {table} FROM PUBLIC,anon,authenticated;')
     for table in ('api_keys', 'delivery_links', 'integration_events', 'stock_movements', 'platform_ledger', 'audit_log', 'platform_notices', 'store_members', 'platform_settings', 'push_subscriptions', 'support_messages', 'ingredients', 'recipes', 'ingredient_movements', 'customer_opt_ins', 'shopping_sessions', 'marketing_campaigns'):
         statements.extend([f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;', f'REVOKE ALL ON {table} FROM PUBLIC,anon,authenticated;'])
     return '\n'.join(statements)

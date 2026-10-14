@@ -21,7 +21,7 @@ Os segredos ficam nas variáveis de ambiente do serviço Render: `SECRET_KEY`, `
 
 Para republicar a função, configure `UPLOAD_TOKEN_SHA256` com o hash do token do servidor. A publicação inicial incluiu esse hash como fallback no código implantado; o arquivo versionado continua exigindo configuração explícita. A função usa autenticação própria, por isso a verificação JWT da plataforma fica desativada. Ao trocar o token, atualize a função e o Render juntos.
 
-Para começar a usar: crie sua conta, configure contato e pagamentos, cadastre produtos e abra a loja. Cada novo cadastro começa com uma loja fechada e vazia. Não há conta ou senha padrão. Pix é confirmado manualmente pelo lojista; cartão e dinheiro são recebidos na entrega ou retirada.
+Para começar a usar: crie sua conta, configure contato e pagamentos, cadastre produtos e abra a loja. Cada novo cadastro começa com uma loja fechada e vazia. Não há conta ou senha padrão. Pix manual é confirmado pelo lojista; Pix online usa Mercado Pago quando configurado; cartão e dinheiro são recebidos na entrega ou retirada.
 
 O Render Free [adormece após 15 minutos sem tráfego e pode levar cerca de um minuto para reabrir](https://render.com/docs/free). As horas gratuitas são compartilhadas pelos serviços do workspace. O [Supabase Free](https://supabase.com/pricing) também tem limites de uso e pode pausar projetos inativos. Não há disco persistente nem recursos pagos contratados nesta publicação.
 
@@ -39,6 +39,9 @@ flask --app app:create_app grant-platform-admin --email EMAIL_DO_PROPRIETARIO
 
 A conta precisa existir. O cadastro público nunca aceita esse privilégio. A sessão consulta a permissão atual no banco; atualize a página após a concessão. A página é `/plataforma`, também acessível por **Dono da plataforma** no painel do lojista.
 
-Pedidos anteriores à atualização mantêm custos desconhecidos. Preencha os custos no Financeiro para exibir lucro estimado; não aplique o custo atual de um produto retroativamente sem conferência. Configurações de comissão e custos afetam somente novos pedidos. Mensalidades são contratos e recebimentos são registros manuais; não existe cobrança recorrente automática.
+Pedidos anteriores à atualização mantêm custos desconhecidos. Preencha os custos no Financeiro para exibir lucro estimado; não aplique o custo atual de um produto retroativamente sem conferência. Configurações de comissão e custos afetam somente novos pedidos. A assinatura recorrente possui integração Mercado Pago mediante configuração; pagamentos manuais não fazem conciliação bancária automática.
 
-As chaves de parceiros são geradas por loja e armazenadas por hash. Instale a chave apenas no servidor do parceiro. Não a coloque em `empresa.html`, apps móveis ou outros clientes públicos. Revogar uma chave bloqueia suas consultas e eventos; planeje a substituição de vínculos em andamento antes de rotacionar. O módulo informa que o conector MotoJá está pendente até o adaptador ser implementado e testado no parceiro.
+As chaves de parceiros são geradas por loja e armazenadas por hash. Instale a chave apenas no servidor do parceiro. Não a coloque em `empresa.html`, apps móveis ou outros clientes públicos. Revogar uma chave bloqueia suas consultas e eventos; planeje a substituição de vínculos em andamento antes de rotacionar. MotoJá precisa de configuração/validação; a chave da API pública não ativa o conector sozinha.
+
+
+Operação ampliada: [OPERATIONS.md](OPERATIONS.md), com migração e worker. Nenhum worker ou fornecedor externo foi ativado por esta revisão.

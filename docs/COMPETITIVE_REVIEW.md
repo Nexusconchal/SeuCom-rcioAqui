@@ -1,3 +1,7 @@
+# Histórico da primeira comparação
+
+Esta análise descreve a primeira etapa e foi substituída pela [revisão operacional atual](EXPANSION_REVIEW.md). Suas lacunas não representam o estado atual.
+
 # SeuComércioAqui: comparação e evolução
 
 Análise do código em 14 de outubro de 2026 e das páginas oficiais dos três concorrentes. Recursos anunciados podem depender de planos e habilitação. Não houve acesso autenticado aos painéis privados dos concorrentes nem validação das integrações em produção. `/painel` respondeu HTTP 200, mas exige login para operar.

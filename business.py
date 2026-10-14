@@ -10,14 +10,16 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import click
-from flask import abort, g, jsonify, request, session
+from flask import abort, g, jsonify, request, session, has_request_context
 
 import reports
+from operations import receipt_state
+from merchandising import local_time
 from billing import OK_STATES, billing_state, extend_paid_until
 
 ZONE = ZoneInfo('America/Sao_Paulo')
 MONTHS = ('janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro')
-PAY = {'pix': 'Pix', 'pix_online': 'Pix automático', 'cash': 'Dinheiro', 'card': 'Cartão'}
+PAY = {'pix': 'Pix', 'pix_online': 'Pix automático', 'cash': 'Dinheiro', 'card': 'Cartão', 'credit': 'Fiado'}
 STATUS = {'new': 'Novo', 'preparing': 'Em preparo', 'ready': 'Pronto', 'delivering': 'Em entrega', 'completed': 'Concluído', 'cancelled': 'Cancelado'}
 
 
@@ -27,7 +29,8 @@ SCOPES = {'orders:read', 'deliveries:write'}
 
 
 def start_of_period(days):
-    return (datetime.now(ZONE).replace(hour=0, minute=0, second=0, microsecond=0)
+    zone = ZoneInfo(g.store['timezone']) if has_request_context() and getattr(g,'store',None) else ZONE
+    return (datetime.now(zone).replace(hour=0, minute=0, second=0, microsecond=0)
             - timedelta(days=days-1)).astimezone(timezone.utc).isoformat(timespec='seconds')
 
 
@@ -36,8 +39,10 @@ def month_bounds(label):
     if not isinstance(label, str) or not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])', label):
         abort(400, description='Mês inválido.')
     year, month = int(label[:4]), int(label[5:])
-    start = datetime(year, month, 1, tzinfo=ZONE)
-    end = datetime(year + (month == 12), month % 12 + 1, 1, tzinfo=ZONE)
+    if not 1900<=year<=9998:abort(400,description='Ano inválido.')
+    zone=ZoneInfo(g.store['timezone']) if has_request_context() and getattr(g,'store',None) else ZONE
+    start = datetime(year, month, 1, tzinfo=zone)
+    end = datetime(year + (month == 12), month % 12 + 1, 1, tzinfo=zone)
     return (start.astimezone(timezone.utc).isoformat(timespec='seconds'),
             end.astimezone(timezone.utc).isoformat(timespec='seconds'))
 
@@ -516,11 +521,19 @@ def register_business(app, helpers):
             found=conn.execute(f'SELECT COUNT(*) FROM orders WHERE store_id=? AND {normalized}=?',(g.store['id'],phone)).fetchone()[0]
             if not found:
                 abort(404,description='Cliente não encontrado.')
+            conn.execute(f"UPDATE obligations SET description='Fiado • Cliente removido' WHERE store_id=? AND order_id IN (SELECT id FROM orders WHERE store_id=? AND {normalized}=?)",(g.store['id'],g.store['id'],phone))
             conn.execute(f"""UPDATE orders SET customer='Cliente removido',phone='00000000000',address='',notes='',review=''
                 WHERE store_id=? AND {normalized}=?""",(g.store['id'],phone))
             key = phone_key(phone)
             conn.execute('DELETE FROM customer_opt_ins WHERE store_id=? AND phone=?', (g.store['id'], key))
             conn.execute("UPDATE shopping_sessions SET customer='',phone='',items='[]',recovery_consent=0 WHERE store_id=? AND phone=?", (g.store['id'], key))
+            conn.execute("UPDATE marketing_jobs SET phone='removed-' || id,message='',status=CASE WHEN status IN ('queued','processing') THEN 'cancelled' ELSE status END WHERE store_id=? AND phone=?",(g.store['id'],key))
+            conn.execute('DELETE FROM wallet_challenges WHERE store_id=? AND phone=?',(g.store['id'],key))
+            conn.execute('DELETE FROM wallet_sessions WHERE store_id=? AND phone=?',(g.store['id'],key))
+            conn.execute("UPDATE cashback_movements SET phone='' WHERE store_id=? AND phone=?",(g.store['id'],key))
+            conn.execute('DELETE FROM inbox_messages WHERE thread_id IN (SELECT id FROM inbox_threads WHERE store_id=? AND phone=?)',(g.store['id'],key))
+            conn.execute('DELETE FROM inbox_threads WHERE store_id=? AND phone=?',(g.store['id'],key))
+            conn.execute('DELETE FROM credit_accounts WHERE store_id=? AND phone=?',(g.store['id'],key))
             audit('customer.anonymize',str(found)+' pedidos',g.store['id'])
         return jsonify(ok=True,orders=found)
 
@@ -667,6 +680,15 @@ def register_business(app, helpers):
         return jsonify(ok=True,message='Chave válida e ativa: '+key['name']+'.',scopes=json.loads(key['scopes']))
 
     def report_period():
+        if request.args.get('from') or request.args.get('to'):
+            try:
+                start = datetime.strptime(request.args.get('from', ''), '%Y-%m-%d').replace(tzinfo=ZoneInfo(g.store['timezone']))
+                end = datetime.strptime(request.args.get('to', ''), '%Y-%m-%d').replace(tzinfo=ZoneInfo(g.store['timezone'])) + timedelta(days=1)
+                if not 0 < (end-start).days <= 366:
+                    raise ValueError()
+            except ValueError:
+                abort(400, description='Escolha um período de até 366 dias, com a data final igual ou posterior à inicial.')
+            return start.astimezone(timezone.utc).isoformat(timespec='seconds'),end.astimezone(timezone.utc).isoformat(timespec='seconds'),start.strftime('%d/%m/%Y')+' a '+(end-timedelta(days=1)).strftime('%d/%m/%Y'),'personalizado'
         month=request.args.get('month')
         if month:
             start,end=month_bounds(month)
@@ -682,7 +704,9 @@ def register_business(app, helpers):
         return fmt
 
     def send_report(fmt,filename,title,subtitle,summary,tables):
-        content,mimetype,extension=reports.build(fmt,title,subtitle,summary,tables)
+        zone=ZoneInfo(g.store['timezone']) if getattr(g,'store',None) else ZONE
+        if getattr(g,'store',None):subtitle+=' • '+g.store['timezone']
+        content,mimetype,extension=reports.build(fmt,title,subtitle,summary,tables,zone=zone)
         response=app.response_class(content,mimetype=mimetype)
         response.headers['Content-Disposition']=f'attachment; filename="{filename}.{extension}"'
         return response
@@ -698,24 +722,25 @@ def register_business(app, helpers):
         done=[o for o in valid if o['status']=='completed']
         expenses=h.rows('SELECT description,amount,category,created_at FROM expenses WHERE store_id=? AND created_at>=? AND created_at<? ORDER BY id',(sid,start,end))
         revenue=sum(o['total'] for o in done)
-        received=sum(o['total'] for o in valid if o['paid'])
+        balances,method_totals = receipt_state(h.db(),sid,orders)
+        received=sum(balances.values())
         spent=sum(e['amount'] for e in expenses)
         by_day={}
         for o in done:
-            day=datetime.fromisoformat(o['created_at']).astimezone(ZONE).strftime('%d/%m/%Y')
+            day=local_time(g.store,datetime.fromisoformat(o['created_at'])).strftime('%d/%m/%Y')
             count,total=by_day.get(day,(0,0))
             by_day[day]=(count+1,total+o['total'])
         products=h.rows('''SELECT i.name,SUM(i.quantity) AS quantity,SUM(i.quantity*i.unit_price) AS total FROM order_items i JOIN orders o ON o.id=i.order_id
             WHERE o.store_id=? AND o.status='completed' AND o.created_at>=? AND o.created_at<? GROUP BY i.name ORDER BY total DESC LIMIT 30''',(sid,start,end))
         summary=[('Vendas concluídas',revenue,'money'),('Pedidos',len(valid),'int'),('Concluídos',len(done),'int'),('Ticket médio',revenue//len(done) if done else 0,'money'),
-                 ('Recebido',received,'money'),('A receber',sum(o['total'] for o in valid if not o['paid']),'money'),('Despesas',spent,'money'),('Saldo (recebido - despesas)',received-spent,'money'),
+                 ('Recebido líquido',received,'money'),('A receber',sum(max(0,o['total']-balances[o['id']]) for o in valid),'money'),('Despesas',spent,'money'),('Saldo (recebido - despesas)',received-spent,'money'),
                  ('Cancelados',len(orders)-len(valid),'int'),('Entregas',sum(o['mode']=='delivery' for o in valid),'int'),('Retiradas',sum(o['mode']=='pickup' for o in valid),'int'),
                  ('Taxas de entrega',sum(o['delivery_fee'] for o in done),'money')]
         tables=[
             {'title':'Vendas por dia','columns':[('Dia','text'),('Pedidos concluídos','int'),('Vendas','money')],'rows':[[d,c,t] for d,(c,t) in by_day.items()]},
             {'title':'Formas de pagamento','columns':[('Forma','text'),('Pedidos','int'),('Valor','money'),('Já recebido','money')],
              'rows':[[PAY[m],sum(o['payment']==m for o in valid),sum(o['total'] for o in valid if o['payment']==m),
-                      sum(o['total'] for o in valid if o['payment']==m and o['paid'])] for m in ('pix','pix_online','cash','card')]},
+                      sum(o['total'] for o in valid if o['payment']==m and o['paid'])] for m in ('pix','pix_online','cash','card','credit')]},
             {'title':'Produtos mais vendidos','columns':[('Produto','text'),('Quantidade','int'),('Vendas','money')],'rows':[[p['name'],p['quantity'],p['total']] for p in products]},
             {'title':'Pedidos','columns':[('Nº','int'),('Data','date'),('Cliente','text'),('Tipo','text'),('Bairro','text'),('Pagamento','text'),('Situação','text'),('Pago','text'),('Total','money')],
              'rows':[[o['number'],o['created_at'],o['customer'],'Entrega' if o['mode']=='delivery' else 'Retirada',o['zone'],PAY[o['payment']],STATUS[o['status']],
@@ -723,6 +748,19 @@ def register_business(app, helpers):
             {'title':'Despesas','columns':[('Data','date'),('Descrição','text'),('Tipo','text'),('Valor','money')],
              'rows':[[e['created_at'],e['description'],'Compra de estoque' if e['category']=='inventory' else 'Operação',e['amount']] for e in expenses]},
         ]
+        cash=h.rows('SELECT * FROM cash_sessions WHERE store_id=? AND opened_at>=? AND opened_at<? ORDER BY id',(sid,start,end))
+        receipts=h.rows('SELECT r.*,o.number FROM order_receipts r JOIN orders o ON o.id=r.order_id WHERE r.store_id=? AND r.created_at>=? AND r.created_at<? ORDER BY r.id',(sid,start,end))
+        settlements=h.rows('SELECT s.*,b.description,b.kind FROM obligation_settlements s JOIN obligations b ON b.id=s.obligation_id WHERE s.store_id=? AND s.created_at>=? AND s.created_at<? ORDER BY s.id',(sid,start,end))
+        tables.extend([
+            {'title':'Recebido líquido por forma real (pedidos do período)','columns':[('Forma','text'),('Valor','money')],
+             'rows':[[PAY[m],value] for m,value in method_totals.items()]},
+            {'title':'Conferências de caixa (turnos abertos no período)','columns':[('Abertura','date'),('Fechamento','text'),('Fundo','money'),('Esperado','money'),('Contado','money'),('Diferença','money')],
+             'rows':[[c['opened_at'],c['closed_at'] or 'Em aberto',c['opening'],c['expected'] or 0,c['counted'] or 0,c['difference'] or 0] for c in cash]},
+            {'title':'Recebimentos e estornos registrados no período','columns':[('Data','date'),('Pedido','int'),('Operação','text'),('Forma','text'),('Valor','money')],
+             'rows':[[r['created_at'],r['number'],'Estorno' if r['kind']=='refund' else 'Recebimento',PAY[r['method']],r['amount']] for r in receipts]},
+            {'title':'Baixas de contas no período','columns':[('Data','date'),('Conta','text'),('Tipo','text'),('Valor','money')],
+             'rows':[[s['created_at'],s['description'],'A pagar' if s['kind']=='payable' else 'A receber',s['amount']] for s in settlements]},
+        ])
         return send_report(fmt,f"relatorio-{g.store['slug']}-{slug}",'Relatório de vendas • '+g.store['name'],label,summary,tables)
 
     @app.get('/api/platform/report')

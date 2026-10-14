@@ -1,8 +1,11 @@
 """Fichas técnicas em milésimos de kg/l/un, sem arredondamento de estoque."""
 from collections import defaultdict
+from fractions import Fraction
+import math
 from types import SimpleNamespace
 
 from flask import abort, g, jsonify
+from purchasing import option_recipe_map
 
 
 def recipe_map(conn, sid):
@@ -10,6 +13,7 @@ def recipe_map(conn, sid):
     for row in conn.execute("""SELECT r.product_id,r.ingredient_id,r.quantity,i.name,i.unit,i.stock,i.unit_cost,i.active
             FROM recipes r JOIN ingredients i ON i.id=r.ingredient_id WHERE r.store_id=?""", (sid,)):
         result[row['product_id']].append(dict(row))
+    result.update(option_recipe_map(conn, sid))
     return result
 
 
@@ -22,6 +26,19 @@ def recipe_info(lines):
     return capacity, cost
 
 
+def option_availability(product,recipes):
+    groups=product['option_groups']
+    for group,options in [(None,product['extras'])]+[(g,g['options']) for g in groups]:
+        for option in options:
+            lines=recipes.get((product['id'],option['id']),[])
+            capacity,_=recipe_info(lines)
+            if lines and group and group.get('recipe_share'):
+                capacity=min(i['stock']*group['max']//i['quantity'] if i['active'] else 0 for i in lines)
+            option['available']=capacity!=0
+            option['capacity']=capacity
+    return product
+
+
 def ingredient_demand(recipes, quantities):
     demand = defaultdict(int)
     ingredients = {}
@@ -30,12 +47,23 @@ def ingredient_demand(recipes, quantities):
             demand[ingredient['ingredient_id']] += ingredient['quantity'] * quantity
             ingredients[ingredient['ingredient_id']] = ingredient
     for iid, quantity in demand.items():
-        if not ingredients[iid]['active'] or quantity > ingredients[iid]['stock']:
+        demand[iid] = math.ceil(quantity)
+        if not ingredients[iid]['active'] or demand[iid] > ingredients[iid]['stock']:
             abort(409, description=f"Ingrediente insuficiente: {ingredients[iid]['name']}.")
     return demand
 
 
-def reserve_ingredients(conn, sid, quantities, oid, number, stamp):
+def selected_quantities(quantities, prepared):
+    result = dict(quantities)
+    for product, quantity, _, extras, _, _ in prepared:
+        for extra in extras:
+            key = (product['id'], extra['id'])
+            result[key] = result.get(key, 0) + Fraction(quantity,extra.get('recipe_divisor',1))
+    return result
+
+
+def reserve_ingredients(conn, sid, quantities, oid, number, stamp, prepared=()):
+    quantities = selected_quantities(quantities, prepared)
     demand = ingredient_demand(recipe_map(conn, sid), quantities)
     for iid, amount in demand.items():
         conn.execute('UPDATE ingredients SET stock=stock-? WHERE id=? AND store_id=?', (amount, iid, sid))
@@ -63,8 +91,12 @@ def register_inventory(app, helpers):
     def ingredients_list():
         sid = g.store['id']
         recipes = recipe_map(h.db(), sid)
-        products = h.rows('SELECT id,name,price,unit_cost,active FROM products WHERE store_id=? ORDER BY name', (sid,))
+        products = h.rows('SELECT id,name,price,unit_cost,active,extras,option_groups FROM products WHERE store_id=? ORDER BY name', (sid,))
         for product in products:
+            import json
+            options = json.loads(product.pop('extras')) + [o for group in json.loads(product.pop('option_groups')) for o in group['options']]
+            product['options'] = [{**o, 'recipe': recipes.get((product['id'], o['id']), []),
+                                  'capacity': recipe_info(recipes.get((product['id'], o['id']), []))[0]} for o in options]
             product['recipe'] = recipes.get(product['id'], [])
             product['capacity'], product['recipe_cost'] = recipe_info(product['recipe'])
         return jsonify(ingredients=h.rows('SELECT * FROM ingredients WHERE store_id=? ORDER BY active DESC,name', (sid,)),

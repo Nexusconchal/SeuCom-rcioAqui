@@ -18,8 +18,20 @@ from zoneinfo import ZoneInfo
 import click
 from database import connect, initialize
 from business import register_business
-from inventory import register_inventory, recipe_map, recipe_info, ingredient_demand, reserve_ingredients, restore_ingredients
+from inventory import register_inventory, recipe_map, recipe_info, ingredient_demand, reserve_ingredients, restore_ingredients, selected_quantities, option_availability
 from marketing import register_marketing
+from operations import register_operations, receipt_state
+from merchandising import register_merchandising, apply_rules, local_time, catalog_rule_map
+from purchasing import register_purchasing, option_recipe_map
+from campaign_queue import register_campaign_queue
+from customer_segments import register_customer_segments
+from cashback import register_cashback
+from inbox import register_inbox
+from credit import register_credit
+from delivery_map import register_delivery_map
+from shipping import register_shipping, postal_fee
+from store_network import register_store_network
+from production import register_production
 from storage import put_image
 from notify import notify_store, vapid_keys
 from payments import MercadoPago, PaymentError, seal, unseal
@@ -44,9 +56,10 @@ ROLE_BASE = {"admin_store", "merchant_notices", "change_password", "admin_orders
              "push_key", "push_subscribe", "push_unsubscribe", "push_test", "order_map_qr",
              "support_thread", "support_unread", "support_send"}
 ROLE_ALLOWED = {
-    "kitchen": ROLE_BASE | {"update_order"},
+    "kitchen": ROLE_BASE | {"update_order", "kitchen_item_update"},
     "cashier": ROLE_BASE | {"motoja_send", "update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
-                            "reviews", "store_qrcode", "coupons", "insights"},
+                            "reviews", "store_qrcode", "coupons", "insights", "cash_overview", "cash_open", "cash_close", "cash_adjust", "order_receive",
+                            "dining_list", "dining_open", "dining_transfer", "dining_close", "pos_catalog", "pos_quote", "merchant_report", "export_orders", "inbox_list", "inbox_thread", "inbox_claim", "inbox_reply", "inbox_close", "delivery_map", "driver_location_link", "route_dispatch", "shipping_settings", "kitchen_item_update"},
 }
 MANAGER_DENY = {"motoja_connect", "motoja_disconnect", "whatsapp_connect", "whatsapp_disconnect", "mp_connect", "mp_disconnect", "billing_subscribe", "billing_cancel", "billing_pix", "team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
                 "rename_key", "delete_key", "rotate_key", "test_key", "finance_settings"}
@@ -85,7 +98,7 @@ def store_status(store, moment=None):
     if not store["auto_hours"]:
         return True, "Aberto agora"
     hours = json.loads(store["hours"] or "{}")
-    moment = (moment or datetime.now(ZONE)).astimezone(ZONE)
+    moment = local_time(store, moment)
     day, current = moment.weekday(), moment.hour * 60 + moment.minute
     for start, end in hours.get(str(day), []):
         s, e = minutes(start), minutes(end)
@@ -254,9 +267,11 @@ def create_app(test_config=None):
 
     def store_dict(store, private=False):
         value = dict(store)
+        value.pop('inbox_hook_hash', None)
         value["payments"] = json.loads(value["payments"])
         value["hours"] = json.loads(value["hours"] or "{}")
         value["delivery_zones"] = json.loads(value["delivery_zones"] or "[]")
+        value['postal_zones'] = json.loads(value['postal_zones'])
         value["open"], value["auto_hours"] = bool(value["open"]), bool(value["auto_hours"])
         value["allow_scheduling"], value["loyalty_enabled"] = bool(value["allow_scheduling"]), bool(value["loyalty_enabled"])
         value["open_now"], value["status_text"] = store_status(store)
@@ -277,10 +292,13 @@ def create_app(test_config=None):
                 value.pop(key, None)
         return value
 
-    def delivery_fee(store, mode, value):
+    def delivery_fee(store, mode, value, subtotal=0):
         """Taxa de entrega: por bairro quando a loja cadastrou bairros, senão a taxa única."""
         if mode != "delivery":
             return 0, ""
+        postal = postal_fee(store,value,subtotal)
+        if postal is not None:
+            return postal
         zones = json.loads(store["delivery_zones"] or "[]")
         if not zones:
             return store["delivery_fee"], ""
@@ -300,10 +318,10 @@ def create_app(test_config=None):
         if not store["allow_scheduling"]:
             abort(400, description="Esta loja não aceita pedidos agendados.")
         try:
-            moment = datetime.strptime(raw, "%Y-%m-%dT%H:%M").replace(tzinfo=ZONE)
+            moment = datetime.strptime(raw, "%Y-%m-%dT%H:%M").replace(tzinfo=ZoneInfo(store['timezone']))
         except ValueError:
             abort(400, description="Horário de agendamento inválido.")
-        current = datetime.now(ZONE)
+        current = local_time(store)
         if moment < current + timedelta(minutes=20) or moment > current + timedelta(days=7):
             abort(400, description="Agende com pelo menos 20 minutos de antecedência e até 7 dias.")
         if not store["enabled"] or not store["open"] or (store["auto_hours"] and not store_status(store, moment)[0]):
@@ -351,6 +369,7 @@ def create_app(test_config=None):
         if not private:
             value.pop("unit_cost", None)
             value.pop("low_stock", None)
+            value.pop('production_sector',None)
             value["extras"] = [{k:v for k,v in x.items() if k!='unit_cost'} for x in value["extras"]]
             for group in value["option_groups"]:
                 group["options"] = [{k:v for k,v in x.items() if k!='unit_cost'} for x in group["options"]]
@@ -358,7 +377,7 @@ def create_app(test_config=None):
 
     def choose_options(product, selected):
         """Valida as escolhas do cliente e devolve (preço unitário, custo unitário ou None, opções escolhidas)."""
-        if not isinstance(selected, list) or len(selected) > 60 or any(not isinstance(x, str) for x in selected) or len(set(selected)) != len(selected):
+        if not isinstance(selected, list) or len(selected) > 60 or any(not isinstance(x, str) for x in selected) :
             abort(400, description="Complementos inválidos.")
         extras = json.loads(product["extras"])
         groups = json.loads(product["option_groups"] or "[]")
@@ -368,6 +387,10 @@ def create_app(test_config=None):
                 available[option["id"]] = (group, option)
         if any(x not in available for x in selected):
             abort(400, description=f"Uma opção de {product['name']} não está mais disponível. Escolha de novo.")
+        from collections import Counter
+        counts = Counter(selected)
+        if any(n > available[x][1].get('max_quantity', 1) or not available[x][1].get('available', True) for x, n in counts.items()):
+            abort(400, description='Quantidade de complemento inválida ou ingrediente indisponível.')
         price, costs, chosen = product["price"], [product["unit_cost"]], []
         for x in selected:
             group, option = available[x]
@@ -384,23 +407,35 @@ def create_app(test_config=None):
             if picked and group["pricing"] == "max":
                 top = max(picked, key=lambda o: o["price"])
                 price += top["price"]
-                costs.append(top.get("unit_cost"))
+            elif picked and group['pricing'] == 'average':
+                price += (sum(o['price'] for o in picked) + len(picked)//2)//len(picked)
             else:
                 price += sum(o["price"] for o in picked)
-                costs.extend(o.get("unit_cost") for o in picked)
-            chosen.extend({**o, "name": group["name"] + ": " + o["name"]} for o in picked)
+            if picked and group.get('recipe_share'):
+                values=[o.get('unit_cost') for o in picked]
+                costs.append(None if any(c is None for c in values) else (sum(values)+len(values)//2)//len(values))
+            elif picked and group['pricing']=='max' and not any(o.get('_recipe_cost') for o in picked):
+                costs.append(top.get('unit_cost'))
+            else:
+                costs.extend(o.get('unit_cost') for o in picked)
+            chosen.extend({**o, "name": group["name"] + ": " + o["name"], 'recipe_divisor':len(picked) if group.get('recipe_share') else 1} for o in picked)
         cost = None if any(c is None for c in costs) else sum(costs)
         return price, cost, chosen
 
     def order_dict(order, private=True):
         value = dict(order)
-        value["items"] = rows("SELECT id,name,product_id,quantity,unit_price,unit_cost,extras,notes FROM order_items WHERE order_id=?", (order["id"],))
+        cached=getattr(g,'receipt_balances',{})
+        value['received_amount']=cached.get(order['id']) if order['id'] in cached else receipt_state(db(),order['store_id'],[order])[0][order['id']]
+        value['remaining_amount']=max(0,order['total']-value['received_amount'])
+        value["items"] = rows("SELECT id,name,product_id,quantity,unit_price,unit_cost,extras,notes,production_sector,kitchen_state FROM order_items WHERE order_id=?", (order["id"],))
         for item in value["items"]:
             item["extras"] = json.loads(item["extras"])
             item["extras"] = [{k:v for k,v in x.items() if k!='unit_cost'} for x in item["extras"]]
             if not private:
                 item.pop("unit_cost", None)
                 item.pop("id", None)
+                item.pop("production_sector",None)
+                item.pop("kitchen_state",None)
         value["events"] = rows("SELECT status,created_at FROM order_events WHERE order_id=? ORDER BY id", (order["id"],))
         value["status_label"] = LABELS[value["status"]]
         motoja = json.loads(value.get("motoja_info") or "{}")
@@ -410,7 +445,7 @@ def create_app(test_config=None):
             value["driver_name"] = (one("SELECT name FROM drivers WHERE id=?", (value["driver_id"],)) or {"name": ""})["name"]
         else:
             value = {k: value[k] for k in ("number", "mode", "zone", "scheduled_for", "rating", "motoboy", "tracking_url", "payment", "subtotal", "discount", "delivery_fee",
-                "total", "paid", "status", "status_label", "items", "events", "created_at")}
+                "total", "paid", "received_amount", "remaining_amount", "cashback_discount", "cashback_earned", "status", "status_label", "items", "events", "created_at")}
         for key in ("tracking_hash", "payload_hash", "idempotency_key", "motoja_info"):
             value.pop(key, None)
         return value
@@ -441,10 +476,10 @@ def create_app(test_config=None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(self), payment=(), usb=()"
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self' https://viacep.com.br; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self' https://viacep.com.br; font-src 'self'; frame-src https://www.openstreetmap.org; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         if production:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
         if request.path.startswith("/api/") or request.path.startswith("/pedido/"):
@@ -478,6 +513,8 @@ def create_app(test_config=None):
     @app.get("/entrar")
     @app.get("/painel")
     @app.get("/pedido/<token>")
+    @app.get("/entregador/")
+    @app.get('/rede/<slug>')
     def page(**kwargs):
         return send_from_directory(app.static_folder, "index.html")
 
@@ -638,9 +675,14 @@ def create_app(test_config=None):
         if not store:
             abort(404, description="Esta loja não foi encontrada.")
         recipes = recipe_map(db(), store['id'])
+        rules = catalog_rule_map(db(),store['id'])
         products = []
         for raw in db().execute("SELECT * FROM products WHERE store_id=? AND active=1 ORDER BY featured DESC,position,id", (store['id'],)):
-            product = product_dict(raw)
+            priced = apply_rules(db(), store, raw, 'web', rules=rules.get(raw['id'],[]))
+            if not priced['active']:
+                continue
+            product = product_dict(priced)
+            option_availability(product,recipes)
             capacity, _ = recipe_info(recipes.get(raw['id'], []))
             if capacity is not None:
                 product['stock'] = capacity if product['stock'] is None else min(capacity, product['stock'])
@@ -670,7 +712,7 @@ def create_app(test_config=None):
         if not code:
             return 0, None
         coupon = conn.execute("SELECT * FROM coupons WHERE store_id=? AND code=? AND active=1", (sid, code.upper())).fetchone()
-        today = datetime.now(ZONE).date().isoformat()
+        today = local_time(conn.execute('SELECT timezone FROM stores WHERE id=?', (sid,)).fetchone()).date().isoformat()
         if not coupon or (coupon["expires"] and coupon["expires"] < today) or (coupon["max_uses"] is not None and coupon["uses"] >= coupon["max_uses"]):
             abort(400, description="Cupom inválido, vencido ou esgotado.")
         if subtotal < coupon["minimum"]:
@@ -686,6 +728,9 @@ def create_app(test_config=None):
     def price_items(conn, store, items):
         subtotal, quantities, prepared = 0, {}, []
         recipes = recipe_map(conn, store['id'])
+        rules = catalog_rule_map(conn,store['id'])
+        scheduled_price = schedule(store, request.get_json(silent=True) or {})
+        pricing_moment = datetime.fromisoformat(scheduled_price) if scheduled_price else datetime.now(timezone.utc)
         for item in items:
             if not isinstance(item, dict):
                 abort(400, description="Produto inválido.")
@@ -693,9 +738,25 @@ def create_app(test_config=None):
             product = conn.execute("SELECT * FROM products WHERE id=? AND store_id=? AND active=1", (pid, store["id"])).fetchone()
             if not product:
                 abort(400, description="Um produto não está mais disponível.")
+            product = apply_rules(conn, store, product, 'dining' if getattr(g, 'manual_order', False) and request.get_json(silent=True).get('account_id') else 'counter' if getattr(g, 'manual_order', False) else 'web', pricing_moment, rules=rules.get(pid,[]))
+            if not product['active']:
+                abort(409, description='Este produto não está disponível neste canal e horário.')
             if recipes.get(pid):
-                product = dict(product)
                 _, product['unit_cost'] = recipe_info(recipes[pid])
+            opts = json.loads(product['extras'])
+            groups = json.loads(product['option_groups'])
+            for option in opts + [o for group in groups for o in group['options']]:
+                lines = recipes.get((pid, option['id']), [])
+                if lines:
+                    capacity, option['unit_cost'] = recipe_info(lines)
+                    option['_recipe_cost'] = True
+                    option['available'] = capacity != 0
+            for group in groups:
+                if group.get('recipe_share'):
+                    for option in group['options']:
+                        lines=recipes.get((pid,option['id']),[])
+                        option['available']=all(i['active'] and i['stock']>0 for i in lines)
+            product['extras'], product['option_groups'] = json.dumps(opts), json.dumps(groups)
             unit, cost, extras = choose_options(product, item.get("option_ids", []))
             subtotal += quantity * unit
             quantities[pid] = quantities.get(pid, 0) + quantity
@@ -710,13 +771,13 @@ def create_app(test_config=None):
         if not store:
             abort(404, description="Loja não encontrada.")
         accepting, status_text = store_status(store)
-        if not schedule(store, value) and not accepting:
+        if not schedule(store, value) and not accepting and not getattr(g, 'manual_order', False):
             abort(409, description="A loja não está aceitando pedidos agora. " + status_text + ".")
         mode, items = value.get("mode"), value.get("items")
         if mode not in ("delivery", "pickup") or not isinstance(items, list) or not 1 <= len(items) <= 50:
             abort(400, description="Sacola inválida.")
         subtotal, quantities, prepared = price_items(db(), store, items)
-        ingredient_demand(recipe_map(db(), store['id']), quantities)
+        ingredient_demand(recipe_map(db(), store['id']), selected_quantities(quantities, prepared))
         for product, quantity, unit, extras, notes, _ in prepared:
             if product["stock"] is not None and quantities[product["id"]] > product["stock"]:
                 abort(409, description=f"Estoque insuficiente: {product['name']}.")
@@ -726,9 +787,11 @@ def create_app(test_config=None):
         discount, _ = coupon_discount(db(), store["id"], text(value, "coupon", 0, 30).upper(), subtotal, phone)
         loyalty = loyalty_status(db(), store, phone)
         reward = min(loyalty["reward"], subtotal - discount) if loyalty and loyalty["available"] else 0
-        fee, zone = delivery_fee(store, mode, value)
-        return jsonify(subtotal=subtotal, discount=discount + reward, loyalty_discount=reward, loyalty=loyalty,
-                       delivery_fee=fee, zone=zone, total=subtotal-discount-reward+fee)
+        cashback = app.extensions['wallet_discount'](db(), store, value, subtotal-discount-reward)
+        fee, zone = delivery_fee(store, mode, value, subtotal-discount-reward-cashback)
+        app.extensions['credit_validate'](db(), store, value, subtotal-discount-reward-cashback+fee)
+        return jsonify(subtotal=subtotal, discount=discount + reward + cashback, loyalty_discount=reward, loyalty=loyalty,
+                       cashback_discount=cashback, delivery_fee=fee, zone=zone, total=subtotal-discount-reward-cashback+fee)
 
     @app.post("/api/store/<slug>/orders")
     def create_order(slug):
@@ -738,8 +801,9 @@ def create_app(test_config=None):
         if not re.fullmatch(r"[a-zA-Z0-9_-]{16,100}", key):
             abort(400, description="Identificador do pedido inválido.")
         digest = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        customer, phone = text(value, "customer", 2, 100), text(value, "phone", 10, 20)
-        if not re.fullmatch(r"[0-9+() \-]{10,20}", phone) or len(re.sub(r"\D", "", phone)) not in (10, 11, 12, 13):
+        contact_optional = getattr(g, 'manual_order', False) and value.get('mode') == 'pickup'
+        customer, phone = text(value, "customer", 2, 100), text(value, "phone", 0 if contact_optional else 10, 20)
+        if (phone or not contact_optional) and (not re.fullmatch(r"[0-9+() \-]{10,20}", phone) or len(re.sub(r"\D", "", phone)) not in (10, 11, 12, 13)):
             abort(400, description="Informe um telefone com DDD.")
         mode, payment = value.get("mode"), value.get("payment")
         if mode not in ("delivery", "pickup"):
@@ -766,7 +830,7 @@ def create_app(test_config=None):
             scheduled = schedule(store, value)
             if not store["enabled"] or (not accepting and not scheduled and not getattr(g, 'manual_order', False)):
                 abort(409, description="A loja não está aceitando pedidos agora. " + status_text + ".")
-            if payment not in json.loads(store["payments"]) or (payment == "pix_online" and not store["mp_token"]):
+            if (payment not in json.loads(store["payments"]) and not (payment == 'credit' and getattr(g,'manual_order',False))) or (payment == "pix_online" and not store["mp_token"]):
                 abort(400, description="Forma de pagamento indisponível.")
             subtotal, quantities, prepared = price_items(conn, store, items)
             if subtotal < store["minimum_order"]:
@@ -781,8 +845,11 @@ def create_app(test_config=None):
             loyalty = loyalty_status(conn, store, phone)
             reward = min(loyalty["reward"], subtotal - discount) if loyalty and loyalty["available"] else 0
             discount += reward
-            fee, zone = delivery_fee(store, mode, value)
+            cashback = app.extensions['wallet_discount'](conn, store, value, subtotal-discount)
+            discount += cashback
+            fee, zone = delivery_fee(store, mode, value, subtotal-discount)
             total = subtotal - discount + fee
+            app.extensions['credit_validate'](conn, store, value, total)
             if "expected_total" in value and integer(value, "expected_total", maximum=10**14) != total:
                 abort(409, description="O preço mudou. Confira o novo total antes de confirmar.")
             if payment == "cash" and change_for is not None and change_for < total:
@@ -794,7 +861,15 @@ def create_app(test_config=None):
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (store["id"], number, hashlib.sha256(token.encode()).hexdigest(),
                 customer, phone, mode, address if mode == "delivery" else "", payment, change_for if payment == "cash" else None, notes,
                 subtotal, discount, fee, total, coupon_id, key, digest, token, stamp, stamp)).lastrowid
-            reserve_ingredients(conn, store['id'], quantities, oid, number, stamp)
+            reserve_ingredients(conn, store['id'], quantities, oid, number, stamp, prepared)
+            app.extensions['attach_dining'](conn, store, oid, value)
+            app.extensions['wallet_reserve'](conn, store, oid, value, cashback, subtotal-discount)
+            app.extensions['credit_attach'](conn, store, oid, value, total)
+            app.extensions['save_destination'](conn, oid, value)
+            cep=text(value,'cep',0,9)
+            if cep and not re.fullmatch(r'\d{5}-?\d{3}',cep):
+                abort(400,description='Informe um CEP válido, com oito dígitos.')
+            conn.execute('UPDATE orders SET postal_code=? WHERE id=?',(cep.replace('-','') if mode=='delivery' else '',oid))
             app.extensions['marketing_order'](conn, store['id'], oid, value)
             fees=json.loads(store['payment_fees'])
             conn.execute("UPDATE orders SET loyalty_discount=? WHERE id=?", (reward, oid))
@@ -804,24 +879,29 @@ def create_app(test_config=None):
                  ((subtotal-discount)*store['commission_bps']+5000)//10000,
                  'counter' if getattr(g,'manual_order',False) else 'web',zone,scheduled,oid))
             for product, quantity, unit, extras, item_notes, cost in prepared:
-                conn.execute("INSERT INTO order_items(order_id,product_id,name,quantity,unit_price,unit_cost,extras,notes) VALUES(?,?,?,?,?,?,?,?)",
-                             (oid, product["id"], product["name"], quantity, unit, cost, json.dumps([{k:v for k,v in x.items() if k!='unit_cost'} for x in extras]), item_notes))
+                conn.execute("INSERT INTO order_items(order_id,product_id,name,quantity,unit_price,unit_cost,extras,notes,production_sector,kitchen_state) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                             (oid, product["id"], product["name"], quantity, unit, cost, json.dumps([{k:v for k,v in x.items() if k!='unit_cost' and not k.startswith('_')} for x in extras]), item_notes, product['production_sector'], 'preparing' if store['auto_accept'] and not scheduled and payment!='pix_online' else 'new'))
             for pid, quantity in quantities.items():
                 balance=conn.execute('SELECT stock FROM products WHERE id=?',(pid,)).fetchone()[0]
                 if balance is not None:
                     conn.execute('INSERT INTO stock_movements(store_id,product_id,delta,balance,reason,created_at) VALUES(?,?,?,?,?,?)',
                         (store['id'],pid,-quantity,balance,'Venda #'+str(number),stamp))
             conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, "new", stamp))
+            if store['auto_accept'] and not scheduled and payment != 'pix_online':
+                conn.execute("UPDATE orders SET status='preparing' WHERE id=?", (oid,))
+                conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, "preparing", stamp))
             if coupon_id:
                 conn.execute("UPDATE coupons SET uses=uses+1 WHERE id=?", (coupon_id,))
         app.extensions["on_new_order"](store["id"], oid)
+        if store['auto_accept'] and not scheduled and payment!='pix_online':
+            app.extensions["on_status"](store["id"],oid,"preparing")
         if payment == "pix_online":
             try:
                 create_pix(store["id"], oid)
             except PaymentError:
                 app.logger.warning("Pix automático não gerado para o pedido %s", oid)
         if not getattr(g, "manual_order", False):
-            when = (" • agendado " + datetime.fromisoformat(scheduled).astimezone(ZONE).strftime("%d/%m %H:%M")) if scheduled else ""
+            when = (" • agendado " + datetime.fromisoformat(scheduled).astimezone(ZoneInfo(store['timezone'])).strftime("%d/%m %H:%M")) if scheduled else ""
             notify_store(app, store["id"], {"title": f"Novo pedido #{number}", "tag": f"pedido-{oid}", "url": "/painel",
                                             "body": f"{customer} • R$ {total/100:.2f}".replace(".", ",") + (" • entrega" if mode == "delivery" else " • retirada") + when})
         return jsonify(token=token, number=number, total=total), 201
@@ -1177,6 +1257,31 @@ def create_app(test_config=None):
         return jsonify(products=[product_dict(p, True) for p in db().execute("SELECT * FROM products WHERE store_id=? ORDER BY position,id", (g.store["id"],))],
                        categories=rows("SELECT * FROM categories WHERE store_id=? ORDER BY position,id", (g.store["id"],)))
 
+    @app.get('/api/admin/pos/catalog')
+    @owner
+    def pos_catalog():
+        channel = 'dining' if request.args.get('channel') == 'dining' else 'counter'
+        recipes = recipe_map(db(), g.store['id'])
+        rules = catalog_rule_map(db(),g.store['id'])
+        result = []
+        for raw in db().execute('SELECT * FROM products WHERE store_id=? AND active=1 ORDER BY position,id', (g.store['id'],)):
+            product = product_dict(apply_rules(db(), g.store, raw, channel, rules=rules.get(raw['id'],[])))
+            if not product['active']:
+                continue
+            capacity, _ = recipe_info(recipes.get(product['id'], []))
+            if capacity is not None:
+                product['stock'] = min(product['stock'], capacity) if product['stock'] is not None else capacity
+            option_availability(product,recipes)
+            result.append(product)
+        return jsonify(products=result, categories=rows('SELECT * FROM categories WHERE store_id=? ORDER BY position,id', (g.store['id'],)), store=store_dict(g.store),
+                       credit_enabled=bool(one('SELECT id FROM credit_accounts WHERE store_id=? AND active=1 AND credit_limit>0 LIMIT 1',(g.store['id'],))))
+
+    @app.post('/api/admin/pos/quote')
+    @owner
+    def pos_quote():
+        g.manual_order = True
+        return quote(g.store['slug'])
+
     @app.post("/api/admin/categories")
     @owner
     def create_category():
@@ -1215,25 +1320,28 @@ def create_app(test_config=None):
                 abort(400, description="Identificador de complemento inválido ou duplicado.")
             seen.add(eid)
             sanitized.append({"id": eid, "name": text(extra, "name", 1, 80), "price": integer(extra, "price"),
+                              "max_quantity": integer(extra, 'max_quantity', default=1, minimum=1, maximum=30),
                               "unit_cost":None if extra.get('unit_cost') is None else integer(extra,'unit_cost')})
         groups = value.get("option_groups", [])
         if not isinstance(groups, list) or len(groups) > 10:
             abort(400, description="Use até 10 grupos de escolha.")
         clean_groups = []
+        group_ids = set()
         for group in groups:
             if not isinstance(group, dict):
                 abort(400, description="Grupo de escolha inválido.")
             gid, gname = text(group, "id", 1, 40), text(group, "name", 1, 60)
-            if not re.fullmatch(r"[a-zA-Z0-9_-]+", gid):
+            if not re.fullmatch(r"[a-zA-Z0-9_-]+", gid) or gid in group_ids:
                 abort(400, description="Identificador de grupo inválido.")
+            group_ids.add(gid)
             options = group.get("options", [])
             if not isinstance(options, list) or not 1 <= len(options) <= 30:
                 abort(400, description=f"O grupo {gname} precisa de 1 a 30 opções.")
             low, high = integer(group, "min", maximum=30), integer(group, "max", minimum=1, maximum=30)
-            if low > high or low > len(options):
+            if low > high or low > sum(integer(o, "max_quantity", default=1, minimum=1, maximum=30) for o in options if isinstance(o, dict)):
                 abort(400, description=f"No grupo {gname}, o mínimo não pode passar do máximo nem da quantidade de opções.")
             pricing = group.get("pricing", "sum")
-            if pricing not in ("sum", "max"):
+            if pricing not in ("sum", "max", "average"):
                 abort(400, description="Forma de cobrança do grupo inválida.")
             clean = []
             for option in options:
@@ -1244,22 +1352,23 @@ def create_app(test_config=None):
                     abort(400, description="Identificador de opção inválido ou duplicado.")
                 seen.add(oid)
                 clean.append({"id": oid, "name": text(option, "name", 1, 80), "price": integer(option, "price"),
+                              "max_quantity": integer(option, 'max_quantity', default=1, minimum=1, maximum=30),
                               "unit_cost": None if option.get("unit_cost") is None else integer(option, "unit_cost")})
-            clean_groups.append({"id": gid, "name": gname, "min": low, "max": min(high, len(clean)), "pricing": pricing, "options": clean})
+            clean_groups.append({"id": gid, "name": gname, "min": low, "max": min(high, sum(o["max_quantity"] for o in clean)), "pricing": pricing, "recipe_share":boolean(group,'recipe_share'), "options": clean})
         required = any(g["min"] > 0 for g in clean_groups)
         return (category, text(value, "name", 2, 120), text(value, "description", 0, 500),
                 integer(value, "price", minimum=0 if required else 1), image_url(value.get("image", "")), boolean(value, "active", True),
                 boolean(value, "featured"), stock, json.dumps(sanitized), integer(value, "position"),
                 None if value.get('unit_cost') is None else integer(value,'unit_cost'), integer(value,'low_stock',default=5,maximum=1000000),
-                json.dumps(clean_groups, ensure_ascii=False))
+                json.dumps(clean_groups, ensure_ascii=False),text({'sector':value.get('production_sector','Cozinha')},'sector',1,60))
 
     @app.post("/api/admin/products")
     @owner
     def create_product():
         fields = product_fields(data())
         with transaction() as conn:
-            pid = conn.execute("""INSERT INTO products(store_id,category_id,name,description,price,image,active,featured,stock,extras,position,unit_cost,low_stock,option_groups)
-                              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.store["id"], *fields)).lastrowid
+            pid = conn.execute("""INSERT INTO products(store_id,category_id,name,description,price,image,active,featured,stock,extras,position,unit_cost,low_stock,option_groups,production_sector)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.store["id"], *fields)).lastrowid
             if fields[7] is not None:
                 conn.execute('INSERT INTO stock_movements(store_id,product_id,delta,balance,reason,created_at) VALUES(?,?,?,?,?,?)',
                              (g.store['id'],pid,fields[7],fields[7],'Estoque inicial',now()))
@@ -1272,6 +1381,7 @@ def create_app(test_config=None):
         fields = list(product_fields(value))
         with transaction() as conn:
             previous=owned('products',pid)
+            if 'production_sector' not in value:fields[-1]=previous['production_sector']
             if 'expected_stock' in value:
                 expected=value['expected_stock']
                 if expected is not None:
@@ -1281,7 +1391,7 @@ def create_app(test_config=None):
                 elif previous['stock']!=expected:
                     abort(409,description='O estoque mudou enquanto você editava. Atualize o cadastro antes de ajustar a quantidade.')
             conn.execute("""UPDATE products SET category_id=?,name=?,description=?,price=?,image=?,active=?,featured=?,
-                         stock=?,extras=?,position=?,unit_cost=?,low_stock=?,option_groups=? WHERE id=? AND store_id=?""", (*fields, pid, g.store["id"]))
+                         stock=?,extras=?,position=?,unit_cost=?,low_stock=?,option_groups=?,production_sector=? WHERE id=? AND store_id=?""", (*fields, pid, g.store["id"]))
             if fields[7] is not None and fields[7]!=previous['stock']:
                 conn.execute('INSERT INTO stock_movements(store_id,product_id,delta,balance,reason,created_at) VALUES(?,?,?,?,?,?)',
                              (g.store['id'],pid,fields[7]-(previous['stock'] or 0),fields[7],'Ajuste no cadastro',now()))
@@ -1311,7 +1421,9 @@ def create_app(test_config=None):
             params.append((datetime.now(timezone.utc) - timedelta(days=30)).isoformat(timespec="seconds"))
         if g.store["motoja_url"]:
             app.extensions["motoja_refresh"](g.store["id"])
-        return jsonify(orders=[order_dict(o) for o in db().execute(sql + " ORDER BY id DESC LIMIT 500", params)])
+        found=rows(sql + ' ORDER BY id DESC LIMIT 500',params)
+        g.receipt_balances=receipt_state(db(),g.store['id'],found)[0]
+        return jsonify(orders=[order_dict(o) for o in found])
 
     @app.patch("/api/admin/orders/<int:oid>")
     @owner
@@ -1331,6 +1443,8 @@ def create_app(test_config=None):
                 if status not in STATUSES[order["status"]] or (order["mode"] == "pickup" and status == "delivering") or (order["mode"] == "delivery" and order["status"] == "ready" and status == "completed"):
                     abort(409, description="Esta mudança de status não é permitida.")
                 if status == "cancelled":
+                    app.extensions['credit_cancel'](conn, oid)
+                    app.extensions['wallet_restore'](conn, g.store['id'], oid)
                     restore_ingredients(conn, g.store['id'], oid, order['number'], now())
                     for item in conn.execute("SELECT product_id,SUM(quantity) AS qty FROM order_items WHERE order_id=? GROUP BY product_id", (oid,)):
                         conn.execute("UPDATE products SET stock=stock+? WHERE id=? AND stock IS NOT NULL", (item["qty"], item["product_id"]))
@@ -1346,9 +1460,17 @@ def create_app(test_config=None):
                         except PaymentError:
                             pass
                 conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, status, now()))
+                if status=='preparing':conn.execute("UPDATE order_items SET kitchen_state='preparing' WHERE order_id=? AND kitchen_state='new'",(oid,))
+                elif status in ('ready','delivering','completed','cancelled'):conn.execute('UPDATE order_items SET kitchen_state=? WHERE order_id=?',('cancelled' if status=='cancelled' else 'ready',oid))
             paid = value.get("paid", bool(order["paid"]))
             if not isinstance(paid, bool):
                 abort(400, description="Pagamento inválido.")
+            if paid != bool(order['paid']) and conn.execute('SELECT id FROM order_receipts WHERE store_id=? AND order_id=? LIMIT 1', (g.store['id'], oid)).fetchone():
+                abort(409, description='Use o Caixa para receber ou estornar este pedido; ele já tem recebimentos registrados.')
+            if paid != bool(order['paid']) and order['payment']=='credit':
+                abort(409, description='Receba o fiado pelo Caixa para manter a conta conciliada.')
+            if paid != bool(order['paid']) and order['payment']=='pix_online':
+                abort(409, description='Pix online é confirmado pela integração de pagamentos.')
             driver = value.get("driver_id", order["driver_id"])
             if driver is not None:
                 if not isinstance(driver, int) or isinstance(driver, bool):
@@ -1367,7 +1489,7 @@ def create_app(test_config=None):
     @app.get("/api/admin/drivers")
     @owner
     def drivers():
-        return jsonify(drivers=rows("SELECT * FROM drivers WHERE store_id=? ORDER BY active DESC,name", (g.store["id"],)))
+        return jsonify(drivers=rows("SELECT id,store_id,name,phone,active FROM drivers WHERE store_id=? ORDER BY active DESC,name", (g.store["id"],)))
 
     @app.post("/api/admin/drivers")
     @owner
@@ -1421,25 +1543,26 @@ def create_app(test_config=None):
         return jsonify(ok=True)
 
     def summary(days):
-        midnight = datetime.now(ZONE).replace(hour=0, minute=0, second=0, microsecond=0)
+        midnight = local_time(g.store).replace(hour=0, minute=0, second=0, microsecond=0)
         start = (midnight - timedelta(days=days - 1)).astimezone(timezone.utc).isoformat(timespec="seconds")
         orders = rows("SELECT * FROM orders WHERE store_id=? AND created_at>=? AND status!='cancelled'", (g.store["id"], start))
         expenses = rows("SELECT * FROM expenses WHERE store_id=? AND created_at>=? ORDER BY id DESC", (g.store["id"], start))
         revenue = sum(o["total"] for o in orders if o["status"] == "completed")
-        received = sum(o["total"] for o in orders if o["paid"])
+        balances,method_totals = receipt_state(db(),g.store['id'],orders)
+        received = sum(balances.values())
         outgoing = sum(e["amount"] for e in expenses)
         chart = []
         for i in range(days):
             day = (midnight - timedelta(days=days - 1 - i)).date().isoformat()
-            amount = sum(o["total"] for o in orders if o["status"] == "completed" and datetime.fromisoformat(o["created_at"]).astimezone(ZONE).date().isoformat() == day)
+            amount = sum(o["total"] for o in orders if o["status"] == "completed" and datetime.fromisoformat(o["created_at"]).astimezone(ZoneInfo(g.store['timezone'])).date().isoformat() == day)
             chart.append({"date": day, "total": amount})
         completed = sum(o["status"] == "completed" for o in orders)
-        return {"revenue": revenue, "received": received, "pending_payment": sum(o["total"] for o in orders if not o["paid"]),
+        return {"revenue": revenue, "received": received, "pending_payment": sum(max(0,o['total']-balances[o['id']]) for o in orders),
                 "expenses_total": outgoing, "balance": received - outgoing, "orders": len(orders),
                 "completed": completed, "ticket": revenue // completed if completed else 0,
                 "active": sum(o["status"] not in ("completed", "cancelled") for o in orders),
                 "chart": chart, "expenses": expenses,
-                "payments": [{"method": m, "total": sum(o["total"] for o in orders if o["paid"] and o["payment"] == m)} for m in ("pix", "pix_online", "cash", "card")]}
+                "payments": [{"method": m, "total": method_totals.get(m,0)} for m in ("pix", "pix_online", "cash", "card", "credit")]}
 
     @app.get("/api/admin/summary")
     @owner
@@ -1485,6 +1608,20 @@ def create_app(test_config=None):
         response.headers["Content-Disposition"] = 'attachment; filename="pedidos.csv"'
         return response
 
+    shared = dict(db=db, one=one, rows=rows, owner=owner, owned=owned, data=data, text=text, integer=integer, limited=limited,
+                      boolean=boolean, transaction=transaction, now=now)
+    register_operations(app, shared)
+    register_merchandising(app, shared)
+    register_purchasing(app, shared)
+    register_campaign_queue(app, shared)
+    register_customer_segments(app, shared)
+    register_cashback(app, shared)
+    register_inbox(app, shared)
+    register_credit(app, shared)
+    register_delivery_map(app, shared)
+    register_shipping(app, shared)
+    register_store_network(app, shared)
+    register_production(app, shared)
     register_inventory(app, dict(db=db,rows=rows,owner=owner,owned=owned,data=data,text=text,integer=integer,
         boolean=boolean,transaction=transaction,now=now))
     register_marketing(app, dict(db=db,one=one,rows=rows,owner=owner,owned=owned,data=data,text=text,integer=integer,

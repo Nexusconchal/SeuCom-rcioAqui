@@ -207,8 +207,11 @@ docs/API.md               Endpoints e exemplos
 
 ## Escopo
 
-Esta versão cobre cardápio, pedidos, gestão financeira, marketing, fichas técnicas e administração da plataforma. Oferece Pix online pelo Mercado Pago, mensagens de status pela Evolution API e conexão com MotoJá, mediante configuração. Não integra emissão fiscal, impressoras via drivers, atendimento por IA, mesas/comandas, cashback monetário ou marketplaces. A impressão usa o navegador; campanhas e recuperação têm revisão e envio individual. Consulte [a comparação com os concorrentes](docs/COMPETITIVE_REVIEW.md).
+Esta versão inclui cardápio, PDV, caixa por turno, recebimentos parciais/estornos registrados, mesas/comandas, cozinha por item/setor, receitas de produtos/adicionais, produção de preparos, contas/fornecedores, fiado, promoções, CRM/RFV/públicos, cashback com código, atendimento WhatsApp, campanhas em fila, entrega por CEP/posição do entregador, rede e **Gerar relatório** separado. Consulte [o guia](docs/OPERATIONS.md) e [a comparação com limites](docs/EXPANSION_REVIEW.md).
 
-As sessões são assinadas; senhas usam scrypt; login limitado por IP e por conta (10 tentativas/15 min); entradas na Central do Dono ficam no histórico; alterações exigem CSRF; preços e estoque são validados pelo servidor; uploads são reprocessados; o painel limita os dados à loja autenticada. O link do pedido mostra itens, valores e status. Os relatórios usam a data de criação do pedido e excluem cancelados. Cancelamentos não executam reembolsos bancários.
+Mercado Pago, Evolution e MotoJá dependem de configuração. Campanhas e respostas precisam de worker; não houve ativação externa nesta revisão. Emissão fiscal, marketplaces, cartão online/TEF e IA não estão implementados. Salão não tem taxa de serviço/QR por mesa; rede não consolida financeiro. Impressão usa navegador e pode separar setor.
+
+
+As sessões são assinadas; senhas usam scrypt; login limitado por IP e por conta (10 tentativas/15 min); entradas na Central do Dono ficam no histórico; alterações exigem CSRF; preços e estoque são validados pelo servidor; uploads são reprocessados; o painel limita os dados à loja autenticada. O link do pedido mostra itens, valores e status. Os relatórios identificam cancelados, usam criação do pedido para vendas e têm tabelas de recebimentos/estornos por operação; recebimentos parciais entram nos saldos. Cancelamentos não executam reembolsos bancários.
 
 Referências: [segurança no Flask](https://flask.palletsprojects.com/en/stable/web-security/), [uploads](https://flask.palletsprojects.com/en/stable/patterns/fileuploads/), [SQLite](https://docs.python.org/3/library/sqlite3.html).

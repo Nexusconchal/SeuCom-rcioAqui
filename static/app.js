@@ -1,16 +1,15 @@
-import { renderOwnerSite } from './management.js';
 import { $, icon, brand, auth, bootstrap, api, bindForm, esc, toast, attachFallbacks } from './ui.js';
-import { renderMenu, renderTracking } from './menu.js';
-import { renderDashboard } from './dashboard.js';
 
 async function start(){
   try{
     await bootstrap();
     const path=location.pathname.split('/').filter(Boolean);
-    if(path[0]==='loja')return await renderMenu(decodeURIComponent(path[1]||''));
-    if(path[0]==='pedido')return await renderTracking(path[1]||'');
-    if(path[0]==='admin'||path[0]==='plataforma')return await renderOwnerSite();
-    if(path[0]==='painel')return auth.user?await renderDashboard():location.replace('/entrar');
+    if(path[0]==='rede')return await (await import('./network.js')).networkPage(path[1]||'');
+    if(path[0]==='entregador')return await (await import('./delivery.js')).driverPage();
+    if(path[0]==='loja')return await (await import('./menu.js')).renderMenu(decodeURIComponent(path[1]||''));
+    if(path[0]==='pedido')return await (await import('./menu.js')).renderTracking(path[1]||'');
+    if(path[0]==='admin'||path[0]==='plataforma')return await (await import('./management.js')).renderOwnerSite();
+    if(path[0]==='painel')return auth.user?await (await import('./dashboard.js')).renderDashboard():location.replace('/entrar');
     if(path[0]==='entrar')return loginPage();
     if(path[0]==='termos'||path[0]==='privacidade')return legalPage(path[0]);
     landing();

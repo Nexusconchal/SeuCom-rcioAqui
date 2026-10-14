@@ -9,6 +9,7 @@ from flask import abort, g, jsonify, request
 from connectors import Evolution, MotoJa, background, qr_image, seal, unseal, valid_motoja_url
 from database import connect
 from notify import notify_store
+from operations import received
 
 FLOW = ["new", "preparing", "ready", "delivering", "completed"]
 ACTIVE_MOTOJA = ("chamado", "aceito", "retirado", "na_fila")
@@ -24,7 +25,9 @@ def money(cents):
 def payment_note(order):
     if order["paid"]:
         return "PAGO - não cobrar do cliente."
-    total = money(order["total"])
+    if order["payment"]=="credit":
+        return "Fiado autorizado pela loja; não cobrar na entrega."
+    total = money(dict(order).get('remaining_amount',order['total']))
     if order["payment"] == "cash":
         change = f" (troco para {money(order['change_for'])})" if order["change_for"] else ""
         return f"Cobrar {total} em dinheiro{change}."
@@ -84,7 +87,7 @@ def register_order_flow(app, helpers):
             if not order or not store or not store["wa_enabled"] or not store["wa_instance"] or not evolution().ready:
                 return False
             sent = set(filter(None, (order["wa_sent"] or "").split(",")))
-            if status in sent or order["phone"] == "00000000000":
+            if status in sent or not order['phone'] or order["phone"] == "00000000000":
                 return False
             text = customer_message(order, store, status, f"{h.public_base_static()}/pedido/{order['tracking_token']}")
             if not text:
@@ -98,6 +101,8 @@ def register_order_flow(app, helpers):
 
     # ---------- MotoJá
     def motoja_payload(conn, order):
+        order=dict(order)
+        order['remaining_amount']=max(0,order['total']-received(conn,order['store_id'],order))
         items = conn.execute("SELECT name,quantity,extras FROM order_items WHERE order_id=?", (order["id"],)).fetchall()
         lines = []
         for item in items:
@@ -136,6 +141,7 @@ def register_order_flow(app, helpers):
         for step in FLOW[start + 1:end + 1]:
             conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (order["id"], step, stamp))
         conn.execute("UPDATE orders SET status=?,updated_at=? WHERE id=? AND status=?", (target, stamp, order["id"], order["status"]))
+        conn.execute("UPDATE order_items SET kitchen_state=? WHERE order_id=?",('ready' if target in ('ready','delivering','completed') else 'preparing',order['id']))
         return True
 
     def sync_motoja(conn, order, store):
@@ -315,7 +321,7 @@ def register_order_flow(app, helpers):
     def whatsapp_disconnect():
         if g.store["wa_instance"] and evolution().ready:
             evolution().logout(g.store["wa_instance"])
-        h.db().execute("UPDATE stores SET wa_instance='',wa_enabled=0 WHERE id=?", (g.store["id"],))
+        h.db().execute("UPDATE stores SET wa_instance='',wa_enabled=0,inbox_hook_hash='',inbox_bot=0 WHERE id=?", (g.store["id"],))
         return jsonify(connectors_state(h.one("SELECT * FROM stores WHERE id=?", (g.store["id"],))))
 
     @app.post("/api/admin/whatsapp/test")

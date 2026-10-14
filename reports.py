@@ -16,13 +16,13 @@ def brl(cents):
     return ("-R$ " if cents < 0 else "R$ ") + value
 
 
-def show(value, kind):
+def show(value, kind, zone=ZONE):
     if value is None or value == "":
         return "-" if kind != "text" else ""
     if kind == "money":
         return brl(value)
     if kind == "date":
-        return datetime.fromisoformat(value).astimezone(ZONE).strftime("%d/%m/%Y %H:%M")
+        return datetime.fromisoformat(value).astimezone(zone).strftime("%d/%m/%Y %H:%M")
     return str(value)
 
 
@@ -33,7 +33,7 @@ def latin(text):
     return text.encode("latin-1", "replace").decode("latin-1")
 
 
-def pdf(title, subtitle, summary, tables):
+def pdf(title, subtitle, summary, tables, zone=ZONE):
     from fpdf import FPDF
     from fpdf.fonts import FontFace
 
@@ -58,7 +58,7 @@ def pdf(title, subtitle, summary, tables):
     doc.cell(0, 8, latin(title))
     doc.set_xy(12, 17)
     doc.set_font("Helvetica", size=10)
-    generated = datetime.now(ZONE).strftime("%d/%m/%Y %H:%M")
+    generated = datetime.now(zone).strftime("%d/%m/%Y %H:%M")
     doc.cell(0, 6, latin(f"{subtitle} • gerado em {generated}"))
     doc.set_y(38)
     doc.set_text_color(20, 44, 48)
@@ -77,7 +77,7 @@ def pdf(title, subtitle, summary, tables):
             doc.set_xy(x + 3, y + 8)
             doc.set_font("Helvetica", "B", 12)
             doc.set_text_color(20, 44, 48)
-            doc.cell(width - 6, 6, latin(show(value, kind)))
+            doc.cell(width - 6, 6, latin(show(value, kind, zone)))
         doc.set_y(38 + ((len(summary) + 3) // 4) * 20 + 2)
 
     for table in tables:
@@ -104,12 +104,12 @@ def pdf(title, subtitle, summary, tables):
             for values in table["rows"]:
                 line = grid.row()
                 for value, (_, kind) in zip(values, table["columns"]):
-                    line.cell(latin(show(value, kind)))
+                    line.cell(latin(show(value, kind, zone)))
     doc.alias_nb_pages()
     return bytes(doc.output())
 
 
-def xlsx(title, subtitle, summary, tables):
+def xlsx(title, subtitle, summary, tables, zone=ZONE):
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
@@ -121,7 +121,7 @@ def xlsx(title, subtitle, summary, tables):
     sheet.title = "Resumo"
     sheet["A1"] = title
     sheet["A1"].font = Font(bold=True, size=16, color="103F42")
-    sheet["A2"] = f"{subtitle} • gerado em {datetime.now(ZONE).strftime('%d/%m/%Y %H:%M')}"
+    sheet["A2"] = f"{subtitle} • gerado em {datetime.now(zone).strftime('%d/%m/%Y %H:%M')}"
     sheet["A2"].font = Font(color="52686B")
     for row, (label, value, kind) in enumerate(summary, start=4):
         sheet.cell(row, 1, label).font = Font(bold=True)
@@ -148,12 +148,13 @@ def xlsx(title, subtitle, summary, tables):
                     cell = ws.cell(row, col, value / 100)
                     cell.number_format = money_format
                 elif kind == "date" and value:
-                    cell = ws.cell(row, col, datetime.fromisoformat(value).astimezone(ZONE).replace(tzinfo=None))
+                    cell = ws.cell(row, col, datetime.fromisoformat(value).astimezone(zone).replace(tzinfo=None))
                     cell.number_format = "dd/mm/yyyy hh:mm"
                 else:
-                    ws.cell(row, col, value)
+                    cell=ws.cell(row, col, value)
+                    if isinstance(value,str):cell.data_type='s'
         for col, (header, kind) in enumerate(table["columns"], start=1):
-            longest = max([len(header)] + [len(show(r[col - 1], kind)) for r in table["rows"][:300]])
+            longest = max([len(header)] + [len(show(r[col - 1], kind, zone)) for r in table["rows"][:300]])
             ws.column_dimensions[get_column_letter(col)].width = min(48, max(10, longest + 2))
         ws.freeze_panes = "A2"
         if table["rows"]:
@@ -163,8 +164,8 @@ def xlsx(title, subtitle, summary, tables):
     return output.getvalue()
 
 
-def build(fmt, title, subtitle, summary, tables):
+def build(fmt, title, subtitle, summary, tables, zone=ZONE):
     if fmt == "pdf":
-        return pdf(title, subtitle, summary, tables), "application/pdf", "pdf"
-    return (xlsx(title, subtitle, summary, tables),
+        return pdf(title, subtitle, summary, tables, zone), "application/pdf", "pdf"
+    return (xlsx(title, subtitle, summary, tables, zone),
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx")

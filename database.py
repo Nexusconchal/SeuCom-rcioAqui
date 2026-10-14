@@ -95,6 +95,9 @@ def initialize(config):
                 if not exists:
                     conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
                 conn.execute(sql.SQL("REVOKE ALL ON SCHEMA {} FROM PUBLIC").format(sql.Identifier(schema)))
+                client_roles=[role for role in ('anon','authenticated') if conn.execute('SELECT 1 FROM pg_roles WHERE rolname=%s',(role,)).fetchone()]
+                for role in client_roles:
+                    conn.execute(sql.SQL('REVOKE ALL ON SCHEMA {} FROM {}').format(sql.Identifier(schema),sql.Identifier(role)))
                 conn.execute(sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(schema)))
                 for statement in (BASE / "schema.postgres.sql").read_text(encoding="utf-8").split(";"):
                     if statement.strip():
@@ -104,6 +107,8 @@ def initialize(config):
                 for (table,) in tables:
                     conn.execute(sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(sql.Identifier(table)))
                     conn.execute(sql.SQL("REVOKE ALL ON TABLE {} FROM PUBLIC").format(sql.Identifier(table)))
+                    for role in client_roles:
+                        conn.execute(sql.SQL('REVOKE ALL ON TABLE {} FROM {}').format(sql.Identifier(table),sql.Identifier(role)))
     else:
         Path(config["DATABASE_PATH"]).parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(config["DATABASE_PATH"]) as conn:

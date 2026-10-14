@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 from flask import abort, g, jsonify, request
 from itsdangerous import BadSignature, URLSafeTimedSerializer
+from customer_segments import matches
 
 SEGMENTS = {'all': 'Todos', 'new': 'Primeira compra', 'loyal': 'Recorrentes', 'vip': 'VIP', 'inactive': 'Sem comprar há 30 dias'}
 PHONE = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'(',''),')',''),'+','')"
@@ -167,7 +168,25 @@ def register_marketing(app, helpers):
             c['consent'] = bool(profile and profile['consent'])
             c['profile_id'] = profile['id'] if profile else None
             output.append(c)
+        for c in output:
+            r=5 if c['days_since']<=7 else 4 if c['days_since']<=14 else 3 if c['days_since']<=30 else 2 if c['days_since']<=60 else 1
+            f=5 if c['orders']>=10 else 4 if c['orders']>=5 else 3 if c['orders']>=3 else 2 if c['orders']>=2 else 1
+            m=min(5,max(1,(sum(x['spent']<=c['spent'] for x in output)*5+len(output)-1)//len(output)))
+            c['rfv_score']=f'{r}{f}{m}'
+            c['rfv_group']=('Campeões' if r>=4 and f>=4 and m>=4 else 'Fiéis' if r>=3 and f>=4 else
+                'Não podemos perder' if r==1 and f>=4 else 'Em risco' if r<=2 and f>=3 else
+                'Potenciais fiéis' if r>=4 and f>=2 else 'Recentes' if r>=4 and f==1 else
+                'Promissores' if r==3 and f==1 else 'Precisam de atenção' if r==3 else
+                'Prestes a dormir' if r==2 and f>=2 else 'Hibernando' if r==2 else 'Inativos')
         return output
+
+    app.extensions['marketing_customers']=customers
+
+    def in_segment(customer,segment):
+        if segment=='all':return True
+        if segment in SEGMENTS:return customer['segment']==segment
+        saved=h.one('SELECT * FROM customer_segments WHERE id=? AND store_id=?',(int(segment.split(':')[1]),g.store['id']))
+        return bool(saved and matches(customer,saved))
 
     @app.get('/api/admin/marketing')
     @h.owner
@@ -214,16 +233,28 @@ def register_marketing(app, helpers):
 
     def campaign_fields(value):
         segment = value.get('segment')
-        if segment not in SEGMENTS:
+        if segment not in SEGMENTS and (not isinstance(segment,str) or not re.fullmatch(r'saved:[1-9][0-9]{0,15}',segment) or not h.one('SELECT id FROM customer_segments WHERE id=? AND store_id=?',(int(segment.split(':')[1]),g.store['id']))):
             abort(400, description='Público da campanha inválido.')
         return h.text(value, 'name', 3, 100), segment, h.text(value, 'message', 10, 800)
+
+    def campaign_recipients(campaign):
+        sid=g.store['id']
+        audience=[c for c in customers(sid) if c['consent'] and in_segment(c,campaign['segment'])]
+        result=[]
+        for c in audience[:100]:
+            optout=h.public_base()+'/loja/'+quote(g.store['slug'])+'?cancelar_promocoes='+quote(sign('optout',sid,c['profile_id']))
+            message=campaign['message'].replace('{nome}',c['name'].split(' ')[0]).replace('{loja}',g.store['name']).replace('{link}',h.public_base()+'/loja/'+quote(g.store['slug']))
+            result.append({'name':c['name'],'phone':c['phone'],'message':message+'\nNão receber promoções: '+optout})
+        return result
+
+    app.extensions['campaign_recipients']=campaign_recipients
 
     @app.post('/api/admin/marketing/campaigns/preview')
     @h.owner
     def campaign_preview():
         h.limited('campaign-preview', 30)
         name, segment, message = campaign_fields(h.data())
-        audience = [c for c in customers(g.store['id']) if c['consent'] and (segment == 'all' or c['segment'] == segment)]
+        audience = [c for c in customers(g.store['id']) if c['consent'] and in_segment(c,segment)]
         recipients = []
         for c in audience[:100]:
             optout = h.public_base() + '/loja/' + quote(g.store['slug']) + '?cancelar_promocoes=' + quote(sign('optout', g.store['id'], c['profile_id']))
