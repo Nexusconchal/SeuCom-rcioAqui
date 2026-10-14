@@ -17,7 +17,7 @@ ADDITIONS = {
                'motoja_url': "TEXT NOT NULL DEFAULT ''", 'motoja_key': "TEXT NOT NULL DEFAULT ''", 'motoja_auto': 'INTEGER NOT NULL DEFAULT 0',
                'sub_pix_id': "TEXT NOT NULL DEFAULT ''", 'sub_pix_code': "TEXT NOT NULL DEFAULT ''", 'sub_pix_expires': "TEXT NOT NULL DEFAULT ''",
                'motoja_trigger': "TEXT NOT NULL DEFAULT 'preparing'", 'wa_instance': "TEXT NOT NULL DEFAULT ''", 'wa_enabled': 'INTEGER NOT NULL DEFAULT 0'},
-    'products': {'unit_cost': 'INTEGER', 'low_stock': 'INTEGER NOT NULL DEFAULT 5', 'option_groups': "TEXT NOT NULL DEFAULT '[]'"},
+    'products': {'unit_cost': 'INTEGER', 'low_stock': 'INTEGER NOT NULL DEFAULT 5', 'option_groups': "TEXT NOT NULL DEFAULT '[]'", 'suggested': 'INTEGER NOT NULL DEFAULT 0'},
     'orders': {'delivery_cost': 'INTEGER', 'payment_fee': 'INTEGER', 'platform_fee': 'INTEGER NOT NULL DEFAULT 0',
                'source': "TEXT NOT NULL DEFAULT 'web'", 'zone': "TEXT NOT NULL DEFAULT ''",
                'scheduled_for': "TEXT NOT NULL DEFAULT ''", 'rating': 'INTEGER', 'review': "TEXT NOT NULL DEFAULT ''", 'reviewed_at': 'TEXT',
@@ -34,6 +34,42 @@ ADDITIONS = {
 }
 
 TABLES = """
+CREATE TABLE IF NOT EXISTS ingredients (
+ id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), name TEXT NOT NULL,
+ unit TEXT NOT NULL CHECK(unit IN ('kg','l','un')), stock INTEGER NOT NULL CHECK(stock>=0),
+ low_stock INTEGER NOT NULL DEFAULT 0, unit_cost INTEGER, active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS recipes (
+ id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), product_id INTEGER NOT NULL REFERENCES products(id),
+ ingredient_id INTEGER NOT NULL REFERENCES ingredients(id), quantity INTEGER NOT NULL CHECK(quantity>0),
+ UNIQUE(product_id,ingredient_id)
+);
+CREATE TABLE IF NOT EXISTS ingredient_movements (
+ id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), ingredient_id INTEGER NOT NULL REFERENCES ingredients(id),
+ order_id INTEGER REFERENCES orders(id), delta INTEGER NOT NULL, balance INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS customer_opt_ins (
+ id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), phone TEXT NOT NULL,
+ consent INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, UNIQUE(store_id,phone)
+);
+CREATE TABLE IF NOT EXISTS shopping_sessions (
+ id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), token_hash TEXT NOT NULL UNIQUE,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL, cart_at TEXT, checkout_at TEXT, order_id INTEGER REFERENCES orders(id),
+ items TEXT NOT NULL DEFAULT '[]', subtotal INTEGER NOT NULL DEFAULT 0, customer TEXT NOT NULL DEFAULT '',
+ phone TEXT NOT NULL DEFAULT '', recovery_consent INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS marketing_campaigns (
+ id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), name TEXT NOT NULL, segment TEXT NOT NULL,
+ message TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_ingredients_store ON ingredients(store_id,active);
+CREATE INDEX IF NOT EXISTS ix_recipes_store ON recipes(store_id,product_id);
+CREATE INDEX IF NOT EXISTS ix_ingredient_movement_order ON ingredient_movements(order_id);
+CREATE INDEX IF NOT EXISTS ix_ingredient_movement_store ON ingredient_movements(store_id,id);
+CREATE INDEX IF NOT EXISTS ix_opt_ins_store ON customer_opt_ins(store_id,consent);
+CREATE INDEX IF NOT EXISTS ix_shopping_store_date ON shopping_sessions(store_id,created_at);
+CREATE INDEX IF NOT EXISTS ix_shopping_store_updated ON shopping_sessions(store_id,updated_at);
+CREATE INDEX IF NOT EXISTS ix_campaigns_store ON marketing_campaigns(store_id,id);
 CREATE TABLE IF NOT EXISTS api_keys (
  id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), name TEXT NOT NULL,
  token_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL, scopes TEXT NOT NULL,
@@ -120,6 +156,6 @@ def postgres_ddl():
         for column, definition in columns.items():
             statements.append(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition};')
     statements.extend(s+';' for s in TABLES.split(';') if s.strip() and not s.strip().startswith('CREATE TABLE'))
-    for table in ('api_keys', 'delivery_links', 'integration_events', 'stock_movements', 'platform_ledger', 'audit_log', 'platform_notices', 'store_members', 'platform_settings', 'push_subscriptions', 'support_messages'):
+    for table in ('api_keys', 'delivery_links', 'integration_events', 'stock_movements', 'platform_ledger', 'audit_log', 'platform_notices', 'store_members', 'platform_settings', 'push_subscriptions', 'support_messages', 'ingredients', 'recipes', 'ingredient_movements', 'customer_opt_ins', 'shopping_sessions', 'marketing_campaigns'):
         statements.extend([f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;', f'REVOKE ALL ON {table} FROM PUBLIC,anon,authenticated;'])
     return '\n'.join(statements)

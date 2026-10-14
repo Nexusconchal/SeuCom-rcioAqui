@@ -1,5 +1,29 @@
 # API
 
+## Marketing, sugestões e fichas técnicas
+
+Rotas administrativas abaixo exigem sessão de dono/gerente, CSRF nas alterações e escopo da própria loja. Caixa/cozinha não têm acesso. Quantidades de ingredientes usam milésimos da unidade (150 = 0,150 kg), enquanto preços continuam em centavos.
+
+| Método | Endpoint | Contrato |
+| --- | --- | --- |
+| GET | /api/admin/ingredients | Insumos, produtos com receita/custo/capacidade e 100 movimentos recentes |
+| POST | /api/admin/ingredients | name, unit: kg/l/un, stock, low_stock, unit_cost: inteiro ou null |
+| PATCH | /api/admin/ingredients/:id | name, low_stock, unit_cost, active; não muda unidade/saldo |
+| POST | /api/admin/ingredients/:id/adjust | delta positivo/negativo e reason; impede saldo negativo |
+| PUT | /api/admin/products/:id/recipe | ingredients: [{ingredient_id,quantity}]; [] remove a ficha |
+| GET | /api/admin/marketing | Público, funil de 30 dias, sacolas autorizadas, rascunhos e sugestões |
+| PUT | /api/admin/marketing/suggestions | product_ids: até 12 produtos ativos da loja |
+| POST | /api/admin/marketing/campaigns | name, segment: all/new/loyal/vip/inactive, message; salva rascunho |
+| POST | /api/admin/marketing/campaigns/preview | Mesmo corpo; prévia de até 100 destinatários autorizados, sem envio |
+| POST | /api/store/:slug/shopping | event: visit/cart/checkout, token opcional, items; recovery_consent opcional (booleano), customer/phone só quando autorizado |
+| GET | /api/store/:slug/recover/:token | Link assinado de 7 dias; devolve apenas itens, sem contato/endereço |
+| POST | /api/store/:slug/unsubscribe/:token | Link assinado; revoga ofertas e apaga contato de sacolas pendentes |
+| POST | /api/store/:slug/recovery-unsubscribe/:token | Revoga o lembrete da sacola indicada |
+
+Pedidos aceitam marketing_consent (booleano, padrão false), shopping_token e recovery_token opcionais. O preço, receita, estoque e custo são sempre calculados pelo servidor. Repetir a chave idempotente não duplica consumo nem conversão. Campanhas e lembretes são enviados individualmente pelo lojista ao abrir o WhatsApp; estas APIs não disparam mensagens.
+
+O público considera apenas pedidos concluídos e agrupa telefones com ou sem +55. Uma sacola só aparece para recuperação depois de 30 minutos sem atualização, por no máximo 7 dias, e quando não existe compra posterior daquele telefone. O funil conta sessões e pedidos distintos; não representa receita. A limpeza de contatos antigos e sessões acontece durante o uso da rota shopping; o acesso ao link expira independentemente da limpeza.
+
 Frontend e API no mesmo host. Valores monetários são inteiros em centavos (BRL). Datas são ISO 8601 UTC; a interface usa America/Sao_Paulo. Erros retornam um objeto {"error":"Mensagem"} com código HTTP.
 
 ## Sessão

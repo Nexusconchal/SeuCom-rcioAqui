@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo
 import click
 from database import connect, initialize
 from business import register_business
+from inventory import register_inventory, recipe_map, recipe_info, ingredient_demand, reserve_ingredients, restore_ingredients
+from marketing import register_marketing
 from storage import put_image
 from notify import notify_store, vapid_keys
 from payments import MercadoPago, PaymentError, seal, unseal
@@ -635,8 +637,15 @@ def create_app(test_config=None):
         store = one("SELECT * FROM stores WHERE slug=?", (slug,))
         if not store:
             abort(404, description="Esta loja não foi encontrada.")
-        return jsonify(store=store_dict(store), categories=rows("SELECT id,name,position FROM categories WHERE store_id=? ORDER BY position,id", (store["id"],)),
-                       products=[product_dict(p) for p in db().execute("SELECT * FROM products WHERE store_id=? AND active=1 ORDER BY featured DESC,position,id", (store["id"],))])
+        recipes = recipe_map(db(), store['id'])
+        products = []
+        for raw in db().execute("SELECT * FROM products WHERE store_id=? AND active=1 ORDER BY featured DESC,position,id", (store['id'],)):
+            product = product_dict(raw)
+            capacity, _ = recipe_info(recipes.get(raw['id'], []))
+            if capacity is not None:
+                product['stock'] = capacity if product['stock'] is None else min(capacity, product['stock'])
+            products.append(product)
+        return jsonify(store=store_dict(store), categories=rows("SELECT id,name,position FROM categories WHERE store_id=? ORDER BY position,id", (store["id"],)), products=products)
 
     def customer_orders_by_phone(conn, sid, phone):
         key = phone_key(phone)
@@ -676,6 +685,7 @@ def create_app(test_config=None):
 
     def price_items(conn, store, items):
         subtotal, quantities, prepared = 0, {}, []
+        recipes = recipe_map(conn, store['id'])
         for item in items:
             if not isinstance(item, dict):
                 abort(400, description="Produto inválido.")
@@ -683,6 +693,9 @@ def create_app(test_config=None):
             product = conn.execute("SELECT * FROM products WHERE id=? AND store_id=? AND active=1", (pid, store["id"])).fetchone()
             if not product:
                 abort(400, description="Um produto não está mais disponível.")
+            if recipes.get(pid):
+                product = dict(product)
+                _, product['unit_cost'] = recipe_info(recipes[pid])
             unit, cost, extras = choose_options(product, item.get("option_ids", []))
             subtotal += quantity * unit
             quantities[pid] = quantities.get(pid, 0) + quantity
@@ -703,6 +716,7 @@ def create_app(test_config=None):
         if mode not in ("delivery", "pickup") or not isinstance(items, list) or not 1 <= len(items) <= 50:
             abort(400, description="Sacola inválida.")
         subtotal, quantities, prepared = price_items(db(), store, items)
+        ingredient_demand(recipe_map(db(), store['id']), quantities)
         for product, quantity, unit, extras, notes, _ in prepared:
             if product["stock"] is not None and quantities[product["id"]] > product["stock"]:
                 abort(409, description=f"Estoque insuficiente: {product['name']}.")
@@ -780,6 +794,8 @@ def create_app(test_config=None):
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (store["id"], number, hashlib.sha256(token.encode()).hexdigest(),
                 customer, phone, mode, address if mode == "delivery" else "", payment, change_for if payment == "cash" else None, notes,
                 subtotal, discount, fee, total, coupon_id, key, digest, token, stamp, stamp)).lastrowid
+            reserve_ingredients(conn, store['id'], quantities, oid, number, stamp)
+            app.extensions['marketing_order'](conn, store['id'], oid, value)
             fees=json.loads(store['payment_fees'])
             conn.execute("UPDATE orders SET loyalty_discount=? WHERE id=?", (reward, oid))
             conn.execute("UPDATE orders SET delivery_cost=?,payment_fee=?,platform_fee=?,source=?,zone=?,scheduled_for=? WHERE id=?",
@@ -1315,6 +1331,7 @@ def create_app(test_config=None):
                 if status not in STATUSES[order["status"]] or (order["mode"] == "pickup" and status == "delivering") or (order["mode"] == "delivery" and order["status"] == "ready" and status == "completed"):
                     abort(409, description="Esta mudança de status não é permitida.")
                 if status == "cancelled":
+                    restore_ingredients(conn, g.store['id'], oid, order['number'], now())
                     for item in conn.execute("SELECT product_id,SUM(quantity) AS qty FROM order_items WHERE order_id=? GROUP BY product_id", (oid,)):
                         conn.execute("UPDATE products SET stock=stock+? WHERE id=? AND stock IS NOT NULL", (item["qty"], item["product_id"]))
                         balance=conn.execute('SELECT stock FROM products WHERE id=?',(item['product_id'],)).fetchone()[0]
@@ -1468,6 +1485,10 @@ def create_app(test_config=None):
         response.headers["Content-Disposition"] = 'attachment; filename="pedidos.csv"'
         return response
 
+    register_inventory(app, dict(db=db,rows=rows,owner=owner,owned=owned,data=data,text=text,integer=integer,
+        boolean=boolean,transaction=transaction,now=now))
+    register_marketing(app, dict(db=db,one=one,rows=rows,owner=owner,owned=owned,data=data,text=text,integer=integer,
+        boolean=boolean,transaction=transaction,limited=limited,now=now,price_items=price_items,public_base=public_base))
     register_business(app, dict(db=db,one=one,rows=rows,owner=owner,owned=owned,data=data,text=text,integer=integer,
         boolean=boolean,transaction=transaction,limited=limited,order_dict=order_dict,now=now))
 

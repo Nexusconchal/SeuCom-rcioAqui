@@ -1,4 +1,6 @@
 import { $, $$, icon, brand, money, esc, image, api, modal, closeModal, bindForm, empty, toast, pay, date, attachFallbacks, copy, cents, optionPrice, fromPrice, hasChoices, optionLabels, validIds, optionFields, readOptions, bindOptionLimits } from './ui.js';
+import { startShopping, shoppingEvent, shoppingToken, finishShopping } from './shopping.js';
+let shoppingReady=false,activeRecovery='';
 let catalog, cart=[], selected='all', search='', orderKey='', activeSlug='';
 const cartKey=()=> 'sca.cart.'+catalog.store.id;
 const days=['Segunda','Terça','Quarta','Quinta','Sexta','Sábado','Domingo'];
@@ -19,7 +21,7 @@ function hoursList(s){
 }
 const total=()=>cart.reduce((sum,line)=>sum+line.quantity*line.unit,0);
 const count=()=>cart.reduce((sum,line)=>sum+line.quantity,0);
-function persist(){try{localStorage.setItem(cartKey(),JSON.stringify(cart));}catch{}updateBar();}
+function persist(){try{localStorage.setItem(cartKey(),JSON.stringify(cart));}catch{}updateBar();if(shoppingReady)shoppingEvent('cart',itemPayload());}
 function loadCart(){
   try{const saved=JSON.parse(localStorage.getItem(cartKey())||'[]');cart=Array.isArray(saved)?saved.filter(x=>x&&typeof x.id==='string'&&Number.isInteger(x.quantity)&&x.quantity>0&&x.quantity<=50&&Array.isArray(x.option_ids)).slice(0,50):[];}catch{cart=[];}
   cart=cart.flatMap(line=>{
@@ -30,6 +32,7 @@ function loadCart(){
   });persist();
 }
 export async function renderMenu(slug){
+  shoppingReady=false;
   activeSlug=slug;catalog=await api('/api/store/'+encodeURIComponent(slug));document.title=catalog.store.name+' • SeuComércioAqui';
   loadCart();
   const s=catalog.store;
@@ -44,6 +47,19 @@ export async function renderMenu(slug){
   });
   $('#store-info').onclick=()=>modal('Sobre a loja','<div class="store-info"><h3>'+esc(s.name)+'</h3><p>'+esc(s.description)+'</p><p>'+icon('pin')+esc(s.address||'Endereço ainda não informado.')+'</p><p>'+icon('clock')+'Estimativa: '+esc(s.delivery_minutes)+'</p>'+(zones().length?'<div class="hours-list"><b>Taxa de entrega por bairro</b>'+zones().map(z=>'<div><span>'+esc(z.name)+'</span><span>'+money(z.fee)+'</span></div>').join('')+'</div>':'<p>Entrega: '+money(s.delivery_fee)+' • Retirada sem taxa</p>')+hoursList(s)+'<p>Pagamentos: '+s.payments.map(p=>pay[p]).join(', ')+'</p>'+(s.phone?'<a class="btn full" href="'+whatsapp(s.phone)+'" target="_blank" rel="noopener">Falar com a loja</a>':'')+'</div>');
   renderList();updateBar();attachFallbacks();
+  startShopping(slug);shoppingReady=true;if(cart.length)shoppingEvent('cart',itemPayload());
+  if(s.loyalty_enabled)$('.menu-toolbar').insertAdjacentHTML('beforebegin','<div class="loyalty-menu-banner">'+icon('tag')+'<div><b>Seu pedido também vale recompensa.</b><p>A cada '+s.loyalty_goal+' pedidos concluídos, ganhe '+money(s.loyalty_reward)+' de desconto no próximo. Use sempre o mesmo WhatsApp.</p></div></div>');
+  await recoveryActions(slug);
+}
+async function recoveryActions(slug){
+  const query=new URLSearchParams(location.search),recover=query.get('recuperar');
+  const preferences=[['cancelar_promocoes','unsubscribe','Parar de receber promoções?'],['cancelar_recuperacao','recovery-unsubscribe','Parar os lembretes desta sacola?']];
+  for(const [key,endpoint,title] of preferences){if(!query.has(key))continue;modal(title,'<p>Confirme sua preferência para esta loja.</p><button id="stop-messages" class="btn full">Confirmar e cancelar mensagens</button>');$('#stop-messages').onclick=async()=>{try{await api('/api/store/'+encodeURIComponent(slug)+'/'+endpoint+'/'+encodeURIComponent(query.get(key)),{method:'POST'});closeModal();toast('Preferência salva.');history.replaceState(null,'',location.pathname);}catch(e){toast(e.message);}};return;}
+  if(!recover)return;
+  try{const r=await api('/api/store/'+encodeURIComponent(slug)+'/recover/'+encodeURIComponent(recover));const lines=r.items.flatMap(i=>{const p=catalog.products.find(x=>x.id===i.product_id);if(!p||p.stock===0)return [];const ids=validIds(p,i.option_ids);if(ids.length!==i.option_ids.length||p.option_groups.some(g=>ids.filter(id=>g.options.some(o=>o.id===id)).length<g.min))return [];return [{id:crypto.randomUUID(),product_id:p.id,name:p.name,image:p.image,quantity:Math.min(i.quantity,p.stock??50),option_ids:ids,notes:'',extras:optionLabels(p,ids).map(name=>({name})),unit:optionPrice(p,ids)}];});
+    modal('Vamos continuar seu pedido?','<p>'+lines.length+' item'+(lines.length===1?'':'s')+' disponível'+(lines.length===1?'':'s')+' na sua sacola salva. Preços e disponibilidade foram atualizados.</p>'+(lines.length<r.items.length?'<p class="muted">Itens esgotados ou com opções alteradas ficaram de fora. Você pode escolher novamente no cardápio.</p>':'')+'<p class="muted">Ao continuar, esta sacola substitui a que está neste aparelho.</p><button id="restore-cart" class="btn full" '+(!lines.length?'disabled':'')+'>Continuar com a sacola salva</button>');
+    $('#restore-cart').onclick=()=>{cart=lines;activeRecovery=recover;orderKey='';persist();history.replaceState(null,'',location.pathname);cartDialog();};
+  }catch(e){toast(e.message);}
 }
 function renderList(){
   const list=catalog.products.filter(p=>(selected==='all'||(selected==='other'?!p.category_id:String(p.category_id)===selected))&&(!search||(p.name+' '+p.description).toLocaleLowerCase('pt-BR').includes(search)));
@@ -74,17 +90,23 @@ function productDialog(product){
     orderKey='';persist();closeModal();toast('Adicionado à sacola!');
   };attachFallbacks(d);
 }
+function basketSuggestions(){
+  const products=catalog.products.filter(p=>p.suggested&&p.stock!==0&&!cart.some(i=>i.product_id===p.id)).slice(0,3);
+  if(!products.length||!canOrder())return '';
+  return '<section class="basket-suggestions"><h3>Que tal completar seu pedido?</h3><p>Uma boa combinação com o que você escolheu.</p>'+products.map(p=>'<article class="basket-suggestion"><img src="'+esc(image(p.image))+'" alt=""><div><b>'+esc(p.name)+'</b><small>'+(hasChoices(p)?'A partir de ':'')+money(fromPrice(p))+'</small></div><button class="btn secondary small" data-basket-suggestion="'+p.id+'">'+(hasChoices(p)?'Escolher':'Adicionar')+'</button></article>').join('')+'</section>';
+}
 function cartDialog(){
-  const d=modal('Sua sacola',cart.length?'<div class="cart-lines">'+cart.map(line=>'<article class="cart-line"><img src="'+esc(image(line.image))+'" alt=""><div><b>'+esc(line.name)+'</b><small>'+line.extras.map(x=>esc(x.name)).join(', ')+'</small>'+(line.notes?'<small>'+esc(line.notes)+'</small>':'')+'<strong>'+money(line.unit*line.quantity)+'</strong></div><div class="quantity"><button class="icon-btn" data-less="'+line.id+'" aria-label="Diminuir '+esc(line.name)+'">'+icon('minus')+'</button><span>'+line.quantity+'</span><button class="icon-btn" data-more="'+line.id+'" aria-label="Aumentar '+esc(line.name)+'">'+icon('plus')+'</button></div></article>').join('')+'</div><div class="total-row"><span>Subtotal</span><b>'+money(total())+'</b></div><p class="muted">Taxa de entrega e cupons são calculados na próxima etapa.</p><button id="checkout" class="btn full" '+(!canOrder()?'disabled':'')+'>Continuar pedido '+icon('arrow')+'</button>':empty('Sua sacola está esperando','Escolha algo gostoso no cardápio.'));
+  const d=modal('Sua sacola',cart.length?'<div class="cart-lines">'+cart.map(line=>'<article class="cart-line"><img src="'+esc(image(line.image))+'" alt=""><div><b>'+esc(line.name)+'</b><small>'+line.extras.map(x=>esc(x.name)).join(', ')+'</small>'+(line.notes?'<small>'+esc(line.notes)+'</small>':'')+'<strong>'+money(line.unit*line.quantity)+'</strong></div><div class="quantity"><button class="icon-btn" data-less="'+line.id+'" aria-label="Diminuir '+esc(line.name)+'">'+icon('minus')+'</button><span>'+line.quantity+'</span><button class="icon-btn" data-more="'+line.id+'" aria-label="Aumentar '+esc(line.name)+'">'+icon('plus')+'</button></div></article>').join('')+'</div>'+basketSuggestions()+'<div class="total-row"><span>Subtotal</span><b>'+money(total())+'</b></div><p class="muted">Taxa de entrega e cupons são calculados na próxima etapa.</p><button id="checkout" class="btn full" '+(!canOrder()?'disabled':'')+'>Continuar pedido '+icon('arrow')+'</button>':empty('Sua sacola está esperando','Escolha algo gostoso no cardápio.'));
   $$('[data-less]',d).forEach(b=>b.onclick=()=>{const line=cart.find(x=>x.id===b.dataset.less);line.quantity--;cart=cart.filter(x=>x.quantity>0);orderKey='';persist();cartDialog();});
   $$('[data-more]',d).forEach(b=>b.onclick=()=>{const line=cart.find(x=>x.id===b.dataset.more);line.quantity=Math.min(50,line.quantity+1);orderKey='';persist();cartDialog();});
   if($('#checkout',d))$('#checkout',d).onclick=checkoutDialog;
+  $$('[data-basket-suggestion]',d).forEach(b=>b.onclick=()=>{const p=catalog.products.find(p=>p.id===Number(b.dataset.basketSuggestion));if(hasChoices(p))return productDialog(p);cart.push({id:crypto.randomUUID(),product_id:p.id,name:p.name,image:p.image,quantity:1,option_ids:[],extras:[],notes:'',unit:p.price});orderKey='';persist();cartDialog();toast('Adicionado à sacola!');});
   attachFallbacks(d);
 }
 function itemPayload(){return cart.map(x=>({product_id:x.product_id,quantity:x.quantity,option_ids:x.option_ids,notes:x.notes||''}));}
 function checkoutDialog(){
   const s=catalog.store;
-  const d=modal('Finalize seu pedido','<form id="checkout-form"><fieldset><legend>Como você quer receber?</legend><div class="choice-row"><label><input type="radio" name="mode" value="delivery" checked> '+icon('truck')+' Entrega</label><label><input type="radio" name="mode" value="pickup"> '+icon('store')+' Retirada</label></div></fieldset>'+(s.allow_scheduling?'<fieldset><legend>Quando?</legend><div class="choice-row"><label><input type="radio" name="when" value="now" '+(s.open_now?'checked':'disabled')+'> '+icon('clock')+' Agora</label><label><input type="radio" name="when" value="later" '+(s.open_now?'':'checked')+'> '+icon('clock')+' Agendar</label></div><div id="schedule-fields" class="form-grid '+(s.open_now?'hidden':'')+'"><label>Dia<select name="schedule_day">'+slotOptions()+'</select></label><label>Horário<input type="time" name="schedule_time" step="900"></label></div></fieldset>':'')+'<div class="form-grid"><label>Seu nome<input name="customer" autocomplete="name" minlength="2" maxlength="100" required></label><label>WhatsApp com DDD<input name="phone" type="tel" autocomplete="tel" minlength="10" maxlength="20" placeholder="(19) 99999-9999" required></label></div>'+(zones().length?'<label id="zone-label">Seu bairro<select name="zone" required><option value="">Escolha o bairro</option>'+zones().map(z=>'<option value="'+esc(z.name)+'">'+esc(z.name)+' • '+money(z.fee)+'</option>').join('')+'</select></label>':'')+'<label id="cep-label">CEP (opcional, preenche o endereço)<input name="cep" inputmode="numeric" autocomplete="postal-code" maxlength="9" placeholder="00000-000"></label><label id="address-label">Endereço completo<textarea name="address" autocomplete="street-address" minlength="8" maxlength="400" placeholder="Rua, número, bairro e referência" required></textarea></label><label>Como vai pagar?<select name="payment">'+s.payments.map(p=>'<option value="'+p+'">'+pay[p]+'</option>').join('')+'</select></label><div id="pix-note" class="notice '+(s.payments[0]==='pix'?'':'hidden')+'">Pix com confirmação manual. A chave e as instruções aparecem depois do pedido.</div><label id="change-label" class="hidden">Troco para quanto? (opcional)<input name="change_for" type="number" min="0" step=".01" placeholder="Ex.: 100,00"></label><label>Cupom de desconto<div class="inline-input"><input name="coupon" maxlength="30" placeholder="Digite seu cupom"><button class="btn secondary" type="button" id="apply-coupon">Aplicar</button></div></label><label>Observações do pedido<textarea name="notes" maxlength="500" placeholder="Algum detalhe para a loja?"></textarea></label><div id="checkout-totals" class="checkout-totals"></div><p class="form-error" role="alert" hidden></p><label class="check-row remember"><span><input type="checkbox" name="remember" checked> Lembrar meus dados neste aparelho</span></label><p class="checkout-consent">Ao confirmar, seu nome, telefone e endereço serão enviados à loja para atender este pedido. <a href="/privacidade" target="_blank">Privacidade</a></p><button class="btn full" type="submit">Confirmar pedido '+icon('check')+'</button></form>',true);
+  const d=modal('Finalize seu pedido','<form id="checkout-form"><fieldset><legend>Como você quer receber?</legend><div class="choice-row"><label><input type="radio" name="mode" value="delivery" checked> '+icon('truck')+' Entrega</label><label><input type="radio" name="mode" value="pickup"> '+icon('store')+' Retirada</label></div></fieldset>'+(s.allow_scheduling?'<fieldset><legend>Quando?</legend><div class="choice-row"><label><input type="radio" name="when" value="now" '+(s.open_now?'checked':'disabled')+'> '+icon('clock')+' Agora</label><label><input type="radio" name="when" value="later" '+(s.open_now?'':'checked')+'> '+icon('clock')+' Agendar</label></div><div id="schedule-fields" class="form-grid '+(s.open_now?'hidden':'')+'"><label>Dia<select name="schedule_day">'+slotOptions()+'</select></label><label>Horário<input type="time" name="schedule_time" step="900"></label></div></fieldset>':'')+'<div class="form-grid"><label>Seu nome<input name="customer" autocomplete="name" minlength="2" maxlength="100" required></label><label>WhatsApp com DDD<input name="phone" type="tel" autocomplete="tel" minlength="10" maxlength="20" placeholder="(19) 99999-9999" required></label></div>'+(zones().length?'<label id="zone-label">Seu bairro<select name="zone" required><option value="">Escolha o bairro</option>'+zones().map(z=>'<option value="'+esc(z.name)+'">'+esc(z.name)+' • '+money(z.fee)+'</option>').join('')+'</select></label>':'')+'<label id="cep-label">CEP (opcional, preenche o endereço)<input name="cep" inputmode="numeric" autocomplete="postal-code" maxlength="9" placeholder="00000-000"></label><label id="address-label">Endereço completo<textarea name="address" autocomplete="street-address" minlength="8" maxlength="400" placeholder="Rua, número, bairro e referência" required></textarea></label><label>Como vai pagar?<select name="payment">'+s.payments.map(p=>'<option value="'+p+'">'+pay[p]+'</option>').join('')+'</select></label><div id="pix-note" class="notice '+(s.payments[0]==='pix'?'':'hidden')+'">Pix com confirmação manual. A chave e as instruções aparecem depois do pedido.</div><label id="change-label" class="hidden">Troco para quanto? (opcional)<input name="change_for" type="number" min="0" step=".01" placeholder="Ex.: 100,00"></label><label>Cupom de desconto<div class="inline-input"><input name="coupon" maxlength="30" placeholder="Digite seu cupom"><button class="btn secondary" type="button" id="apply-coupon">Aplicar</button></div></label><label>Observações do pedido<textarea name="notes" maxlength="500" placeholder="Algum detalhe para a loja?"></textarea></label><div id="checkout-totals" class="checkout-totals"></div><p class="form-error" role="alert" hidden></p><label class="check-row remember"><span><input type="checkbox" name="remember" checked> Lembrar meus dados neste aparelho</span></label><div class="checkout-optin"><label><input type="checkbox" name="recovery_consent"> Quero um lembrete no WhatsApp se eu não concluir esta sacola.</label><label><input type="checkbox" name="marketing_consent"> Quero receber ofertas desta loja pelo WhatsApp. Posso cancelar quando quiser.</label></div><p class="checkout-consent">Ao confirmar, seu nome, telefone e endereço serão enviados à loja para atender este pedido. <a href="/privacidade" target="_blank">Privacidade</a></p><button class="btn full" type="submit">Confirmar pedido '+icon('check')+'</button></form>',true);
   let quote=null,version=0;
   const form=$('#checkout-form'),mode=()=> $('[name=mode]:checked',form).value;
   const scheduledFor=()=>$('[name=when]:checked',form)?.value==='later'&&form.schedule_day.value&&form.schedule_time.value?form.schedule_day.value+'T'+form.schedule_time.value:'';
@@ -93,6 +115,14 @@ function checkoutDialog(){
   $$('[name=when]',form).forEach(r=>r.onchange=()=>{$('#schedule-fields').classList.toggle('hidden',r.value!=='later'||!r.checked);refreshQuote();});
   if(form.schedule_day){form.schedule_day.onchange=refreshQuote;form.schedule_time.onchange=refreshQuote;}
   form.phone.addEventListener('change',refreshQuote);
+  let leadTimer;
+  function saveCheckout(){
+    const consent=form.recovery_consent.checked&&form.customer.value.trim().length>=2&&[10,11,12,13].includes(form.phone.value.replace(/\D/g,'').length);
+    return shoppingEvent('checkout',itemPayload(),consent?{recovery_consent:true,customer:form.customer.value.trim(),phone:form.phone.value.trim()}:{recovery_consent:false});
+  }
+  form.addEventListener('input',()=>{clearTimeout(leadTimer);leadTimer=setTimeout(saveCheckout,700);});
+  d.addEventListener('close',()=>{clearTimeout(leadTimer);},{once:true});
+  shoppingEvent('checkout',itemPayload());
   form.cep.addEventListener('input',async()=>{
     const digits=form.cep.value.replace(/\D/g,'');if(digits.length!==8)return;
     try{const r=await fetch('https://viacep.com.br/ws/'+digits+'/json/');const c=await r.json();if(c.erro)return toast('CEP não encontrado.');
@@ -114,17 +144,18 @@ function checkoutDialog(){
   $('#apply-coupon').onclick=refreshQuote;
   $('[name=coupon]',form).oninput=()=>{quote=null;$('#checkout-totals',d).textContent='Aplique o cupom para atualizar o total.';};
   bindForm(form,async formData=>{
+    clearTimeout(leadTimer);await saveCheckout();
     if(!quote){await refreshQuote();if(!quote)throw new Error('Confira os itens e o cupom antes de confirmar.');}
     if($('[name=when]:checked',form)?.value==='later'&&!scheduledFor())throw new Error('Escolha o dia e o horário do agendamento.');
     const {cep,schedule_day,schedule_time,when,remember,...fields}=Object.fromEntries(formData);
-    const body={...fields,zone:mode()==='delivery'?formData.get('zone')||'':'',scheduled_for:scheduledFor(),items:itemPayload(),mode:mode(),expected_total:quote.total,change_for:formData.get('change_for')?cents(formData.get('change_for')):null};
+    const body={...fields,marketing_consent:formData.has('marketing_consent'),shopping_token:shoppingToken(),recovery_token:activeRecovery,zone:mode()==='delivery'?formData.get('zone')||'':'',scheduled_for:scheduledFor(),items:itemPayload(),mode:mode(),expected_total:quote.total,change_for:formData.get('change_for')?cents(formData.get('change_for')):null};
     // A new payload gets a fresh key. Network retries of the same payload reuse it.
     const serialized=JSON.stringify(body);if(orderKey.payload!==serialized)orderKey={payload:serialized,key:crypto.randomUUID()};
     let result;
     try{result=await api('/api/store/'+encodeURIComponent(activeSlug)+'/orders',{method:'POST',headers:{'Idempotency-Key':orderKey.key},body:serialized});}
     catch(error){if(error.status===409)await refreshQuote();throw error;}
     try{if(formData.has('remember'))localStorage.setItem('sca.customer',JSON.stringify({customer:fields.customer,phone:fields.phone,address:fields.address,cep,zone:body.zone}));else localStorage.removeItem('sca.customer');}catch{}
-    cart=[];persist();location.href='/pedido/'+result.token;
+    finishShopping();shoppingReady=false;cart=[];persist();location.href='/pedido/'+result.token;
   });$('[name=payment]',form).dispatchEvent(new Event('change'));refreshQuote();
 }
 function orderMessage(o,s){

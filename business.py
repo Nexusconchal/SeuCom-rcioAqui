@@ -156,7 +156,8 @@ def register_business(app, helpers):
     @h.owner
     def customers():
         # Normalize legacy formatted phone numbers without modifying customer records.
-        phone="REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'(',''),')',''),'+','')"
+        from marketing import NORMAL_PHONE
+        phone = NORMAL_PHONE
         result=h.rows(f'''SELECT {phone} AS phone,MAX(customer) AS name,COUNT(*) AS orders,
             SUM(CASE WHEN status='completed' THEN total ELSE 0 END) AS spent,MAX(created_at) AS last_order
             FROM orders WHERE store_id=? AND status!='cancelled' GROUP BY {phone} ORDER BY spent DESC LIMIT 1000''',(g.store['id'],))
@@ -167,7 +168,8 @@ def register_business(app, helpers):
     def customer_orders(phone):
         if not re.fullmatch(r'\d{10,13}',phone):
             abort(400,description='Telefone inválido.')
-        normalized="REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'(',''),')',''),'+','')"
+        from marketing import NORMAL_PHONE, phone_key
+        normalized, phone = NORMAL_PHONE, phone_key(phone)
         return jsonify(orders=[h.order_dict(o) for o in h.db().execute(f'SELECT * FROM orders WHERE store_id=? AND {normalized}=? ORDER BY id DESC LIMIT 100',(g.store['id'],phone))])
 
     @app.get('/api/admin/stock')
@@ -508,13 +510,17 @@ def register_business(app, helpers):
         """Pedido de exclusão (LGPD): apaga nome, telefone e endereço do cliente, mantendo os valores para a contabilidade."""
         if not re.fullmatch(r'\d{10,13}',phone):
             abort(400,description='Telefone inválido.')
-        normalized="REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'(',''),')',''),'+','')"
+        from marketing import NORMAL_PHONE, phone_key
+        normalized, phone = NORMAL_PHONE, phone_key(phone)
         with h.transaction() as conn:
             found=conn.execute(f'SELECT COUNT(*) FROM orders WHERE store_id=? AND {normalized}=?',(g.store['id'],phone)).fetchone()[0]
             if not found:
                 abort(404,description='Cliente não encontrado.')
             conn.execute(f"""UPDATE orders SET customer='Cliente removido',phone='00000000000',address='',notes='',review=''
                 WHERE store_id=? AND {normalized}=?""",(g.store['id'],phone))
+            key = phone_key(phone)
+            conn.execute('DELETE FROM customer_opt_ins WHERE store_id=? AND phone=?', (g.store['id'], key))
+            conn.execute("UPDATE shopping_sessions SET customer='',phone='',items='[]',recovery_consent=0 WHERE store_id=? AND phone=?", (g.store['id'], key))
             audit('customer.anonymize',str(found)+' pedidos',g.store['id'])
         return jsonify(ok=True,orders=found)
 
