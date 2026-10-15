@@ -96,6 +96,11 @@ class Evolution:
             digits = "55" + digits
         return self._call("POST", "/message/sendText/" + urllib.parse.quote(instance, safe=""), {"number": digits, "text": text})
 
+    def set_webhook(self, instance, url, token):
+        return self._call('POST', '/webhook/set/' + urllib.parse.quote(instance, safe=''),
+            {'webhook': {'enabled': True, 'url': url, 'headers': {'X-Webhook-Token': token},
+                         'byEvents': False, 'base64': False, 'events': ['MESSAGES_UPSERT']}})
+
 
 def background(app, task, *args):
     """Executa em segundo plano (em testes, na hora, para conferir o resultado)."""

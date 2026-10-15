@@ -2,7 +2,9 @@ export const $ = (s, root=document) => root.querySelector(s);
 export const $$ = (s, root=document) => [...root.querySelectorAll(s)];
 export const money = value => new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format((value||0)/100);
 export const esc = value => String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-export const date = value => new Date(value).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+let displayZone='America/Sao_Paulo';
+export function useTimeZone(zone){try{new Intl.DateTimeFormat('pt-BR',{timeZone:zone});displayZone=zone||'America/Sao_Paulo';}catch{displayZone='America/Sao_Paulo';}}
+export const date = value => new Date(value).toLocaleString('pt-BR',{timeZone:displayZone,day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
 export const cents = value => Math.round(Number(String(value).replace(',','.'))*100);
 export const image = value => value || '/static/placeholder.svg';
 export const icons = {
@@ -30,7 +32,7 @@ export const icons = {
 export const icon = name => '<svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">'+(icons[name]||icons.store)+'</svg>';
 export const brand = () => '<a class="brand" href="/" aria-label="SeuComércioAqui, início"><img src="/static/logo.svg" alt="" width="40" height="40"><span>SeuComércio<b>Aqui</b><em class="brand-tag">Cardápio</em><small>Seu negócio. Mais perto.</small></span></a>';
 export const statuses = {new:'Novo',preparing:'Em preparo',ready:'Pronto',delivering:'Em entrega',completed:'Concluído',cancelled:'Cancelado'};
-export const pay = {pix:'Pix',pix_online:'Pix automático (QR Code)',cash:'Dinheiro',card:'Cartão na entrega/retirada'};
+export const pay = {pix:'Pix',pix_online:'Pix automático (QR Code)',cash:'Dinheiro',card:'Cartão na entrega/retirada',credit:'Fiado autorizado'};
 export let auth = {csrf:'',user:null,registration:true};
 export async function bootstrap(){Object.assign(auth,await api('/api/session'));}
 export async function api(url,options={}){
@@ -90,51 +92,41 @@ export function field(name,label,value='',type='text',attrs=''){
 
 // Escolhas do produto (variações e complementos). O servidor confere tudo de novo.
 const groupsOf = p => p.option_groups || [];
+
 export function optionPrice(p, ids){
-  const set = new Set(ids); let price = p.price;
-  p.extras.forEach(x => { if(set.has(x.id)) price += x.price; });
-  groupsOf(p).forEach(g => { const picked = g.options.filter(o => set.has(o.id)); if(!picked.length) return;
-    price += g.pricing === 'max' ? Math.max(...picked.map(o => o.price)) : picked.reduce((s, o) => s + o.price, 0); });
+  let price=p.price;const count=id=>ids.filter(x=>x===id).length;
+  p.extras.forEach(o=>price+=count(o.id)*o.price);
+  groupsOf(p).forEach(g=>{const picked=ids.flatMap(id=>g.options.filter(o=>o.id===id));if(!picked.length)return;const total=picked.reduce((s,o)=>s+o.price,0);price+=g.pricing==='max'?Math.max(...picked.map(o=>o.price)):g.pricing==='average'?Math.floor((total+Math.floor(picked.length/2))/picked.length):total;});
   return price;
 }
 export function fromPrice(p){
-  let price = p.price;
-  groupsOf(p).forEach(g => { if(!g.min) return; const prices = g.options.map(o => o.price).sort((a, b) => a - b);
-    price += g.pricing === 'max' ? prices[0] : prices.slice(0, g.min).reduce((s, v) => s + v, 0); });
-  return price;
+  let price=p.price;
+  groupsOf(p).forEach(g=>{if(!g.min)return;const prices=g.options.filter(o=>o.available!==false).flatMap(o=>Array(o.max_quantity||1).fill(o.price)).sort((a,b)=>a-b);price+=g.pricing==='max'||g.pricing==='average'?(prices[0]||0):prices.slice(0,g.min).reduce((s,x)=>s+x,0);});return price;
 }
-export const hasChoices = p => groupsOf(p).some(g => g.min > 0);
-export function optionLabels(p, ids){
-  const set = new Set(ids), names = [];
-  groupsOf(p).forEach(g => g.options.forEach(o => { if(set.has(o.id)) names.push(g.name + ': ' + o.name); }));
-  p.extras.forEach(x => { if(set.has(x.id)) names.push(x.name); });
-  return names;
+export const hasChoices=p=>groupsOf(p).some(g=>g.min>0);
+export function optionLabels(p,ids){
+  const names=[];const label=(o,prefix='')=>{const n=ids.filter(id=>id===o.id).length;if(n)names.push(prefix+(n>1?n+' × ':'')+o.name);};
+  groupsOf(p).forEach(g=>g.options.forEach(o=>label(o,g.name+': ')));p.extras.forEach(o=>label(o));return names;
 }
-export function validIds(p, ids){
-  const known = new Set([...p.extras.map(x => x.id), ...groupsOf(p).flatMap(g => g.options.map(o => o.id))]);
-  return ids.filter(id => known.has(id));
+export function validIds(p,ids){
+  const options=[...p.extras,...groupsOf(p).flatMap(g=>g.options)],counts={};return ids.filter(id=>{const o=options.find(o=>o.id===id);counts[id]=(counts[id]||0)+1;return o&&o.available!==false&&counts[id]<=(o.max_quantity||1);});
 }
 function groupHint(g){
-  const rule = g.min === g.max ? 'Escolha ' + g.min : g.min ? 'Escolha de ' + g.min + ' a ' + g.max : 'Escolha até ' + g.max;
-  return (g.min ? '<span class="req">Obrigatório</span>' : '<span class="opt">Opcional</span>') + rule + (g.pricing === 'max' && g.max > 1 ? ' • cobra o de maior valor' : '');
+  const rule=g.min===g.max?'Escolha '+g.min:g.min?'Escolha de '+g.min+' a '+g.max:'Escolha até '+g.max;
+  return (g.min?'<span class="req">Obrigatório</span>':'<span class="opt">Opcional</span>')+rule+(g.pricing==='max'&&g.max>1?' • cobra o de maior valor':g.pricing==='average'?' • média dos sabores':'');
 }
-export function optionFields(p, prefix=''){
-  return groupsOf(p).map(g => '<fieldset class="option-group" data-group="' + esc(g.id) + '"><legend>' + esc(g.name) + '<small>' + groupHint(g) + '</small></legend>' +
-    g.options.map(o => '<label class="check-row"><span><input type="' + (g.max === 1 ? 'radio' : 'checkbox') + '" name="' + prefix + 'g_' + esc(g.id) + '" value="' + esc(o.id) + '">' + esc(o.name) + '</span>' + (o.price ? '<b>' + (g.pricing === 'max' || (g.min && !p.price) ? '' : '+ ') + money(o.price) + '</b>' : '') + '</label>').join('') + '</fieldset>').join('') +
-    (p.extras.length ? '<fieldset class="option-group"><legend>Adicionais<small><span class="opt">Opcional</span></small></legend>' + p.extras.map(x => '<label class="check-row"><span><input type="checkbox" name="' + prefix + 'extras" value="' + esc(x.id) + '">' + esc(x.name) + '</span><b>+ ' + money(x.price) + '</b></label>').join('') + '</fieldset>' : '');
+function choice(o,name,radio=false){
+  const unavailable=o.available===false,max=Math.min(o.max_quantity||1,o.capacity??30);
+  return '<label class="check-row"><span>'+(max>1?'<input type="number" class="option-quantity" aria-label="Quantidade de '+esc(o.name)+'" name="'+name+'" data-option="'+esc(o.id)+'" min="0" max="'+max+'" value="0" '+(unavailable?'disabled':'')+'>':'<input type="'+(radio?'radio':'checkbox')+'" name="'+name+'" value="'+esc(o.id)+'" '+(unavailable?'disabled':'')+'>')+esc(o.name)+(unavailable?' (indisponível)':'')+'</span><b>'+money(o.price)+'</b></label>';
 }
-export function readOptions(root, p, prefix=''){
-  const ids = []; let error = '';
-  groupsOf(p).forEach(g => { const picked = $$('input[name="' + prefix + 'g_' + g.id + '"]:checked', root).map(x => x.value); ids.push(...picked);
-    if(!error && (picked.length < g.min || picked.length > g.max)) error = g.name + ': ' + (g.min === g.max ? 'escolha ' + g.min : picked.length < g.min ? 'escolha pelo menos ' + g.min : 'escolha até ' + g.max) + '.'; });
-  ids.push(...$$('input[name="' + prefix + 'extras"]:checked', root).map(x => x.value));
-  return {ids, error};
+export function optionFields(p,prefix=''){
+  return groupsOf(p).map(g=>'<fieldset class="option-group" data-group="'+esc(g.id)+'"><legend>'+esc(g.name)+'<small>'+groupHint(g)+'</small></legend>'+g.options.map(o=>choice(o,prefix+'g_'+esc(g.id),g.max===1)).join('')+'</fieldset>').join('')+(p.extras.length?'<fieldset class="option-group"><legend>Adicionais<small><span class="opt">Opcional</span></small></legend>'+p.extras.map(o=>choice(o,prefix+'extras')).join('')+'</fieldset>':'');
 }
-export function bindOptionLimits(root, p, prefix='', onChange=()=>{}){
-  groupsOf(p).forEach(g => $$('input[name="' + prefix + 'g_' + g.id + '"]', root).forEach(input => input.addEventListener('change', () => {
-    const checked = $$('input[name="' + prefix + 'g_' + g.id + '"]:checked', root);
-    if(g.max > 1 && checked.length > g.max){ input.checked = false; toast('Em ' + g.name + ' você pode escolher até ' + g.max + '.'); }
-    onChange();
-  })));
-  $$('input[name="' + prefix + 'extras"]', root).forEach(x => x.addEventListener('change', onChange));
+function selected(root,name){return $$('input[name="'+name+'"]',root).flatMap(x=>x.type==='number'?Array(Math.max(0,Math.min(30,Math.floor(Number(x.value))||0))).fill(x.dataset.option):x.checked?[x.value]:[]);}
+export function readOptions(root,p,prefix=''){
+  const ids=[];let error='';groupsOf(p).forEach(g=>{const picked=selected(root,prefix+'g_'+g.id);ids.push(...picked);if(!error&&(picked.length<g.min||picked.length>g.max))error=g.name+': '+(g.min===g.max?'escolha '+g.min:picked.length<g.min?'escolha pelo menos '+g.min:'escolha até '+g.max)+'.';});ids.push(...selected(root,prefix+'extras'));return {ids,error};
+}
+export function bindOptionLimits(root,p,prefix='',onChange=()=>{}){
+  groupsOf(p).forEach(g=>$$('input[name="'+prefix+'g_'+g.id+'"]',root).forEach(x=>x.addEventListener('change',()=>{const count=selected(root,prefix+'g_'+g.id).length;if(count>g.max){if(x.type==='number')x.value=Math.max(0,Number(x.value)-(count-g.max));else x.checked=false;toast('Em '+g.name+' você pode escolher até '+g.max+'.');}onChange();})));
+  $$('input[name="'+prefix+'extras"]',root).forEach(x=>x.addEventListener('change',onChange));
 }

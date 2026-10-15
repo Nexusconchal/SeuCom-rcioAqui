@@ -1,5 +1,7 @@
 # Revisão funcional — outubro de 2026
 
+**Registro histórico da primeira revisão.** Para o estado atual e a entrega de marketing/fichas técnicas, veja [a comparação de 14 de outubro](COMPETITIVE_REVIEW.md). Pix online, mensagens de status, fidelidade e conexão MotoJá foram implementados depois deste registro; as referências abaixo a funcionalidades pendentes não descrevem o código atual.
+
 A referência do PediPlus veio das capturas fornecidas pelo proprietário. A pesquisa do [Cardápio Web](https://cardapioweb.com/) e da sua [documentação de desempenho](https://ajuda.cardapioweb.com/gestao/desempenho) orientou prioridades de operação: pedidos, produção, estoque, clientes, financeiro e integrações. A interface mantém a identidade do SeuComércioAqui. Não houve cópia de código, marca ou telas dos concorrentes.
 
 ## Entregue nesta revisão

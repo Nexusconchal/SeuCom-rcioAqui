@@ -1,5 +1,29 @@
 # API
 
+## Marketing, sugestões e fichas técnicas
+
+Rotas administrativas abaixo exigem sessão de dono/gerente, CSRF nas alterações e escopo da própria loja. Caixa/cozinha não têm acesso. Quantidades de ingredientes usam milésimos da unidade (150 = 0,150 kg), enquanto preços continuam em centavos.
+
+| Método | Endpoint | Contrato |
+| --- | --- | --- |
+| GET | /api/admin/ingredients | Insumos, produtos com receita/custo/capacidade e 100 movimentos recentes |
+| POST | /api/admin/ingredients | name, unit: kg/l/un, stock, low_stock, unit_cost: inteiro ou null |
+| PATCH | /api/admin/ingredients/:id | name, low_stock, unit_cost, active; não muda unidade/saldo |
+| POST | /api/admin/ingredients/:id/adjust | delta positivo/negativo e reason; impede saldo negativo |
+| PUT | /api/admin/products/:id/recipe | ingredients: [{ingredient_id,quantity}]; [] remove a ficha |
+| GET | /api/admin/marketing | Público, funil de 30 dias, sacolas autorizadas, rascunhos e sugestões |
+| PUT | /api/admin/marketing/suggestions | product_ids: até 12 produtos ativos da loja |
+| POST | /api/admin/marketing/campaigns | name, segment: all/new/loyal/vip/inactive, message; salva rascunho |
+| POST | /api/admin/marketing/campaigns/preview | Mesmo corpo; prévia de até 100 destinatários autorizados, sem envio |
+| POST | /api/store/:slug/shopping | event: visit/cart/checkout, token opcional, items; recovery_consent opcional (booleano), customer/phone só quando autorizado |
+| GET | /api/store/:slug/recover/:token | Link assinado de 7 dias; devolve apenas itens, sem contato/endereço |
+| POST | /api/store/:slug/unsubscribe/:token | Link assinado; revoga ofertas e apaga contato de sacolas pendentes |
+| POST | /api/store/:slug/recovery-unsubscribe/:token | Revoga o lembrete da sacola indicada |
+
+Pedidos aceitam marketing_consent (booleano, padrão false), shopping_token e recovery_token opcionais. O preço, receita, estoque e custo são sempre calculados pelo servidor. Repetir a chave idempotente não duplica consumo nem conversão. Campanhas e lembretes são enviados individualmente pelo lojista ao abrir o WhatsApp; estas APIs não disparam mensagens.
+
+O público considera apenas pedidos concluídos e agrupa telefones com ou sem +55. Uma sacola só aparece para recuperação depois de 30 minutos sem atualização, por no máximo 7 dias, e quando não existe compra posterior daquele telefone. O funil conta sessões e pedidos distintos; não representa receita. A limpeza de contatos antigos e sessões acontece durante o uso da rota shopping; o acesso ao link expira independentemente da limpeza.
+
 Frontend e API no mesmo host. Valores monetários são inteiros em centavos (BRL). Datas são ISO 8601 UTC; a interface usa America/Sao_Paulo. Erros retornam um objeto {"error":"Mensagem"} com código HTTP.
 
 ## Sessão
@@ -136,4 +160,32 @@ O contrato completo, exemplos curl, tratamento de erros e ciclo de consulta est�
 
 Use `Authorization: Bearer sca_...`. A chave completa aparece uma vez; o banco guarda apenas hash e prefixo. Limite de 120 requisições por minuto por chave, independente de IP. A autorização Bearer dispensa CSRF exclusivamente em `/api/v1/`; não concede acesso a rotas administrativas. Endereços e telefones de entrega são dados privados autorizados ao parceiro; custos internos e confirmação de pagamento não são expostos.
 
-Vincule somente pedidos prontos para entrega. Repetir o vínculo com a mesma chave/parceiro/id externo é idempotente. Eventos exigem vínculo da mesma chave e seguem ready → delivering → completed. O mesmo event_id/corpo não repete a transição; corpo diferente retorna 409. Integração não confirma pagamento e não cancela pedidos. O parceiro deve impedir duplicação da corrida antes do claim, manter os ids externos e deduplicar eventos. O MotoJá ainda precisa de um adaptador no próprio servidor; não há envio automático somente por gerar uma chave.
+Vincule somente pedidos prontos para entrega. Repetir o vínculo com a mesma chave/parceiro/id externo é idempotente. Eventos exigem vínculo da mesma chave e seguem ready → delivering → completed. O mesmo event_id/corpo não repete a transição; corpo diferente retorna 409. Integração não confirma pagamento e não cancela pedidos. O parceiro deve impedir duplicação da corrida antes do claim, manter os ids externos e deduplicar eventos. MotoJá possui conector próprio; gerar uma chave de parceiro não ativa a conexão sozinho.
+
+
+## Operação ampliada
+
+Mutações privadas exigem sessão/CSRF. Cozinha avança preparo/itens; Caixa opera pedidos, recebimentos, salão e atendimento. Configuração de crédito/receitas/financeiro fica com dono/gerente; rede e webhook exigem dono. Consulte [o guia](OPERATIONS.md).
+
+| Recurso | Endpoints principais |
+| --- | --- |
+| PDV | GET `/api/admin/pos/catalog`, POST `/api/admin/pos/quote`, POST `/api/admin/orders` (Idempotency-Key) |
+| Caixa | GET `/api/admin/cash`; POST `/cash/open`, `/cash/adjust`, `/cash/close` |
+| Receber/estornar | POST `/api/admin/orders/:id/receipts`: amount, method cash/pix/card, kind receipt/refund, reason; refund exige original_id; Idempotency-Key |
+| Salão | GET `/api/admin/dining`; POST `/dining/tables`, `/tables/:id/open`, `/accounts/:id/transfer`, `/accounts/:id/close`; pedido manual recebe account_id |
+| Cozinha | PATCH `/api/admin/order-items/:id/kitchen`: state preparing/ready |
+| Catálogo | GET/POST `/api/admin/catalog-rules`, PUT/DELETE `/:id`; PUT `/api/admin/operation-settings` timezone/auto_accept |
+| Receitas | PUT `/api/admin/products/:id/recipe`, `/products/:id/options/:option_id/recipe`: ingredients [{ingredient_id,quantity}] |
+| Produção | PUT `/api/admin/ingredients/:id/production-recipe`, POST `/ingredients/:id/produce`: quantity, Idempotency-Key |
+| Financeiro | GET `/api/admin/purchasing`; POST/PUT `/suppliers`; POST `/obligations`, `/obligations/:id/settle` (Idempotency-Key), `/void`; GET/POST `/api/admin/credit` |
+| CRM | GET/POST/PUT `/api/admin/marketing/segments`; GET `/marketing/queue`; POST `/marketing/campaigns/:id/queue` due_at ISO com fuso, `/cancel-queue` |
+| Cashback | GET/PUT `/api/admin/cashback`; POST `/api/store/:slug/wallet/code` phone; POST `/wallet/verify` challenge/code; GET `/wallet` Bearer token; quote/order wallet_token/cashback_use |
+| Atendimento | GET `/api/admin/inbox`; GET/DELETE `/inbox/:id`; POST `/inbox/:id/claim`, `/reply` (Idempotency-Key), `/close`, `/inbox/connect`; PUT `/inbox/bot` |
+| Webhook | POST `/webhooks/inbox/:store_id`: X-Webhook-Token individual e instance coincidente; sem sessão/CSRF |
+| Entregador | POST `/api/admin/drivers/:id/location-link` revoke opcional; GET `/api/driver/route`, POST `/api/driver/location` Bearer individual; mutação também CSRF |
+| Despacho | GET `/api/admin/delivery-map`, POST `/delivery-map/dispatch`: driver_id e order_ids prontos, até 10, atômico |
+| CEP | GET/PUT `/api/admin/shipping`: zones/expected_version; quote/order aceitam cep, latitude/longitude opcionais |
+| Rede | GET `/api/network/:slug`; GET/POST `/api/admin/network`; POST `/network/invite`, `/preview-invite`, `/accept`, `/:id/leave`; DELETE `/network/stores/:id` |
+| Relatórios | GET `/api/admin/report?format=pdf|xlsx&days=1|7|30|90|365`, month AAAA-MM ou from/to AAAA-MM (até 366 dias); `/api/admin/export` CSV |
+
+Fiado só no pedido manual para telefone autorizado; recebimento passa pelo Caixa. Pix online não recebe baixa manual no livro. Estorno não excede o original e não aciona devolução bancária. Carteira, entregador e convites usam tokens por hash. Anonimização preserva valores financeiros e remove/cancela contatos/filas pessoais.

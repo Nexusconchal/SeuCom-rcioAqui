@@ -18,6 +18,11 @@ Cardápio digital e gestão de pedidos para pequenos comércios. Frontend respon
 - Financeiro com custos de produtos e complementos, entrega, taxas de pagamento, comissão e lucro estimado. Custos pendentes impedem exibir um lucro enganoso.
 - Cozinha com fichas de produção e atualização dos pedidos; cadastro de pedidos de balcão ou telefone.
 - Clientes com histórico de compras; estoque com alertas, ajustes justificados e histórico de movimentações.
+- **Marketing:** segmentos de primeira compra, recorrência, VIP e inatividade; total comprado, ticket médio, campanhas em rascunho e prévia personalizada para clientes que autorizaram ofertas. Envio individual pelo WhatsApp.
+- **Recuperação de sacolas:** autorização separada no checkout, lista após 30 minutos, link assinado de 7 dias, restauração com preços atuais e cancelamento de lembretes. Não há disparo automático.
+- **Sugestões na sacola:** até 12 produtos escolhidos pelo lojista, com até 3 sugestões disponíveis que o cliente ainda não adicionou.
+- **Funil próprio:** visitas, sacolas, checkout e pedidos criados nos últimos 30 dias; mede sessões anônimas, sem confundir criação de pedido com pagamento ou faturamento.
+- **Insumos e fichas técnicas:** kg/l/un com 3 casas decimais, ajustes justificados, capacidade e custo por receita. Reserva transacional com proteção contra venda simultânea acima do saldo e devolução exata no cancelamento. Alterar uma receita não modifica custos de pedidos anteriores.
 - Painel exclusivo do dono da plataforma: lojas, contratos, mensalidades, comissões, recebimentos, despesas, resultado de caixa e histórico administrativo.
 - API de entregas com chaves por loja, permissões, revogação, vinculação de pedidos e eventos sem duplicação. Documentação em `/static/api-docs.html`.
 - Nome, logo, capa, cor, contato, taxa, pedido mínimo e pagamentos configuráveis.
@@ -35,7 +40,7 @@ Cardápio digital e gestão de pedidos para pequenos comércios. Frontend respon
 - Central do Dono em **/admin**, separada do painel das lojas, com login próprio e sem link no painel dos lojistas (o endereço antigo /plataforma redireciona). Conteúdo: vendas mês a mês com gráfico e ranking das lojas, exportação CSV, bloqueio/desbloqueio com motivo exibido ao lojista, mensalidade promocional com prazo, mensalidades em aberto no mês, saúde das lojas e avisos/promoções exibidos no painel de todos os lojistas.
 - Alteração de senha, logout e recuperação administrativa por comando.
 
-**Pagamentos:** Pix é confirmado manualmente pelo lojista. Dinheiro e cartão são recebidos na entrega ou retirada. Não há gateway bancário, captura de cartão ou confirmação automática de Pix. O link do WhatsApp abre uma conversa com a loja; não envia mensagens automaticamente.
+**Pagamentos:** Pix manual é conferido pelo lojista; Pix online tem confirmação pelo Mercado Pago quando a loja conecta sua conta. Dinheiro e cartão são recebidos na entrega ou retirada; não há captura de cartão no checkout. O link do WhatsApp abre uma conversa. Mensagens de status podem ser enviadas pela conexão Evolution API; atendimento por chatbot ainda não está implementado.
 
 **Plataforma:** mensalidades e comissões configuram contratos; recebimentos são lançados quando efetivamente pagos. Vendas dos lojistas não são receita da plataforma. O conector do MotoJá precisa ser instalado no servidor do parceiro; gerar uma chave aqui não instala esse conector. Veja a [revisão funcional e próximos passos](docs/PRODUCT_REVIEW.md).
 
@@ -202,8 +207,11 @@ docs/API.md               Endpoints e exemplos
 
 ## Escopo
 
-Esta versão cobre cardápio, pedidos, gestão financeira e administração da plataforma. Disponibiliza uma API de entregas para parceiros; conectores externos ainda precisam ser implementados no parceiro. Não integra emissão fiscal, impressoras via drivers, WhatsApp automático ou conciliação bancária. A impressão usa o navegador.
+Esta versão inclui cardápio, PDV, caixa por turno, recebimentos parciais/estornos registrados, mesas/comandas, cozinha por item/setor, receitas de produtos/adicionais, produção de preparos, contas/fornecedores, fiado, promoções, CRM/RFV/públicos, cashback com código, atendimento WhatsApp, campanhas em fila, entrega por CEP/posição do entregador, rede e **Gerar relatório** separado. Consulte [o guia](docs/OPERATIONS.md) e [a comparação com limites](docs/EXPANSION_REVIEW.md).
 
-As sessões são assinadas; senhas usam scrypt; login limitado por IP e por conta (10 tentativas/15 min); entradas na Central do Dono ficam no histórico; alterações exigem CSRF; preços e estoque são validados pelo servidor; uploads são reprocessados; o painel limita os dados à loja autenticada. O link do pedido mostra itens, valores e status. Os relatórios usam a data de criação do pedido e excluem cancelados. Cancelamentos não executam reembolsos bancários.
+Mercado Pago, Evolution e MotoJá dependem de configuração. Campanhas e respostas precisam de worker; não houve ativação externa nesta revisão. Emissão fiscal, marketplaces, cartão online/TEF e IA não estão implementados. Salão não tem taxa de serviço/QR por mesa; rede não consolida financeiro. Impressão usa navegador e pode separar setor.
+
+
+As sessões são assinadas; senhas usam scrypt; login limitado por IP e por conta (10 tentativas/15 min); entradas na Central do Dono ficam no histórico; alterações exigem CSRF; preços e estoque são validados pelo servidor; uploads são reprocessados; o painel limita os dados à loja autenticada. O link do pedido mostra itens, valores e status. Os relatórios identificam cancelados, usam criação do pedido para vendas e têm tabelas de recebimentos/estornos por operação; recebimentos parciais entram nos saldos. Cancelamentos não executam reembolsos bancários.
 
 Referências: [segurança no Flask](https://flask.palletsprojects.com/en/stable/web-security/), [uploads](https://flask.palletsprojects.com/en/stable/patterns/fileuploads/), [SQLite](https://docs.python.org/3/library/sqlite3.html).

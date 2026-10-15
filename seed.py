@@ -50,7 +50,7 @@ def seed(conn, email, password):
                 status,idempotency_key,payload_hash,tracking_token,created_at,updated_at,address) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (sid, 1040+i, hashlib.sha256(token.encode()).hexdigest(), names[i], "11900000000", "delivery", "cash", 2900*qty, 500,
                  total, status, secrets.token_hex(16), "demo", token, created, created, "Endereço de exemplo")).lastrowid
-            conn.execute("INSERT INTO order_items(order_id,product_id,name,quantity,unit_price) VALUES(?,?,?,?,?)", (oid, pids[0], "Burger da casa", qty, 2900))
+            conn.execute("INSERT INTO order_items(order_id,product_id,name,quantity,unit_price,kitchen_state) VALUES(?,?,?,?,?,?)", (oid, pids[0], "Burger da casa", qty, 2900,'ready' if status in ('ready','delivering','completed') else 'preparing' if status=='preparing' else 'new'))
             for event in ("new", "preparing", "ready"):
                 conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, event, created))
                 if event == status:
