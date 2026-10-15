@@ -224,11 +224,16 @@ def register_business(app, helpers):
         today=datetime.now(ZONE).date().isoformat()
         stores=h.rows('''SELECT s.id,s.name,s.slug,s.open,s.enabled,s.blocked_reason,s.commission_bps,s.monthly_fee,
              s.promo_fee,s.promo_until,s.promo_label,s.trial_until,s.billing_exempt,s.sub_status,s.paid_until,s.sub_next_payment,
-             s.created_at,s.phone,s.pix_key,s.address,u.email,
+             s.created_at,s.phone,s.pix_key,s.address,u.email,u.created_at AS account_created_at,s.subscribed_at,
+             bp.paid_at AS last_plan_paid_at,bp.created_at AS last_plan_payment_recorded_at,
              COALESCE(o.orders,0) AS orders,COALESCE(o.revenue,0) AS revenue,COALESCE(o.commission,0) AS commission,
              COALESCE(o.missing,0) AS missing_fees,COALESCE(l.received,0) AS received,COALESCE(l.expenses,0) AS expenses,
              COALESCE(m.received,0) AS received_month,a.last_order,COALESCE(p.products,0) AS products
              FROM stores s JOIN users u ON u.id=s.owner_id LEFT JOIN
+             (SELECT store_id,paid_at,created_at,ROW_NUMBER() OVER (PARTITION BY store_id
+              ORDER BY CASE WHEN paid_at='' THEN created_at ELSE paid_at END DESC,id DESC) AS position
+              FROM platform_ledger WHERE kind='receipt' AND voided_at IS NULL AND is_subscription=1) bp
+              ON bp.store_id=s.id AND bp.position=1 LEFT JOIN
              (SELECT store_id,COUNT(*) AS orders,SUM(total) AS revenue,SUM(platform_fee) AS commission,
               SUM(CASE WHEN platform_fee IS NULL THEN 1 ELSE 0 END) AS missing FROM orders WHERE status='completed'
               AND created_at>=? GROUP BY store_id) o ON o.store_id=s.id LEFT JOIN
@@ -569,7 +574,11 @@ def register_business(app, helpers):
                 # Pagamento manual (ex.: Pix direto para a plataforma) também libera a loja por um mês.
                 paying=conn.execute('SELECT * FROM stores WHERE id=?',(sid,)).fetchone()
                 if amount>=effective_fee(paying,datetime.now(ZONE).date().isoformat()):
+                    stamp=h.now()
                     conn.execute('UPDATE stores SET paid_until=? WHERE id=?',(extend_paid_until(paying['paid_until'],datetime.now(ZONE).date()),sid))
+                    if not paying['billing_exempt'] and effective_fee(paying,datetime.now(ZONE).date().isoformat())>0:
+                        conn.execute('UPDATE platform_ledger SET is_subscription=1 WHERE id=?',(lid,))
+                        conn.execute("UPDATE stores SET subscribed_at=CASE WHEN subscribed_at='' THEN ? ELSE subscribed_at END WHERE id=?",(stamp,sid))
             audit('ledger.'+kind,str(lid),sid)
         return jsonify(id=lid),201
 

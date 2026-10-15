@@ -527,7 +527,7 @@ def test_subscription_trial_free_month_and_monthly_charge(app, shop):
     assert client.get("/api/admin/billing").json["state"] == "active"
     assert send(client, "POST", "/api/store/minha-loja/orders", payload(pid), uuid.uuid4().hex).status_code == 201
     # Cobrança mensal aprovada vira recebimento na Central do Dono, uma vez só.
-    mp.charges["pre0001"].append({"id": 777, "transaction_amount": 59.99, "debit_date": datetime.now(ZONE).date().isoformat(), "payment": {"id": 555, "status": "approved"}})
+    mp.charges["pre0001"].append({"id": 777, "transaction_amount": 59.99, "debit_date": datetime.now(ZONE).date().isoformat(), "payment": {"id": 555, "status": "approved", "date_approved": datetime.now(timezone.utc).isoformat()}})
     for _ in range(2):
         app.test_client().post(hook_url.split("localhost")[-1], json={"type": "subscription_authorized_payment", "data": {"id": "777"}})
         send(client, "POST", "/api/admin/billing/sync", {})

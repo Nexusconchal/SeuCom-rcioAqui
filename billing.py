@@ -80,6 +80,19 @@ def extend_paid_until(current, paid_on):
     return max(current or "", until)
 
 
+def billing_timestamp(value):
+    """Keep real provider instants; a date without a time/offset is not an instant."""
+    if not isinstance(value, str) or 'T' not in value:
+        return ''
+    try:
+        moment = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if moment.tzinfo is None:
+            return ''
+        return moment.astimezone(timezone.utc).isoformat(timespec='seconds')
+    except (ValueError, OverflowError):
+        return ''
+
+
 def register_billing(app, helpers):
     h = SimpleNamespace(**helpers)
     config = app.config
@@ -114,16 +127,18 @@ def register_billing(app, helpers):
                 "payer_email": store["sub_payer_email"], "next_payment": store["sub_next_payment"], "paid_until": store["paid_until"],
                 "configured": bool(config.get("MP_PLATFORM_ACCESS_TOKEN")), "manage_url": "https://www.mercadopago.com.br/subscriptions"}
 
-    def record_payment(store_id, payment_id, amount, paid_on, description):
+    def record_payment(store_id, payment_id, amount, paid_on, description, paid_at=''):
         """Lança o recebimento na Central do Dono uma única vez e libera a loja até o próximo mês."""
         key = "mp-sub-" + str(payment_id)
         with h.transaction() as conn:
             if conn.execute("SELECT id FROM platform_ledger WHERE idempotency_key=?", (key,)).fetchone():
                 return False
-            conn.execute("""INSERT INTO platform_ledger(store_id,kind,description,amount,created_at,idempotency_key,payload_hash)
-                VALUES(?,?,?,?,?,?,?)""", (store_id, "receipt", description, amount, h.now(), key, "mercadopago"))
+            stamp = h.now()
+            conn.execute("""INSERT INTO platform_ledger(store_id,kind,description,amount,created_at,idempotency_key,payload_hash,paid_at,is_subscription)
+                VALUES(?,?,?,?,?,?,?,?,1)""", (store_id, "receipt", description, amount, stamp, key, "mercadopago", billing_timestamp(paid_at)))
             current = conn.execute("SELECT paid_until FROM stores WHERE id=?", (store_id,)).fetchone()[0]
-            conn.execute("UPDATE stores SET paid_until=? WHERE id=?", (extend_paid_until(current, paid_on), store_id))
+            conn.execute("UPDATE stores SET paid_until=?,subscribed_at=CASE WHEN subscribed_at='' THEN ? ELSE subscribed_at END WHERE id=?",
+                         (extend_paid_until(current, paid_on), stamp, store_id))
         return True
 
     def sync(store):
@@ -135,7 +150,10 @@ def register_billing(app, helpers):
             return store
         status = detail.get("status") or store["sub_status"]
         next_payment = (detail.get("next_payment_date") or "")[:25]
-        h.db().execute("UPDATE stores SET sub_status=?,sub_next_payment=? WHERE id=?", (status, next_payment, store["id"]))
+        # Confirmation is observed here, not inferred from invoice creation or next debit.
+        confirmed = h.now() if status == 'authorized' and store['sub_status'] != 'authorized' else ''
+        h.db().execute("UPDATE stores SET sub_status=?,sub_next_payment=?,subscribed_at=CASE WHEN subscribed_at='' THEN ? ELSE subscribed_at END WHERE id=?",
+                       (status, next_payment, confirmed, store["id"]))
         results = mp().authorized_payments(token(), store["sub_id"]).get("results") or []
         for item in results:
             payment = item.get("payment") or {}
@@ -144,12 +162,24 @@ def register_billing(app, helpers):
             amount = round(float(item.get("transaction_amount") or 0) * 100)
             if amount <= 0:
                 continue
+            payment_id = payment.get('id') or item.get('id')
+            if h.one('SELECT id FROM platform_ledger WHERE idempotency_key=?', ('mp-sub-' + str(payment_id),)):
+                continue
+            paid_at = billing_timestamp(payment.get('date_approved'))
+            if not paid_at and payment.get('id'):
+                try:
+                    approved = mp().get_payment(token(), payment['id'])
+                    if approved.get('status') == 'approved':
+                        paid_at = billing_timestamp(approved.get('date_approved'))
+                except PaymentError:
+                    # A missing approval instant must not be replaced with a fabricated time.
+                    pass
             raw_date = (item.get("debit_date") or item.get("date_created") or h.now())[:10]
             try:
                 paid_on = date.fromisoformat(raw_date)
             except ValueError:
                 paid_on = datetime.now(ZONE).date()
-            record_payment(store["id"], payment.get("id") or item.get("id"), amount, paid_on, "Assinatura mensal (Mercado Pago)")
+            record_payment(store["id"], payment_id, amount, paid_on, "Assinatura mensal (Mercado Pago)", paid_at)
         return h.one("SELECT * FROM stores WHERE id=?", (store["id"],))
 
     app.extensions["billing_sync"] = sync
@@ -252,7 +282,8 @@ def register_billing(app, helpers):
         ok = (info.get("status") == "approved" and str(info.get("external_reference", "")).startswith(f"plan-{store['id']}-")
               and round(float(info.get("transaction_amount", 0)) * 100) == price())
         if ok:
-            record_payment(store["id"], "pix-" + store["sub_pix_id"], price(), datetime.now(ZONE).date(), "Mensalidade por Pix (Mercado Pago)")
+            paid_at = billing_timestamp(info.get('date_approved'))
+            record_payment(store["id"], "pix-" + store["sub_pix_id"], price(), datetime.now(ZONE).date(), "Mensalidade por Pix (Mercado Pago)", paid_at)
             h.db().execute("UPDATE stores SET sub_pix_id='',sub_pix_code='',sub_pix_expires='' WHERE id=?", (store["id"],))
         return ok
 
