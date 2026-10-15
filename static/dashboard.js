@@ -127,7 +127,7 @@ function ticketHTML(o){
     '<p><b>'+esc(o.customer)+'</b><br>'+esc(o.phone)+'</p><p class="t-box">'+(o.mode==='delivery'?'ENTREGA'+(o.zone?' • '+esc(o.zone):'')+'<br>'+esc(o.address):'RETIRADA NO BALCÃO')+'</p><hr>'+
     o.items.map(i=>'<div class="t-item"><b>'+i.quantity+'x '+esc(i.name)+'</b><span>'+money(i.unit_price*i.quantity)+'</span></div>'+i.extras.map(x=>'<div class="t-sub">+ '+esc(x.name)+'</div>').join('')+(i.notes?'<div class="t-sub">OBS: '+esc(i.notes)+'</div>':'')).join('')+
     (o.notes?'<hr><p><b>Observações:</b> '+esc(o.notes)+'</p>':'')+'<hr>'+line('Produtos',money(o.subtotal))+(o.delivery_fee?line('Entrega',money(o.delivery_fee)):'')+(o.discount?line('Desconto','- '+money(o.discount)):'')+'<div class="t-line t-total"><span>TOTAL</span><span>'+money(o.total)+'</span></div>'+
-    line('Pagamento',pay[o.payment]+(o.paid?' (PAGO)':''))+(o.change_for?line('Troco para',money(o.change_for)):'')+'<p class="t-center t-foot">SeuComércioAqui</p></div>';
+    line('Pagamento',pay[o.payment]+(o.paid?' (PAGO)':''))+(o.change_for?line('Troco para',money(o.change_for)):'')+'<p class="t-center t-foot">Pedido • documento não fiscal<br>SeuComércioAqui</p></div>';
 }
 // Via do motoboy: só o que ele precisa na rua, em letra grande, com QR code que abre o endereço no mapa.
 function driverSlipHTML(o){
@@ -140,7 +140,15 @@ function driverSlipHTML(o){
 }
 const pref=(k,d)=>{try{return localStorage.getItem('sca.'+k)??d;}catch{return d;}};
 const setPref=(k,v)=>{try{localStorage.setItem('sca.'+k,v);}catch{}};
-const paperWidth=()=>pref('paper','80')==='58'?'58':'80';
+const printProfiles={'80':{label:'Bobina de 80 mm',width:72,max:76},'58':{label:'Bobina de 58 mm',width:48,max:50},'76':{label:'Bobina de 76 mm',width:68,max:68},'112':{label:'Bobina de 112 mm',width:104,max:104},a4:{label:'Folha A4',width:190,max:200},custom:{label:'Outra largura',width:72,max:200}};
+const paperWidth=()=>Object.hasOwn(printProfiles,pref('paper','80'))?pref('paper','80'):'80';
+const printContentWidth=()=>{const profile=printProfiles[paperWidth()],saved=Number(pref('print-width.'+paperWidth(),profile.width));return Number.isFinite(saved)&&saved>=32&&saved<=profile.max?saved:profile.width;};
+const printFont=()=>{const saved=Number(pref('print-font',paperWidth()==='58'?11:12));return [11,12,14,16].includes(saved)?saved:12;};
+function styleTicketArea(area,settings={paper:paperWidth(),width:printContentWidth(),font:printFont()}){
+  area.className='paper-'+settings.paper;
+  area.style.setProperty('--ticket-width',settings.width+'mm');
+  area.style.setProperty('--ticket-font',settings.font+'px');
+}
 const driverCopy=()=>pref('driverslip','0')==='1';
 let printQueue=Promise.resolve();
 // what: 'all' = notinha da loja (+ via do motoboy, se ligada e for entrega); 'driver' = só a via do motoboy.
@@ -150,22 +158,34 @@ function kitchenSlipHTML(o,sector){
 }
 const printSector=()=>{try{return localStorage.getItem('sca.print-sector.'+store.id)||'';}catch{return '';}};
 function autoPrintTicket(o){const sector=printSector();if(!sector)return printTicket(o);if(o.items.some(i=>(i.production_sector||'Cozinha')===sector))printTicket(o,'sector:'+sector);}
-function printTicket(o,what='all'){
-  printQueue=printQueue.then(()=>new Promise(resolve=>{
+function printJobHTML(o,what='all'){
+  const sector=typeof what==='string'&&what.startsWith('sector:')?what.slice(7):null;
+  const slip=sector===null&&o.mode==='delivery'&&(what==='driver'||driverCopy());
+  return sector!==null?kitchenSlipHTML(o,sector):(what==='driver'?'':ticketHTML(o))+(slip?(what==='driver'?'':'<div class="t-cut"></div>')+driverSlipHTML(o):'');
+}
+function calibrationHTML(){return '<div class="t-calibration"><b>TESTE DE IMPRESSÃO</b><p>Acentos: pão, ação, açúcar, café.<br>Valores: R$ 12,34 • 2 × produto.</p><div class="t-ruler">20 mm</div><p>Confira a linha com uma régua. Se cortar texto, reduza a área útil; se a linha mudar de tamanho, confira a escala de 100% no navegador.</p></div>';}
+function printTicket(o,what='all',calibration=false){
+  const html=printJobHTML(o,what)+(calibration?calibrationHTML():'');
+  const settings={paper:paperWidth(),width:printContentWidth(),font:printFont()};
+  printQueue=printQueue.catch(()=>{}).then(()=>new Promise(resolve=>{
     let area=$('#print-area');if(!area){area=document.createElement('div');area.id='print-area';document.body.appendChild(area);}
-    const sector=typeof what==='string'&&what.startsWith('sector:')?what.slice(7):null;
-    const slip=sector===null&&o.mode==='delivery'&&(what==='driver'||driverCopy());
-    area.className='paper-'+paperWidth();area.innerHTML=sector!==null?kitchenSlipHTML(o,sector):(what==='driver'?'':ticketHTML(o))+(slip?(what==='driver'?'':'<div class="t-cut"></div>')+driverSlipHTML(o):'');
+    styleTicketArea(area,settings);area.innerHTML=html;
     document.body.classList.add('printing-ticket');
-    const done=()=>{document.body.classList.remove('printing-ticket');area.innerHTML='';window.removeEventListener('afterprint',done);setTimeout(resolve,300);};
+    let finished=false;
+    const done=()=>{if(finished)return;finished=true;document.body.classList.remove('printing-ticket');area.innerHTML='';window.removeEventListener('afterprint',done);setTimeout(resolve,300);};
     window.addEventListener('afterprint',done);
     // Espera o QR code carregar (até 3 s) para ele não sair em branco.
     const images=[...area.querySelectorAll('img')].filter(img=>!img.complete).map(img=>new Promise(r=>{img.onload=img.onerror=r;}));
-    Promise.race([Promise.all(images),new Promise(r=>setTimeout(r,3000))]).then(()=>setTimeout(()=>window.print(),50));
+    Promise.race([Promise.all(images),new Promise(r=>setTimeout(r,3000))]).then(()=>setTimeout(()=>{try{if(typeof window.print!=='function')throw new Error('Impressão indisponível');window.print();}catch{done();toast('Não consegui abrir a impressão. Tente pelo Chrome ou Edge no Windows.');}},50));
   }));
 }
 const sampleOrder=()=>({id:0,number:123,created_at:new Date().toISOString(),customer:'Cliente Teste',phone:'(19) 99999-0000',mode:'delivery',zone:'Centro',address:store.address||'Rua Exemplo, 100 - Centro',
-  items:[{quantity:2,name:'Produto de teste',unit_price:2500,extras:[{name:'Adicional'}],notes:'Sem cebola'}],notes:'Notinha de teste',subtotal:5000,delivery_fee:500,discount:0,total:5500,payment:'cash',paid:false,change_for:10000});
+  items:[{quantity:2,name:'Produto de teste com nome comprido',unit_price:2500,extras:[{name:'Adicional: queijo e açúcar à parte'}],notes:'Sem cebola. Embalar separadamente.'}],notes:'Notinha de teste • confira se o texto está completo.',subtotal:5000,delivery_fee:500,discount:0,total:5500,payment:'cash',paid:false,change_for:10000});
+function previewTicket(){
+  modal('Prévia da notinha','<p class="muted">'+esc(printProfiles[paperWidth()].label)+' • área útil de '+printContentWidth()+' mm. A impressora é escolhida na janela do navegador.</p><div class="print-preview-scroll"><div id="print-preview-sheet">'+printJobHTML(sampleOrder())+calibrationHTML()+'</div></div><button type="button" class="btn full" id="print-preview-test">'+icon('print')+' Imprimir este teste</button>',true);
+  styleTicketArea($('#print-preview-sheet'));
+  $('#print-preview-test').onclick=()=>{closeModal();printTicket(sampleOrder(),'all',true);};
+}
 function alertsPanel(){
   return '<section class="panel" id="alerts-panel"><div class="section-heading"><div><h2>Avisos neste aparelho</h2><p class="muted">Valem para este celular ou computador. Ative em cada aparelho que recebe pedidos.</p></div><span class="feature-icon">'+icon('bell')+'</span></div>'+
     '<div class="alert-row"><div><b>Aviso de pedido novo, mesmo com o painel fechado</b><p class="muted" id="push-status">Verificando…</p></div><div class="row-actions"><button type="button" class="btn" id="push-toggle">Ativar avisos</button><button type="button" class="btn secondary" id="push-test" hidden>Testar</button></div></div>'+
@@ -173,18 +193,21 @@ function alertsPanel(){
 }
 function printPanel(){
   const chromeCmd='"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --kiosk-printing '+location.origin+'/painel';
-  return '<section class="panel" id="print-panel"><div class="section-heading"><div><h2>Impressora de notinha</h2><p class="muted">Vale para este computador ou celular. Configure em cada aparelho ligado a uma impressora.</p></div><span class="feature-icon">'+icon('print')+'</span></div>'+
+  return '<section class="panel" id="print-panel"><div class="section-heading"><div><h2>Impressora de notinha</h2><p class="muted">Imprima pelo Chrome ou Edge nas impressoras instaladas no Windows. Preferências salvas neste navegador.</p></div><span class="feature-icon">'+icon('print')+'</span></div>'+
+    '<div class="notice"><b>Escolha sua impressora na janela de impressão</b><p>Bematech, Elgin, Epson, Daruma e outras marcas usam o mesmo fluxo: instale o driver correto do modelo no Windows e selecione a impressora em Destino. USB, rede e Wi-Fi funcionam quando o Windows reconhece a impressora. Não é preciso escolher uma marca aqui.</p></div>'+
     '<div class="alert-row"><div><b>Imprimir automaticamente cada pedido novo</b><p class="muted">A notinha sai assim que o pedido chega, com o painel aberto. Veja abaixo como imprimir sem a janela de confirmação.</p></div><label class="switch"><input type="checkbox" id="autoprint" '+(autoPrint()?'checked':'')+'><span>'+(autoPrint()?'Ligado':'Desligado')+'</span></label></div>'+
     '<div class="alert-row"><div><b>Setor neste aparelho</b><p class="muted">Deixe vazio para a notinha completa. Informe o mesmo setor do cadastro dos produtos para imprimir apenas a produção desse setor.</p></div><input id="print-sector" aria-label="Setor de impressão automática" maxlength="60" value="'+esc(printSector())+'" placeholder="Ex.: Cozinha ou Bar"></div>'+
-    '<div class="alert-row"><div><b>Largura do papel</b><p class="muted">Confira na bobina: 80 mm é a impressora de balcão; 58 mm é a mini impressora e a maioria das Bluetooth.</p></div><select id="paper-width" aria-label="Largura do papel"><option value="80" '+(paperWidth()==='80'?'selected':'')+'>80 mm</option><option value="58" '+(paperWidth()==='58'?'selected':'')+'>58 mm</option></select></div>'+
+    '<div class="alert-row"><div><b>Papel da impressora</b><p class="muted">Escolha o mesmo tamanho configurado no driver do Windows. Para outro tamanho, use Outra largura e ajuste a área útil abaixo.</p></div><select id="paper-width" aria-label="Largura do papel">'+Object.entries(printProfiles).map(([key,p])=>'<option value="'+key+'" '+(paperWidth()===key?'selected':'')+'>'+p.label+'</option>').join('')+'</select></div>'+
+    '<div class="alert-row"><div><b>Área útil de impressão</b><p class="muted">Largura ocupada pelo texto em milímetros. Se cortar nas laterais, reduza este valor e imprima outro teste.</p></div><label class="print-number"><input type="number" id="print-content-width" aria-label="Área útil de impressão em milímetros" min="32" max="'+printProfiles[paperWidth()].max+'" step="0.5" value="'+printContentWidth()+'"><span>mm</span></label></div>'+
+    '<div class="alert-row"><div><b>Tamanho das letras</b><p class="muted">Aumente para facilitar a leitura ou diminua para caber mais conteúdo.</p></div><select id="print-font" aria-label="Tamanho das letras na notinha">'+[[11,'Pequena'],[12,'Padrão'],[14,'Grande'],[16,'Muito grande']].map(([size,label])=>'<option value="'+size+'" '+(printFont()===size?'selected':'')+'>'+label+'</option>').join('')+'</select></div>'+
     '<div class="alert-row"><div><b>Via do motoboy</b><p class="muted">Nos pedidos de entrega, sai uma segunda notinha com o endereço em letra grande, QR code do mapa e quanto cobrar (com o troco).</p></div><label class="switch"><input type="checkbox" id="driverslip" '+(driverCopy()?'checked':'')+'><span>'+(driverCopy()?'Ligado':'Desligado')+'</span></label></div>'+
-    '<div class="alert-row"><div><b>Testar a impressora</b><p class="muted">Imprime um pedido de exemplo com as opções acima.</p></div><button type="button" class="btn secondary" id="print-test">'+icon('print')+' Imprimir teste</button></div>'+
+    '<div class="alert-row"><div><b>Confira antes de atender</b><p class="muted">Teste sem criar pedidos ou movimentar o caixa. Confira acentos, valores, tamanho das letras e a linha de 20 mm.</p></div><div class="row-actions"><button type="button" class="btn secondary" id="print-preview">'+icon('eye')+' Ver prévia</button><button type="button" class="btn" id="print-test">'+icon('print')+' Imprimir teste</button></div></div>'+
     '<details class="help print-help"><summary>Como configurar a impressora de notinha</summary>'+
-      '<h3>Computador com impressora térmica (USB)</h3><ol><li>Instale o driver da impressora (vem na caixa ou no site do fabricante) e deixe ela como <b>impressora padrão</b> do Windows.</li><li>Clique em <b>Imprimir teste</b>. Na janela do Chrome, escolha a impressora e, em <b>Mais definições</b>, deixe <b>Margens: Nenhuma</b> e desmarque <b>Cabeçalhos e rodapés</b>. O Chrome guarda essa escolha.</li>'+
+      '<h3>Windows: qualquer marca com driver de impressão compatível</h3><ol><li>Instale o driver oficial do seu modelo. Em <b>Configurações do Windows → Impressoras e scanners</b>, confirme se a impressora aparece e imprime a página de teste do Windows. Se usar USB, prefira o driver de impressão do Windows; apenas instalar uma porta COM virtual pode não criar uma impressora na lista.</li><li>Configure no driver o tamanho real da bobina ou A4. Aqui, selecione o mesmo tamanho e clique em <b>Imprimir teste</b>. No Chrome ou Edge, escolha a impressora em <b>Destino</b>, use <b>escala 100%</b>, orientação retrato e desative <b>Cabeçalhos e rodapés</b>. Use margens mínimas ou nenhuma, conforme o driver. Se cortar nas laterais, reduza a área útil aqui.</li><li>Se sair muito papel em branco, confira o comprimento da bobina no driver. Guilhotina e avanço são configurados no driver, quando o modelo oferece essas opções. O site não envia comandos de corte ou de abertura de gaveta.</li>'+
       '<li>Para imprimir <b>sem perguntar nada</b>: clique com o botão direito na Área de Trabalho → <b>Novo → Atalho</b>, cole o comando abaixo, avance e dê o nome <b>Painel de pedidos</b>. Feche todas as janelas do Chrome e abra o painel sempre por esse atalho.<div class="copy-line"><code id="kiosk-cmd">'+esc(chromeCmd)+'</code><button type="button" class="btn secondary small" id="copy-kiosk">'+icon('copy')+' Copiar</button></div></li></ol>'+
-      '<h3>Celular Android com impressora Bluetooth</h3><ol><li>Instale o app <b>RawBT</b> na Play Store e pareie a impressora por ele.</li><li>Em <b>Configurações do Android → Impressão</b>, ative o serviço do <b>RawBT</b>.</li><li>Abra este painel no Chrome, escolha <b>58 mm</b> acima, toque em <b>Imprimir teste</b> e selecione a impressora do RawBT.</li></ol><p class="muted">No celular o Android sempre mostra a tela de impressão: com a impressão automática ligada, ela abre sozinha e é só confirmar.</p>'+
-      '<h3>Maquininha de cartão</h3><p class="muted">As maquininhas Smart (Stone, PagBank, Cielo LIO, Mercado Pago Point) só aceitam os apps da própria empresa e não abrem o painel. Para a notinha, use uma impressora térmica USB ou Bluetooth.</p>'+
-      '<h3>iPhone</h3><p class="muted">O iPhone só imprime em impressoras AirPrint; mini impressoras Bluetooth não funcionam pelo navegador. Use um computador ou um celular Android para imprimir.</p></details></section>';
+      '<p class="muted">Para Bematech e Elgin, consulte os <a class="text-link" href="https://github.com/ElginDeveloperCommunity/Impressoras" target="_blank" rel="noopener">drivers oficiais</a>. Para outras marcas, use o site do fabricante.</p>'+
+      '<h3>Impressão automática no caixa</h3><p class="muted">Mantenha o painel aberto e confirme o destino e o papel antes de ligar a impressão automática. O atalho acima usa o Chrome instalado no caminho padrão do Windows; se ele estiver em outro local, ajuste o caminho. A fila do site envia um documento por vez e aguarda a janela de impressão fechar. Fechar a janela não confirma que o papel saiu: confira a fila e o equipamento antes de reimprimir.</p>'+
+      '<h3>Notinha de pedido e outros equipamentos</h3><p class="muted">Esta impressão é um comprovante de pedido, sem emissão de NFC-e/NF-e. Impressoras fiscais ECF, etiquetadoras, conexões apenas por comandos e impressoras embutidas em maquininhas precisam de integração específica. Android e iPhone dependem do serviço de impressão disponível no aparelho e do suporte do modelo.</p></details></section>';
 }
 async function bindAlertsPanel(){
   const status=$('#push-status'),toggle=$('#push-toggle'),test=$('#push-test');if(!status)return;
@@ -199,8 +222,11 @@ function bindPrintPanel(){
   $('#print-sector').onchange=e=>{try{localStorage.setItem('sca.print-sector.'+store.id,e.target.value.trim());toast('Setor de impressão atualizado neste aparelho.');}catch{toast('Não consegui salvar a preferência neste navegador.');}};
   $('#autoprint').onchange=e=>{setPref('autoprint',e.target.checked?'1':'0');e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';if(e.target.checked)toast('Pedidos novos serão impressos enquanto o painel estiver aberto.');};
   $('#driverslip').onchange=e=>{setPref('driverslip',e.target.checked?'1':'0');e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';};
-  $('#paper-width').onchange=e=>{setPref('paper',e.target.value);toast('Papel de '+e.target.value+' mm neste aparelho.');};
-  $('#print-test').onclick=()=>printTicket(sampleOrder());
+  $('#paper-width').onchange=e=>{setPref('paper',e.target.value);const input=$('#print-content-width');input.max=printProfiles[paperWidth()].max;input.value=printContentWidth();$('#print-font').value=printFont();toast(printProfiles[paperWidth()].label+' neste aparelho.');};
+  $('#print-content-width').onchange=e=>{const value=Number(e.target.value),max=printProfiles[paperWidth()].max;if(!Number.isFinite(value)||value<32||value>max){e.target.value=printContentWidth();toast('Informe uma área útil entre 32 e '+max+' mm.');return;}setPref('print-width.'+paperWidth(),String(value));toast('Área útil salva neste navegador.');};
+  $('#print-font').onchange=e=>{setPref('print-font',e.target.value);toast('Tamanho das letras salvo.');};
+  $('#print-preview').onclick=previewTicket;
+  $('#print-test').onclick=()=>printTicket(sampleOrder(),'all',true);
   $('#copy-kiosk').onclick=()=>copy($('#kiosk-cmd').textContent);
 }
 async function platformNotices(){
