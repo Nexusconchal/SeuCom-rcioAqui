@@ -45,3 +45,9 @@ As chaves de parceiros são geradas por loja e armazenadas por hash. Instale a c
 
 
 Operação ampliada: [OPERATIONS.md](OPERATIONS.md), com migração e worker. Nenhum worker ou fornecedor externo foi ativado por esta revisão.
+
+## Datas de cadastro e assinatura na Central do Dono
+
+A lista de lojas usa `users.created_at` para a criação da conta, com dia/mês/ano e hora/minuto/segundo em America/Sao_Paulo. `stores.subscribed_at` guarda a primeira confirmação do plano observada pelo sistema, inclusive pagamento manual integral; gerar um link de assinatura pendente ou um Pix ainda não pago não preenche esse campo. Renovação, cancelamento e novas tentativas preservam a primeira confirmação. Contas antigas sem essa informação mostram que a data não foi registrada.
+
+O lançamento de mensalidade guarda `platform_ledger.is_subscription` e `paid_at` quando o Mercado Pago informa `date_approved` com horário/fuso. O cartão consulta o pagamento aprovado quando a fatura recorrente não contém essa data. Sem um instante confiável, o painel identifica a data do registro, sem inventar horário de aprovação. Recebimentos manuais integrais identificados pelo fluxo atual de liberação do plano usam a mesma distinção. Despesas, recebimentos parciais e lançamentos anulados não aparecem como último pagamento do plano. Essa informação independe do filtro de vendas e não altera o critério de validade das mensalidades. A migração adiciona somente três colunas com valores padrão; não presume a data de contratação de assinaturas anteriores.

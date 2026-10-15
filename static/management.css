@@ -78,6 +78,7 @@ dialog.drawer{margin:0 0 0 auto;height:100dvh;max-height:100dvh;width:500px;max-
 
 .alert-row{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:12px 0;border-top:1px solid var(--line)}.alert-row>div:first-child{min-width:0}.alert-row p{margin-top:4px}
 .switch{display:flex;align-items:center;gap:8px;font-weight:700;font-size:13px;white-space:nowrap}.switch input{width:20px;height:20px}
+.platform-date{display:grid;gap:2px;margin-top:9px;font-size:12px;line-height:1.5;color:var(--muted)}.platform-date span{font-size:11px}.platform-date time{font-weight:600;color:var(--ink);white-space:nowrap}.account-created{margin-bottom:8px}
 #print-area{display:none}
 @media print{body.printing-ticket>*:not(#print-area){display:none!important}html body.printing-ticket>#print-area{display:block!important}html body.printing-ticket>dialog#modal{display:none!important}body.printing-ticket{background:#fff}@page{margin:4mm}}
 .ticket{width:72mm;font:12px/1.35 "Courier New",monospace;color:#000}.ticket h1{font-size:16px;text-align:center;margin:0 0 4px;letter-spacing:0}.ticket p{color:#000;margin:4px 0}.ticket hr{border:0;border-top:1px dashed #000;margin:6px 0}.t-center{text-align:center}.t-box{border:1px solid #000;padding:4px;font-weight:700}.t-item{display:flex;justify-content:space-between;gap:6px;margin-top:4px}.t-sub{padding-left:10px}.t-line{display:flex;justify-content:space-between}.t-total{font-size:15px;font-weight:700;margin:4px 0}.t-foot{margin-top:8px;font-size:10px}

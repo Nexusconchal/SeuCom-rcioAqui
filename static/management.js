@@ -215,6 +215,20 @@ function billingBadge(x){
   const extra=x.billing==='trial'&&x.trial_until?'até '+new Date(x.trial_until.length===10?x.trial_until+'T12:00:00':x.trial_until).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):x.paid_until&&x.billing==='paid'?'até '+new Date(x.paid_until+'T12:00:00').toLocaleDateString('pt-BR'):x.sub_next_payment&&x.billing==='active'?'próxima '+new Date(x.sub_next_payment).toLocaleDateString('pt-BR'):'';
   return '<span class="badge '+color+'">'+label+'</span>'+(extra?'<small class="table-sub">'+extra+'</small>':'');
 }
+function platformInstant(value){
+  if(!value)return '';
+  const instant=new Date(value);
+  if(Number.isNaN(instant.getTime()))return '';
+  return '<time datetime="'+esc(value)+'">'+esc(instant.toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}))+'</time>';
+}
+function planDates(x){
+  let html=x.subscribed_at?'<small class="platform-date"><span>Plano confirmado em</span>'+platformInstant(x.subscribed_at)+'</small>':x.billing==='active'?'<small class="table-sub">Data de ativação não registrada</small>':'';
+  if(x.last_plan_payment_recorded_at){
+    html+='<small class="platform-date"><span>'+(x.last_plan_paid_at?'Último pagamento aprovado':'Último pagamento registrado')+'</span>'+platformInstant(x.last_plan_paid_at||x.last_plan_payment_recorded_at)+'</small>';
+  }else if(x.billing==='paid'||x.paid_until)html+='<small class="table-sub">Data do pagamento anterior não registrada</small>';
+  else if(x.billing!=='exempt')html+='<small class="table-sub">Nenhum pagamento do plano registrado</small>';
+  return html;
+}
 function health(x){
   const idle=daysSince(x.last_order), missing=Object.entries({products:'produtos',phone:'WhatsApp',pix:'Pix',address:'endereço'}).filter(([k])=>!x.setup[k]).map(([,v])=>v);
   const parts=[];
@@ -242,15 +256,15 @@ async function summaryView(root,draw){
     '<label>Endereço para os avisos do Mercado Pago (Webhook)<div class="inline-input"><input readonly id="billing-webhook" value="'+esc(bill.webhook_url)+'"><button class="btn secondary" type="button" id="copy-webhook">'+icon('copy')+' Copiar</button></div></label><p class="muted">No Mercado Pago: Suas integrações › sua aplicação › Webhooks › cole este endereço e marque “Planos e assinaturas”. Sem isso o sistema também confere sozinho de tempos em tempos.</p><div class="row-actions"><button class="btn secondary small" id="billing-sync">Atualizar cobranças agora</button>'+(bill.configured?'<button class="btn small" id="test-pix">'+icon('wallet')+' Testar pagamento de R$ 1,00 (Pix)</button>':'')+'</div></section>'+
     '<div class="metrics four">'+metric('Assinaturas pagando',bill.paying,money(bill.monthly_recurring)+' por mês')+metric('Em teste grátis',bill.trial,'Ainda sem cartão cadastrado')+metric('Pausadas por pagamento',bill.blocked,'Não recebem pedidos até assinar')+metric('Grátis para sempre',bill.exempt,'Contas isentas')+'</div>'+
     '<div class="metrics four">'+metric('Lojas cadastradas',s.stores.length,(s.stores.length-blocked.length)+' ativas • '+blocked.length+' bloqueadas')+metric('Mensalidades do mês',money(s.monthly_recurring),'Valor vigente, já com promoções')+metric('Mensalidades em aberto',money(s.overdue),overdue.length+' loja(s) sem assinatura ativa')+metric('Vendas dos lojistas',money(s.gross_store_sales),'Pedidos concluídos no período')+'</div>'+
-    '<section class="panel"><div class="section-heading"><div><h2>Lojas</h2><p class="muted">Bloquear fecha a loja, impede novos pedidos e mostra o motivo no painel do lojista. O histórico é mantido.</p></div><div class="chips">'+[['all','Todas',s.stores.length],['overdue','Em aberto',overdue.length],['idle','Paradas',idle.length],['blocked','Bloqueadas',blocked.length]].map(([k,l,n])=>'<button class="chip '+(storeFilter===k?'active':'')+'" data-filter="'+k+'">'+l+' ('+n+')</button>').join('')+'</div></div><div id="platform-stores"></div></section>';
+    '<section class="panel"><div class="section-heading"><div><h2>Lojas</h2><p class="muted">Bloquear fecha a loja, impede novos pedidos e mostra o motivo no painel do lojista. O histórico é mantido.</p><p class="muted small">Datas e horários de Brasília. Plano confirmado = primeira confirmação registrada; pagamento aprovado = data informada pelo Mercado Pago. Registros manuais mostram quando foram lançados.</p></div><div class="chips">'+[['all','Todas',s.stores.length],['overdue','Em aberto',overdue.length],['idle','Paradas',idle.length],['blocked','Bloqueadas',blocked.length]].map(([k,l,n])=>'<button class="chip '+(storeFilter===k?'active':'')+'" data-filter="'+k+'">'+l+' ('+n+')</button>').join('')+'</div></div><div id="platform-stores"></div></section>';
   function stores(){
     const term=$('#platform-search').value.toLowerCase();
     const list=s.stores.filter(x=>(x.name+' '+x.email).toLowerCase().includes(term)&&(storeFilter==='all'||(storeFilter==='overdue'&&x.overdue)||(storeFilter==='blocked'&&!x.enabled)||(storeFilter==='idle'&&idle.includes(x))));
     $('#platform-stores').innerHTML=list.length?table(['Loja','Situação','Mensalidade','Este mês','Vendas no período','Saúde',''],list.map(x=>row([
-      '<b>'+esc(x.name)+'</b><small class="table-sub">'+esc(x.email)+'</small><a class="text-link small-link" href="/loja/'+esc(x.slug)+'" target="_blank" rel="noopener">Ver cardápio</a>',
+      '<b>'+esc(x.name)+'</b><small class="table-sub">'+esc(x.email)+'</small><small class="platform-date account-created"><span>Conta criada em</span>'+platformInstant(x.account_created_at)+'</small><a class="text-link small-link" href="/loja/'+esc(x.slug)+'" target="_blank" rel="noopener">Ver cardápio</a>',
       x.enabled?'<span class="badge green">Ativa</span>':'<span class="badge red">Bloqueada</span>'+(x.blocked_reason?'<small class="table-sub">'+esc(x.blocked_reason)+'</small>':''),
       money(x.effective_fee)+(x.promo_active?'<small class="table-sub promo-sub">Promoção'+(x.promo_label?' “'+esc(x.promo_label)+'”':'')+' até '+new Date(x.promo_until+'T12:00:00').toLocaleDateString('pt-BR')+' • normal '+money(x.monthly_fee)+'</small>':'')+(x.commission_bps?'<small class="table-sub">+ '+(x.commission_bps/100).toLocaleString('pt-BR')+'% de comissão</small>':''),
-      billingBadge(x),
+      billingBadge(x)+planDates(x),
       money(x.revenue)+'<small class="table-sub">'+x.orders+' pedidos</small>',
       health(x),
       '<div class="row-actions"><button class="btn secondary small" data-plan="'+x.id+'">Contrato e promoção</button>'+(x.enabled?'<button class="btn secondary small danger-text" data-block="'+x.id+'">Bloquear</button>':'<button class="btn small" data-unblock="'+x.id+'">Desbloquear</button>')+(x.overdue?'<button class="btn secondary small" data-receive="'+x.id+'">Registrar pagamento</button>':'')+'</div>'
