@@ -29,6 +29,10 @@ jobs:
       - name: Verificar sintaxe Python e JavaScript
         run: |
           python -m compileall -q app.py seed.py inventory.py marketing.py migrations.py operations.py merchandising.py purchasing.py cashback.py campaign_queue.py customer_segments.py credit.py delivery_map.py shipping.py inbox.py production.py store_network.py marketing_worker.py tests
+          node --check static/printing.js
+          node --check static/search.js
+          node --check static/quick-navigation.js
+          node --test tests/search.test.mjs
           node --check static/ui.js
           node --check static/app.js
           node --check static/menu.js
