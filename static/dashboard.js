@@ -1,4 +1,7 @@
+import { printDocument } from './printing.js';
 import { networkSettings, networkInvite } from './network.js';
+import { matchesSearch, productMatches } from './search.js';
+import { bindQuickNavigation } from './quick-navigation.js';
 import { deliveryMapPage } from './delivery.js';
 import { inboxPage } from './inbox.js';
 import { managementView, costsDialog, manualOrder, overviewDetails } from './management.js';
@@ -13,6 +16,7 @@ export async function renderDashboard(){
   const me=await api('/api/admin/store');store=me.store;useTimeZone(store.timezone);role=me.role;roleLabel=me.role_label;document.title='Painel • '+store.name;
   $('#app').innerHTML='<div class="dashboard"><header class="dashboard-head">'+brand()+'<nav class="dashboard-nav">'+[['overview','Visão geral'],['orders','Pedidos'],['pos','PDV / Balcão'],['cash','Caixa por turno'],['dining','Mesas e comandas'],['kitchen','Cozinha'],['products','Cardápio'],['stock','Estoque'],['ingredients','Insumos e fichas'],['customers','Clientes'],['inbox','Atendimento WhatsApp'],['marketing','Marketing'],['promotions','Promoções e horários'],['drivers','Entregas'],['deliverymap','Mapa de entregas'],['sales','Vendas e caixa'],['finance','Lucro e custos'],['purchasing','Contas e fornecedores'],['reports','Gerar relatório'],['integrations','Integrações'],['network','Minha rede'],['printing','Imprimir notinha'],['support','Suporte']].filter(([id])=>role==='owner'||(role==='manager'?!['integrations','network'].includes(id):ROLE_TABS[role].includes(id))).map(([id,label])=>'<button data-tab="'+id+'">'+label+'</button>').join('')+'</nav>'+'<div class="head-actions"><button id="sound-toggle" class="icon-btn sound-toggle" aria-label="Som de novos pedidos">'+icon('bell')+'</button><button class="icon-btn" data-tab="settings" aria-label="Configurações">'+icon('gear')+'</button><button id="logout" class="icon-btn" aria-label="Sair">'+icon('logout')+'</button></div></header><main id="main" class="dashboard-main"><section class="dashboard-title"><div><span class="eyebrow" id="page-kicker">SEU COMÉRCIO EM MOVIMENTO</span><h1 id="page-title">Seu dia em um olhar</h1><p id="page-subtitle">Tudo pronto para vender mais.</p></div><div class="title-actions"><button id="store-toggle" class="badge gray"><i></i>Loja fechada</button><a class="btn" href="/loja/'+esc(store.slug)+'" target="_blank" rel="noopener">Ver minha loja '+icon('eye')+'</a></div></section><section id="platform-notices"></section><section id="dashboard-content" aria-live="polite"></section></main><footer class="dashboard-footer"><span>SeuComércioAqui</span><span>'+esc(store.name)+' • '+esc(auth.user.name)+' ('+esc(roleLabel)+')</span></footer></div>';
   $$('[data-tab]').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
+  bindQuickNavigation(switchTab,store.id+'.'+auth.user.id);
   $('#logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'});location.href='/entrar';}catch(e){toast(e.message);}};
   $('#store-toggle').onclick=async()=>{try{const result=await api('/api/admin/store/open',{method:'POST',body:JSON.stringify({open:!store.open})});store=result.store;updateStoreButton();toast(store.open?'Loja aberta para pedidos.':'Loja fechada.');platformNotices();}catch(e){toast(e.message);}};
   updateStoreButton();updateSoundButton();
@@ -150,7 +154,6 @@ function styleTicketArea(area,settings={paper:paperWidth(),width:printContentWid
   area.style.setProperty('--ticket-font',settings.font+'px');
 }
 const driverCopy=()=>pref('driverslip','0')==='1';
-let printQueue=Promise.resolve();
 // what: 'all' = notinha da loja (+ via do motoboy, se ligada e for entrega); 'driver' = só a via do motoboy.
 function kitchenSlipHTML(o,sector){
  const items=o.items.filter(i=>!sector||(i.production_sector||'Cozinha')===sector);if(!items.length)return '';
@@ -167,17 +170,7 @@ function calibrationHTML(){return '<div class="t-calibration"><b>TESTE DE IMPRES
 function printTicket(o,what='all',calibration=false){
   const html=printJobHTML(o,what)+(calibration?calibrationHTML():'');
   const settings={paper:paperWidth(),width:printContentWidth(),font:printFont()};
-  printQueue=printQueue.catch(()=>{}).then(()=>new Promise(resolve=>{
-    let area=$('#print-area');if(!area){area=document.createElement('div');area.id='print-area';document.body.appendChild(area);}
-    styleTicketArea(area,settings);area.innerHTML=html;
-    document.body.classList.add('printing-ticket');
-    let finished=false;
-    const done=()=>{if(finished)return;finished=true;document.body.classList.remove('printing-ticket');area.innerHTML='';window.removeEventListener('afterprint',done);setTimeout(resolve,300);};
-    window.addEventListener('afterprint',done);
-    // Espera o QR code carregar (até 3 s) para ele não sair em branco.
-    const images=[...area.querySelectorAll('img')].filter(img=>!img.complete).map(img=>new Promise(r=>{img.onload=img.onerror=r;}));
-    Promise.race([Promise.all(images),new Promise(r=>setTimeout(r,3000))]).then(()=>setTimeout(()=>{try{if(typeof window.print!=='function')throw new Error('Impressão indisponível');window.print();}catch{done();toast('Não consegui abrir a impressão. Tente pelo Chrome ou Edge no Windows.');}},50));
-  }));
+  printDocument(html,settings);
 }
 const sampleOrder=()=>({id:0,number:123,created_at:new Date().toISOString(),customer:'Cliente Teste',phone:'(19) 99999-0000',mode:'delivery',zone:'Centro',address:store.address||'Rua Exemplo, 100 - Centro',
   items:[{quantity:2,name:'Produto de teste com nome comprido',unit_price:2500,extras:[{name:'Adicional: queijo e açúcar à parte'}],notes:'Sem cebola. Embalar separadamente.'}],notes:'Notinha de teste • confira se o texto está completo.',subtotal:5000,delivery_fee:500,discount:0,total:5500,payment:'cash',paid:false,change_for:10000});
@@ -346,11 +339,11 @@ function bindOrderButtons(){
   $$('[data-next]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{const order=orders.find(o=>o.id===Number(b.dataset.next));await api('/api/admin/orders/'+order.id,{method:'PATCH',body:JSON.stringify({status:nextStatus(order)})});toast('Pedido atualizado.');await switchTab(tab,true);}catch(e){toast(e.message);b.disabled=false;}});
 }
 function ordersPage(){
-  $('#dashboard-content').innerHTML='<div class="page-toolbar"><div class="chips"><button class="chip active" data-filter="active">Em andamento</button><button class="chip" data-filter="completed">Concluídos</button><button class="chip" data-filter="cancelled">Cancelados</button></div><label class="search compact">'+icon('search')+'<span class="sr-only">Buscar pedido</span><input id="order-search" placeholder="Número ou cliente"></label></div><div id="orders-area">'+orderBoard(orders.filter(o=>!['completed','cancelled'].includes(o.status)))+'</div><p class="muted">Em andamento: todos os pedidos ativos. Histórico: até 500 pedidos por status.</p>';
+  $('#dashboard-content').innerHTML='<div class="page-toolbar"><div class="chips"><button class="chip active" data-filter="active">Em andamento</button><button class="chip" data-filter="completed">Concluídos</button><button class="chip" data-filter="cancelled">Cancelados</button></div><label class="search compact">'+icon('search')+'<span class="sr-only">Buscar pedido</span><input id="order-search" placeholder="Número, cliente, telefone ou endereço"></label></div><div id="orders-area">'+orderBoard(orders.filter(o=>!['completed','cancelled'].includes(o.status)))+'</div><p class="muted">Em andamento: todos os pedidos ativos. Histórico: até 500 pedidos por status.</p>';
   let filter='active';
   async function show(){
-    const term=$('#order-search').value.toLowerCase();
-    const list=orders.filter(o=>(filter==='active'?!['completed','cancelled'].includes(o.status):o.status===filter)&&(!term||(o.customer+' '+o.number).toLowerCase().includes(term)));
+    const term=$('#order-search').value;
+    const list=orders.filter(o=>(filter==='active'?!['completed','cancelled'].includes(o.status):o.status===filter)&&matchesSearch(term,[o.customer,o.number,o.phone,o.address,o.zone]));
     $('#orders-area').innerHTML=filter==='active'?orderBoard(list):list.length?'<div class="history-grid">'+list.map(orderCard).join('')+'</div>':empty('Nenhum pedido neste filtro','Os pedidos aparecem aqui conforme a operação avança.');
     bindOrderButtons();
   }
@@ -385,8 +378,8 @@ function productsPage(){
   $('#product-search').oninput=renderProductTable;renderProductTable();
 }
 function renderProductTable(){
-  const search=$('#product-search').value.toLowerCase();
-  const list=products.filter(p=>(p.name+' '+p.description).toLowerCase().includes(search));
+  const search=$('#product-search').value;
+  const list=products.filter(p=>productMatches(p,search,categories));
   $('#admin-products').innerHTML=list.length?'<div class="table-wrap"><table><thead><tr><th>Produto</th><th>Categoria</th><th>Preço</th><th>Estoque</th><th>Status</th><th><span class="sr-only">Ações</span></th></tr></thead><tbody>'+list.map(p=>'<tr><td><div class="table-product"><img src="'+esc(image(p.image))+'" alt=""><div><b>'+esc(p.name)+'</b><small>'+esc(p.description)+'</small></div></div></td><td>'+esc(categories.find(c=>c.id===p.category_id)?.name||'Outros')+'</td><td>'+money(p.price)+'</td><td>'+(p.stock===null?'Sem controle':p.stock+' un.')+'</td><td><span class="badge '+(p.active&&p.stock!==0?'green':'gray')+'">'+(p.active?(p.stock===0?'Esgotado':'Ativo'):'Pausado')+'</span></td><td><button class="icon-btn" data-edit-product="'+p.id+'" aria-label="Editar '+esc(p.name)+'">'+icon('edit')+'</button></td></tr>').join('')+'</tbody></table></div>':empty('Seu cardápio começa aqui','Adicione uma foto, um nome e um preço ao primeiro produto.','<button class="btn" id="empty-product">Adicionar produto</button>');
   $$('[data-edit-product]').forEach(b=>b.onclick=()=>productEditor(products.find(p=>p.id===Number(b.dataset.editProduct))));
   if($('#empty-product'))$('#empty-product').onclick=()=>productEditor();attachFallbacks($('#admin-products'));

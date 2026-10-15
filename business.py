@@ -709,13 +709,15 @@ def register_business(app, helpers):
 
     def report_format():
         fmt=request.args.get('format','pdf')
-        if fmt not in ('pdf','xlsx'):
-            abort(400,description='Use format=pdf ou format=xlsx.')
+        if fmt not in ('pdf','xlsx','receipt'):
+            abort(400,description='Use format=pdf, format=xlsx ou format=receipt.')
         return fmt
 
     def send_report(fmt,filename,title,subtitle,summary,tables):
         zone=ZoneInfo(g.store['timezone']) if getattr(g,'store',None) else ZONE
         if getattr(g,'store',None):subtitle+=' • '+g.store['timezone']
+        if fmt=='receipt':
+            return jsonify(reports.receipt(title,subtitle,summary,tables,zone=zone))
         content,mimetype,extension=reports.build(fmt,title,subtitle,summary,tables,zone=zone)
         response=app.response_class(content,mimetype=mimetype)
         response.headers['Content-Disposition']=f'attachment; filename="{filename}.{extension}"'
@@ -748,7 +750,7 @@ def register_business(app, helpers):
                  ('Taxas de entrega',sum(o['delivery_fee'] for o in done),'money')]
         tables=[
             {'title':'Vendas por dia','columns':[('Dia','text'),('Pedidos concluídos','int'),('Vendas','money')],'rows':[[d,c,t] for d,(c,t) in by_day.items()]},
-            {'title':'Formas de pagamento','columns':[('Forma','text'),('Pedidos','int'),('Valor','money'),('Já recebido','money')],
+            {'title':'Formas de pagamento','columns':[('Forma','text'),('Pedidos','int'),('Valor','money'),('Valor em pedidos quitados','money')],
              'rows':[[PAY[m],sum(o['payment']==m for o in valid),sum(o['total'] for o in valid if o['payment']==m),
                       sum(o['total'] for o in valid if o['payment']==m and o['paid'])] for m in ('pix','pix_online','cash','card','credit')]},
             {'title':'Produtos mais vendidos','columns':[('Produto','text'),('Quantidade','int'),('Vendas','money')],'rows':[[p['name'],p['quantity'],p['total']] for p in products]},

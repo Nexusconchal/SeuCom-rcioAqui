@@ -23,6 +23,10 @@ O atalho opcional com `--kiosk-printing` mantém a configuração existente de C
 
 ## Referências oficiais
 
+Em **Gerar relatório**, o formato **Resumo para impressora de notinha** oferece prévia em 58 ou 80 mm. Inclui resumo de gestão, vendas por dia, até 30 produtos e recebimento líquido por forma real dos pedidos criados no período. Não inclui dados individuais de clientes. O PDF/Excel mantém os detalhes de caixa por data da operação. Pedidos e resumos compartilham a fila; antes de imprimir o resumo, encerre a janela anterior. Selecione o mesmo papel no driver e no diálogo.
+
+O comparativo técnico e as diferenças em relação ao serviço local do BeeFood estão em [BEEFOOD_CODE_REVIEW.md](BEEFOOD_CODE_REVIEW.md). O nosso fluxo continua pelo driver/navegador; esta revisão não adiciona um serviço nativo de impressão.
+
 - [Instalar uma impressora no Windows — Microsoft](https://support.microsoft.com/pt-br/windows/hardware/printer/add-or-install-a-printer-in-windows)
 - [Imprimir pelo Chrome — Google](https://support.google.com/chrome/answer/1069693?hl=pt-BR)
 - [Bematech MP-4200 TH/ADV no Windows — Elgin Developer Community](https://github.com/ElginDeveloperCommunity/Impressoras/wiki/MP4200-TH-%E2%80%90-Instalar-impressora-no-Windows)

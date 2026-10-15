@@ -601,7 +601,7 @@ def create_app(test_config=None):
         session.setdefault("csrf", secrets.token_urlsafe(32))
         user = one("SELECT id,name,email,auth_version,platform_admin FROM users WHERE id=?", (session.get("uid", -1),))
         authenticated = bool(user and user["auth_version"] == session.get("version"))
-        return jsonify(csrf=session["csrf"], user={"name": user["name"], "email": user["email"], "platform_admin": bool(user["platform_admin"])} if authenticated else None,
+        return jsonify(csrf=session["csrf"], user={"id": user["id"], "name": user["name"], "email": user["email"], "platform_admin": bool(user["platform_admin"])} if authenticated else None,
                        registration=app.config["ALLOW_REGISTRATION"])
 
     def establish(user):
@@ -609,7 +609,7 @@ def create_app(test_config=None):
         session.clear()
         session.update(uid=user["id"], version=user["auth_version"], csrf=secrets.token_urlsafe(32))
         session.permanent = True
-        return jsonify(csrf=session["csrf"], user={"name": user["name"], "email": user["email"], "platform_admin": bool(user["platform_admin"])})
+        return jsonify(csrf=session["csrf"], user={"id": user["id"], "name": user["name"], "email": user["email"], "platform_admin": bool(user["platform_admin"])})
 
     @app.post("/api/auth/register")
     def register():

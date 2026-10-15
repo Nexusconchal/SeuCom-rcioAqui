@@ -164,6 +164,23 @@ def xlsx(title, subtitle, summary, tables, zone=ZONE):
     return output.getvalue()
 
 
+def receipt(title, subtitle, summary, tables, zone=ZONE):
+    """Compact merchant report; no order/customer detail in the local print payload."""
+    included = {'Vendas por dia', 'Produtos mais vendidos',
+                'Recebido líquido por forma real (pedidos do período)'}
+    generated = datetime.now(zone)
+    return {
+        'title': title, 'period': subtitle, 'generated_at': generated.isoformat(),
+        'generated_label': generated.strftime('%d/%m/%Y %H:%M'),
+        'summary': [{'label': label, 'value': show(value, kind, zone)}
+                    for label, value, kind in summary],
+        'sections': [{'title': table['title'], 'rows': [
+            [{'label': label, 'value': show(value, kind, zone)}
+             for (label, kind), value in zip(table['columns'], row)]
+            for row in table['rows']]} for table in tables if table['title'] in included],
+    }
+
+
 def build(fmt, title, subtitle, summary, tables, zone=ZONE):
     if fmt == "pdf":
         return pdf(title, subtitle, summary, tables, zone), "application/pdf", "pdf"

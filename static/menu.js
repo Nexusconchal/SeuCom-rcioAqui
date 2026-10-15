@@ -1,4 +1,5 @@
 import { confirmWallet } from './wallet.js';
+import { productMatches } from './search.js';
 import { $, $$, icon, brand, money, esc, image, api, modal, closeModal, bindForm, empty, toast, pay, date, useTimeZone, attachFallbacks, copy, cents, optionPrice, fromPrice, hasChoices, optionLabels, validIds, optionFields, readOptions, bindOptionLimits } from './ui.js';
 import { startShopping, shoppingEvent, shoppingToken, finishShopping } from './shopping.js';
 let shoppingReady=false,activeRecovery='';
@@ -62,7 +63,7 @@ async function recoveryActions(slug){
   }catch(e){toast(e.message);}
 }
 function renderList(){
-  const list=catalog.products.filter(p=>(selected==='all'||(selected==='other'?!p.category_id:String(p.category_id)===selected))&&(!search||(p.name+' '+p.description).toLocaleLowerCase('pt-BR').includes(search)));
+  const list=catalog.products.filter(p=>(selected==='all'||(selected==='other'?!p.category_id:String(p.category_id)===selected))&&productMatches(p,search,catalog.categories));
   $('#product-count').textContent=list.length+' opções';
   $('#product-list').innerHTML=list.length?list.map(p=>'<article class="product-card '+(p.stock===0?'sold-out':'')+'"><button class="product-open" data-product="'+p.id+'" aria-label="Ver '+esc(p.name)+'"><div class="product-photo"><img src="'+esc(image(p.image))+'" alt="'+esc(p.name)+'" loading="lazy">'+(p.featured?'<span class="product-stamp">DA CASA</span>':'')+(p.stock===0?'<span class="sold-stamp">Esgotado</span>':'')+'</div><div class="product-copy"><h3>'+esc(p.name)+'</h3><p>'+esc(p.description)+'</p><div><strong>'+(hasChoices(p)?'<small class="from">a partir de</small> ':'')+(p.original_price>p.price?'<del class="old-price">'+money(p.original_price)+'</del> ':'')+money(fromPrice(p))+'</strong><span class="plus-circle">'+icon('plus')+'</span></div></div></button></article>').join(''):empty('Nada por aqui ainda',search?'Tente buscar outro nome.':'A loja está preparando esta parte do cardápio.');
   $$('[data-product]').forEach(button=>button.onclick=()=>productDialog(catalog.products.find(p=>p.id===Number(button.dataset.product))));
