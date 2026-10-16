@@ -162,6 +162,8 @@ ADDITIONS['orders'].update({'postal_code':"TEXT NOT NULL DEFAULT ''"})
 ADDITIONS['orders'].update({'route_position':'INTEGER NOT NULL DEFAULT 0'})
 ADDITIONS['products'].update({'production_sector':"TEXT NOT NULL DEFAULT 'Cozinha'"})
 ADDITIONS['order_items'].update({'production_sector':"TEXT NOT NULL DEFAULT 'Cozinha'",'kitchen_state':"TEXT NOT NULL DEFAULT 'new'"})
+ADDITIONS['products']['suggestion_ids'] = "TEXT NOT NULL DEFAULT '[]'"
+ADDITIONS['order_items'].update({'suggested_by': 'INTEGER', 'suggested_by_name': "TEXT NOT NULL DEFAULT ''"})
 ADDITIONS['stores']['subscribed_at'] = "TEXT NOT NULL DEFAULT ''"
 ADDITIONS['platform_ledger'].update({'paid_at': "TEXT NOT NULL DEFAULT ''", 'is_subscription': 'INTEGER NOT NULL DEFAULT 0'})
 

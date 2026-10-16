@@ -20,6 +20,7 @@ from database import connect, initialize
 from business import register_business
 from inventory import register_inventory, recipe_map, recipe_info, ingredient_demand, reserve_ingredients, restore_ingredients, selected_quantities, option_availability
 from marketing import register_marketing
+from upsell import register_upsell, public_suggestions, attribution
 from operations import register_operations, receipt_state
 from merchandising import register_merchandising, apply_rules, local_time, catalog_rule_map
 from purchasing import register_purchasing, option_recipe_map
@@ -365,6 +366,7 @@ def create_app(test_config=None):
         value = dict(product)
         value["extras"] = json.loads(value["extras"])
         value["option_groups"] = json.loads(value["option_groups"] or "[]")
+        value["suggestion_ids"] = json.loads(value["suggestion_ids"] or "[]")
         value["active"], value["featured"] = bool(value["active"]), bool(value["featured"])
         if not private:
             value.pop("unit_cost", None)
@@ -427,11 +429,13 @@ def create_app(test_config=None):
         cached=getattr(g,'receipt_balances',{})
         value['received_amount']=cached.get(order['id']) if order['id'] in cached else receipt_state(db(),order['store_id'],[order])[0][order['id']]
         value['remaining_amount']=max(0,order['total']-value['received_amount'])
-        value["items"] = rows("SELECT id,name,product_id,quantity,unit_price,unit_cost,extras,notes,production_sector,kitchen_state FROM order_items WHERE order_id=?", (order["id"],))
+        value["items"] = rows("SELECT id,name,product_id,quantity,unit_price,unit_cost,extras,notes,production_sector,kitchen_state,suggested_by,suggested_by_name FROM order_items WHERE order_id=?", (order["id"],))
         for item in value["items"]:
             item["extras"] = json.loads(item["extras"])
             item["extras"] = [{k:v for k,v in x.items() if k!='unit_cost'} for x in item["extras"]]
             if not private:
+                item.pop("suggested_by", None)
+                item.pop("suggested_by_name", None)
                 item.pop("unit_cost", None)
                 item.pop("id", None)
                 item.pop("production_sector",None)
@@ -687,6 +691,7 @@ def create_app(test_config=None):
             if capacity is not None:
                 product['stock'] = capacity if product['stock'] is None else min(capacity, product['stock'])
             products.append(product)
+        public_suggestions(products, store["id"])
         return jsonify(store=store_dict(store), categories=rows("SELECT id,name,position FROM categories WHERE store_id=? ORDER BY position,id", (store["id"],)), products=products)
 
     def customer_orders_by_phone(conn, sid, phone):
@@ -878,9 +883,10 @@ def create_app(test_config=None):
                  (total*fees.get(payment,0)+5000)//10000,
                  ((subtotal-discount)*store['commission_bps']+5000)//10000,
                  'counter' if getattr(g,'manual_order',False) else 'web',zone,scheduled,oid))
-            for product, quantity, unit, extras, item_notes, cost in prepared:
-                conn.execute("INSERT INTO order_items(order_id,product_id,name,quantity,unit_price,unit_cost,extras,notes,production_sector,kitchen_state) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                             (oid, product["id"], product["name"], quantity, unit, cost, json.dumps([{k:v for k,v in x.items() if k!='unit_cost' and not k.startswith('_')} for x in extras]), item_notes, product['production_sector'], 'preparing' if store['auto_accept'] and not scheduled and payment!='pix_online' else 'new'))
+            for raw_item, (product, quantity, unit, extras, item_notes, cost) in zip(items, prepared):
+                source_id, source_name = attribution(raw_item, product, prepared, store["id"])
+                conn.execute("INSERT INTO order_items(order_id,product_id,name,quantity,unit_price,unit_cost,extras,notes,production_sector,kitchen_state,suggested_by,suggested_by_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                             (oid, product["id"], product["name"], quantity, unit, cost, json.dumps([{k:v for k,v in x.items() if k!='unit_cost' and not k.startswith('_')} for x in extras]), item_notes, product['production_sector'], 'preparing' if store['auto_accept'] and not scheduled and payment!='pix_online' else 'new', source_id, source_name))
             for pid, quantity in quantities.items():
                 balance=conn.execute('SELECT stock FROM products WHERE id=?',(pid,)).fetchone()[0]
                 if balance is not None:
@@ -1624,6 +1630,7 @@ def create_app(test_config=None):
     register_shipping(app, shared)
     register_store_network(app, shared)
     register_production(app, shared)
+    register_upsell(app, shared)
     register_inventory(app, dict(db=db,rows=rows,owner=owner,owned=owned,data=data,text=text,integer=integer,
         boolean=boolean,transaction=transaction,now=now))
     register_marketing(app, dict(db=db,one=one,rows=rows,owner=owner,owned=owned,data=data,text=text,integer=integer,
