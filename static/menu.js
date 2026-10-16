@@ -74,7 +74,7 @@ function updateBar(){
   bar.innerHTML='<button class="cart-trigger" id="open-cart"><span class="cart-count">'+count()+'</span><span>'+icon('bag')+' '+(count()?'Ver minha sacola':'Sua sacola está vazia')+'</span><strong>'+money(total())+'</strong>'+icon('arrow')+'</button>';
   $('#open-cart').onclick=cartDialog;
 }
-function productDialog(product){
+function productDialog(product,offer=null){
   let quantity=1;
   const d=modal(product.name,'<div class="product-detail"><img src="'+esc(image(product.image))+'" alt="'+esc(product.name)+'"><p>'+esc(product.description)+'</p><strong class="detail-price">'+(hasChoices(product)?'A partir de ':'')+money(fromPrice(product))+'</strong></div><form id="add-form">'+optionFields(product)+
   (!canOrder()?'<div class="notice closed-notice">'+icon('clock')+' '+esc(catalog.store.status_text)+'. Você pode olhar o cardápio, mas os pedidos só podem ser feitos com a loja aberta.</div>':'')+'<label>Alguma observação?<textarea name="notes" maxlength="200" placeholder="Ex.: sem cebola"></textarea></label><div class="quantity-submit"><div class="quantity"><button type="button" id="qty-less" class="icon-btn" aria-label="Diminuir quantidade">'+icon('minus')+'</button><output id="quantity">1</output><button type="button" id="qty-more" class="icon-btn" aria-label="Aumentar quantidade">'+icon('plus')+'</button></div><button class="btn" type="submit" '+(!canOrder()||product.stock===0?'disabled':'')+'>'+(product.stock===0?'Esgotado':!canOrder()?'Loja fechada':'Adicionar • <span id="add-price">'+money(fromPrice(product))+'</span>')+'</button></div><p class="form-error" role="alert" hidden></p></form>');
@@ -87,11 +87,36 @@ function productDialog(product){
     if(!canOrder()||product.stock===0)return;
     const {ids:option_ids,error}=readOptions(d,product);
     if(error){const err=$('#add-form .form-error');err.textContent=error;err.hidden=false;err.scrollIntoView({block:'nearest',behavior:'smooth'});return;}
-    cart.push({id:crypto.randomUUID(),product_id:product.id,name:product.name,image:product.image,quantity,option_ids,extras:optionLabels(product,option_ids).map(name=>({name})),notes:$('[name=notes]',d).value,unit:optionPrice(product,option_ids)});
+    cart.push({id:crypto.randomUUID(),product_id:product.id,suggestion_token:offer?.token,suggested_by:offer?.source_id,name:product.name,image:product.image,quantity,option_ids,extras:optionLabels(product,option_ids).map(name=>({name})),notes:$('[name=notes]',d).value,unit:optionPrice(product,option_ids)});
     orderKey='';persist();closeModal();toast('Adicionado à sacola!');
+    if(!offer)showCombinations(product);
   };attachFallbacks(d);
 }
+function combinations(product){
+  return (product.suggestions||[]).flatMap(offer=>{
+    const p=catalog.products.find(p=>p.id===offer.product_id&&p.stock!==0&&!cart.some(i=>i.product_id===p.id));
+    return p?[{product:p,token:offer.token,source_id:product.id}]:[];
+  });
+}
+function combinationCards(offers){
+  return offers.map(({product:p,source_id})=>'<article class="basket-suggestion"><img src="'+esc(image(p.image))+'" alt=""><div><b>'+esc(p.name)+'</b><small>'+(hasChoices(p)?'A partir de ':'')+money(fromPrice(p))+'</small></div><button class="btn secondary small" data-combination="'+source_id+':'+p.id+'">Escolher '+esc(p.name)+'</button></article>').join('');
+}
+function bindCombinations(d,offers){
+  $$('[data-combination]',d).forEach(b=>b.onclick=()=>{const offer=offers.find(o=>o.source_id+':'+o.product.id===b.dataset.combination);if(offer)productDialog(offer.product,offer);});
+}
+function showCombinations(product){
+  const offers=combinations(product);if(!offers.length||!canOrder())return;
+  const d=modal('Combina com '+product.name,'<section class="basket-suggestions"><h3>Adicionado à sacola. Que tal completar?</h3><p>Escolha uma sugestão para ver os detalhes e complementos.</p>'+combinationCards(offers)+'</section><button id="combination-continue" class="btn full">Continuar escolhendo</button><button id="combination-cart" class="btn secondary full">Ver minha sacola</button>');
+  bindCombinations(d,offers);$('#combination-continue',d).onclick=closeModal;$('#combination-cart',d).onclick=cartDialog;attachFallbacks(d);
+}
+function cartCombinations(){
+  const seen=new Set();return cart.flatMap(line=>{
+    const p=catalog.products.find(p=>p.id===line.product_id);return p?combinations(p):[];
+  }).filter(o=>{if(seen.has(o.product.id))return false;seen.add(o.product.id);return true;}).slice(0,3);
+}
 function basketSuggestions(){
+  const offers=cartCombinations();
+  if(offers.length&&canOrder())return '<section class="basket-suggestions"><h3>Combina com seu pedido</h3><p>Escolhidos pela loja para acompanhar seus produtos.</p>'+combinationCards(offers)+'</section>';
   const products=catalog.products.filter(p=>p.suggested&&p.stock!==0&&!cart.some(i=>i.product_id===p.id)).slice(0,3);
   if(!products.length||!canOrder())return '';
   return '<section class="basket-suggestions"><h3>Que tal completar seu pedido?</h3><p>Uma boa combinação com o que você escolheu.</p>'+products.map(p=>'<article class="basket-suggestion"><img src="'+esc(image(p.image))+'" alt=""><div><b>'+esc(p.name)+'</b><small>'+(hasChoices(p)?'A partir de ':'')+money(fromPrice(p))+'</small></div><button class="btn secondary small" data-basket-suggestion="'+p.id+'">'+(hasChoices(p)?'Escolher':'Adicionar')+'</button></article>').join('')+'</section>';
@@ -102,9 +127,10 @@ function cartDialog(){
   $$('[data-more]',d).forEach(b=>b.onclick=()=>{const line=cart.find(x=>x.id===b.dataset.more);line.quantity=Math.min(50,line.quantity+1);orderKey='';persist();cartDialog();});
   if($('#checkout',d))$('#checkout',d).onclick=checkoutDialog;
   $$('[data-basket-suggestion]',d).forEach(b=>b.onclick=()=>{const p=catalog.products.find(p=>p.id===Number(b.dataset.basketSuggestion));if(hasChoices(p))return productDialog(p);cart.push({id:crypto.randomUUID(),product_id:p.id,name:p.name,image:p.image,quantity:1,option_ids:[],extras:[],notes:'',unit:p.price});orderKey='';persist();cartDialog();toast('Adicionado à sacola!');});
+  bindCombinations(d,cartCombinations());
   attachFallbacks(d);
 }
-function itemPayload(){return cart.map(x=>({product_id:x.product_id,quantity:x.quantity,option_ids:x.option_ids,notes:x.notes||''}));}
+function itemPayload(){return cart.map(x=>({product_id:x.product_id,quantity:x.quantity,option_ids:x.option_ids,notes:x.notes||'',suggestion_token:cart.some(i=>i.product_id===x.suggested_by)?x.suggestion_token:undefined}));}
 function checkoutDialog(){
   const s=catalog.store;useTimeZone(s.timezone);
   const d=modal('Finalize seu pedido','<form id="checkout-form"><fieldset><legend>Como você quer receber?</legend><div class="choice-row"><label><input type="radio" name="mode" value="delivery" checked> '+icon('truck')+' Entrega</label><label><input type="radio" name="mode" value="pickup"> '+icon('store')+' Retirada</label></div></fieldset>'+(s.allow_scheduling?'<fieldset><legend>Quando?</legend><div class="choice-row"><label><input type="radio" name="when" value="now" '+(s.open_now?'checked':'disabled')+'> '+icon('clock')+' Agora</label><label><input type="radio" name="when" value="later" '+(s.open_now?'':'checked')+'> '+icon('clock')+' Agendar</label></div><div id="schedule-fields" class="form-grid '+(s.open_now?'hidden':'')+'"><label>Dia<select name="schedule_day">'+slotOptions()+'</select></label><label>Horário<input type="time" name="schedule_time" step="900"></label></div></fieldset>':'')+'<div class="form-grid"><label>Seu nome<input name="customer" autocomplete="name" minlength="2" maxlength="100" required></label><label>WhatsApp com DDD<input name="phone" type="tel" autocomplete="tel" minlength="10" maxlength="20" placeholder="(19) 99999-9999" required></label></div>'+(zones().length?'<label id="zone-label">Seu bairro<select name="zone" required><option value="">Escolha o bairro</option>'+zones().map(z=>'<option value="'+esc(z.name)+'">'+esc(z.name)+' • '+money(z.fee)+'</option>').join('')+'</select></label>':'')+'<label id="cep-label">CEP (opcional, preenche o endereço)<input name="cep" inputmode="numeric" autocomplete="postal-code" maxlength="9" placeholder="00000-000"></label><label id="address-label">Endereço completo<textarea name="address" autocomplete="street-address" minlength="8" maxlength="400" placeholder="Rua, número, bairro e referência" required></textarea></label><label>Como vai pagar?<select name="payment">'+s.payments.map(p=>'<option value="'+p+'">'+pay[p]+'</option>').join('')+'</select></label><div id="pix-note" class="notice '+(s.payments[0]==='pix'?'':'hidden')+'">Pix com confirmação manual. A chave e as instruções aparecem depois do pedido.</div><label id="change-label" class="hidden">Troco para quanto? (opcional)<input name="change_for" type="number" min="0" step=".01" placeholder="Ex.: 100,00"></label><label>Cupom de desconto<div class="inline-input"><input name="coupon" maxlength="30" placeholder="Digite seu cupom"><button class="btn secondary" type="button" id="apply-coupon">Aplicar</button></div></label><label>Observações do pedido<textarea name="notes" maxlength="500" placeholder="Algum detalhe para a loja?"></textarea></label><div id="checkout-totals" class="checkout-totals"></div><p class="form-error" role="alert" hidden></p><label class="check-row remember"><span><input type="checkbox" name="remember" checked> Lembrar meus dados neste aparelho</span></label><div class="checkout-optin"><label><input type="checkbox" name="recovery_consent"> Quero um lembrete no WhatsApp se eu não concluir esta sacola.</label><label><input type="checkbox" name="marketing_consent"> Quero receber ofertas desta loja pelo WhatsApp. Posso cancelar quando quiser.</label></div><p class="checkout-consent">Ao confirmar, seu nome, telefone e endereço serão enviados à loja para atender este pedido. <a href="/privacidade" target="_blank">Privacidade</a></p><button class="btn full" type="submit">Confirmar pedido '+icon('check')+'</button></form>',true);
