@@ -4,7 +4,7 @@ import threading
 
 from app import create_app
 from campaign_queue import dispatcher
-from inbox import dispatch_inbox
+from inbox_service import delivery_tick
 
 
 def main():
@@ -18,7 +18,7 @@ def main():
         try:
             dispatcher(app,limit=1)
             if not stopped.is_set():
-                dispatch_inbox(app,limit=1)
+                delivery_tick(app,limit=1,stop_event=stopped)
         except Exception:
             app.logger.error('Falha no processamento da fila; próxima rodada em 60 segundos.')
         stopped.wait(5)

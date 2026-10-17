@@ -8,4 +8,4 @@ COPY --chown=commerce:commerce . .
 USER commerce
 ENV DATABASE_PATH=/data/seucomercio.sqlite3 UPLOAD_DIR=/data/uploads
 EXPOSE 8000
-CMD ["sh", "-c", "exec gunicorn 'app:create_app()' --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 4 --timeout 60 --access-logfile -"]
+CMD ["sh", "-c", "exec gunicorn --config gunicorn.conf.py 'app:create_app()' --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 4 --timeout 60 --access-logfile -"]

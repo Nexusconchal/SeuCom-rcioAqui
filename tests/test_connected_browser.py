@@ -59,6 +59,7 @@ def test_cashback_otp_checkout_driver_location_and_inbox_ui(connected_live):
         driver.screenshot(path=str(artifacts/'entregador-mobile.png'),full_page=True)
         driver.get_by_role('button',name='Parar',exact=True).click();expect(driver.locator('#driver-position-status')).to_contain_text('desligado')
         assert send(c,'POST','/api/admin/inbox/connect',{}).status_code==200
+        assert send(c,'PUT','/api/admin/inbox/delivery',{'enabled':True}).status_code==200
         assert c.post('/webhooks/inbox/1',json=event('Gostaria de pedir um lanche'),headers={'X-Webhook-Token':fake.token}).status_code==200
         admin=browser.new_page(viewport={'width':1440,'height':1000});admin.on('pageerror',lambda e:errors.append(str(e)));admin.goto(live+'/entrar')
         admin.get_by_label('E-mail',exact=True).fill('demo@example.com');admin.get_by_label('Senha',exact=True).fill('senha-de-teste-segura');admin.get_by_role('button',name='Entrar no painel').click();admin.wait_for_url('**/painel')
