@@ -9,12 +9,14 @@ from tests.test_wallet_campaigns import Provider,provider
 
 class InboxProvider(Provider):
     def set_webhook(self,instance,url,token):self.token=token;return 201,{}
+    def state(self,instance):return 200,{'instance':{'state':'open'}}
 
 
 def setup(c):
     fake=InboxProvider();c.application.extensions['evolution']=fake
     sql(c,"UPDATE stores SET wa_instance='test-instance'")
     assert send(c,'POST','/api/admin/inbox/connect',{}).status_code==200
+    assert send(c,'PUT','/api/admin/inbox/delivery',{'enabled':True}).status_code==200
     return fake
 
 

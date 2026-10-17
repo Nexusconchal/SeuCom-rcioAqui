@@ -28,6 +28,7 @@ from campaign_queue import register_campaign_queue
 from customer_segments import register_customer_segments
 from cashback import register_cashback
 from inbox import register_inbox
+from inbox_service import install_dispatcher
 from credit import register_credit
 from delivery_map import register_delivery_map
 from shipping import register_shipping, postal_fee
@@ -60,7 +61,7 @@ ROLE_ALLOWED = {
     "kitchen": ROLE_BASE | {"update_order", "kitchen_item_update"},
     "cashier": ROLE_BASE | {"motoja_send", "update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
                             "reviews", "store_qrcode", "coupons", "insights", "cash_overview", "cash_open", "cash_close", "cash_adjust", "order_receive",
-                            "dining_list", "dining_open", "dining_transfer", "dining_close", "pos_catalog", "pos_quote", "merchant_report", "export_orders", "inbox_list", "inbox_thread", "inbox_claim", "inbox_reply", "inbox_close", "delivery_map", "driver_location_link", "route_dispatch", "shipping_settings", "kitchen_item_update"},
+                            "dining_list", "dining_open", "dining_transfer", "dining_close", "pos_catalog", "pos_quote", "merchant_report", "export_orders", "inbox_list", "inbox_thread", "inbox_claim", "inbox_reply", "inbox_close", "inbox_connection", "inbox_message_action", "delivery_map", "driver_location_link", "route_dispatch", "shipping_settings", "kitchen_item_update"},
 }
 MANAGER_DENY = {"motoja_connect", "motoja_disconnect", "whatsapp_connect", "whatsapp_disconnect", "mp_connect", "mp_disconnect", "billing_subscribe", "billing_cancel", "billing_pix", "team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
                 "rename_key", "delete_key", "rotate_key", "test_key", "finance_settings"}
@@ -133,6 +134,7 @@ def create_app(test_config=None):
         PLAN_FREE_MONTHS=int(os.getenv("PLAN_FREE_MONTHS", "1")),
         MOTOJA_HOSTS={h.strip() for h in os.getenv("MOTOJA_HOSTS", "motoboy-conchal.onrender.com").split(",") if h.strip()},
         EVOLUTION_API_URL=os.getenv("EVOLUTION_API_URL", ""), EVOLUTION_API_KEY=os.getenv("EVOLUTION_API_KEY", ""), BILLING_EXEMPT_EMAILS=os.getenv("BILLING_EXEMPT_EMAILS", ""),
+        INBOX_DISPATCH_MODE=os.getenv('INBOX_DISPATCH_MODE','embedded'),
         VAPID_PRIVATE_KEY=os.getenv("VAPID_PRIVATE_KEY", "").replace("\\n", "\n"), PUSH_CONTACT=os.getenv("PUSH_CONTACT", "suporte@seucomercioaqui.com.br"),
         UPLOAD_DIR=os.getenv("UPLOAD_DIR", str(BASE / "instance" / "uploads")),
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=production,
@@ -1645,7 +1647,7 @@ def create_app(test_config=None):
     def public_base_static():
         return app.config["PUBLIC_URL"] or (request.host_url.rstrip("/") if has_request_context() else "")
 
-    register_order_flow(app, dict(db=db, one=one, owner=owner, owned=owned, data=data, text=text, boolean=boolean,
+    register_order_flow(app, dict(db=db, one=one, owner=owner, owned=owned, data=data, text=text, boolean=boolean, transaction=transaction,
                                   limited=limited, now=now, public_base_static=public_base_static))
     register_support(app, dict(db=db, one=one, rows=rows, owner=owner, data=data, text=text, limited=limited, now=now))
 
@@ -1679,6 +1681,7 @@ def create_app(test_config=None):
             raise click.ClickException("Conta não encontrada.")
         click.echo("Senha redefinida.")
 
+    install_dispatcher(app)
     return app
 
 

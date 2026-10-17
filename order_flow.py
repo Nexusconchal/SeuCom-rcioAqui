@@ -321,7 +321,11 @@ def register_order_flow(app, helpers):
     def whatsapp_disconnect():
         if g.store["wa_instance"] and evolution().ready:
             evolution().logout(g.store["wa_instance"])
-        h.db().execute("UPDATE stores SET wa_instance='',wa_enabled=0,inbox_hook_hash='',inbox_bot=0 WHERE id=?", (g.store["id"],))
+        from inbox_service import write_value
+        with h.transaction() as conn:
+            conn.execute("UPDATE stores SET wa_instance='',wa_enabled=0,inbox_hook_hash='',inbox_bot=0 WHERE id=?", (g.store["id"],))
+            write_value(conn,'inbox.sending.'+str(g.store['id']),'')
+            conn.execute("UPDATE inbox_messages SET status=CASE WHEN automated=1 THEN 'cancelled' ELSE 'held' END WHERE store_id=? AND status='queued'",(g.store['id'],))
         return jsonify(connectors_state(h.one("SELECT * FROM stores WHERE id=?", (g.store["id"],))))
 
     @app.post("/api/admin/whatsapp/test")

@@ -17,7 +17,7 @@
 
 ## Worker de WhatsApp
 
-PDV, caixa, salão, cozinha, estoque, contas, fiado e relatórios funcionam sem worker. Campanhas agendadas/respostas precisam dele. Código do cashback usa envio direto pela conexão existente.
+PDV, caixa, salão, cozinha, estoque, contas, fiado e relatórios funcionam sem worker. O atendimento agora possui processamento embutido e opt-in por loja; consulte [ATENDIMENTO.md](ATENDIMENTO.md). Campanhas agendadas continuam dependendo do worker externo. Código do cashback usa envio direto pela conexão existente.
 
 Configure `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, `PUBLIC_URL` HTTPS, `SECRET_KEY`, `DATABASE_URL` e `DATABASE_SCHEMA`. Conecte instância por loja. `/webhook/set/:instance` recebe segredo em `X-Webhook-Token`; grupos, mensagens próprias e instância diferente são ignorados. Valide a versão real da Evolution em homologação.
 

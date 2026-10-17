@@ -180,7 +180,7 @@ Mutações privadas exigem sessão/CSRF. Cozinha avança preparo/itens; Caixa op
 | Financeiro | GET `/api/admin/purchasing`; POST/PUT `/suppliers`; POST `/obligations`, `/obligations/:id/settle` (Idempotency-Key), `/void`; GET/POST `/api/admin/credit` |
 | CRM | GET/POST/PUT `/api/admin/marketing/segments`; GET `/marketing/queue`; POST `/marketing/campaigns/:id/queue` due_at ISO com fuso, `/cancel-queue` |
 | Cashback | GET/PUT `/api/admin/cashback`; POST `/api/store/:slug/wallet/code` phone; POST `/wallet/verify` challenge/code; GET `/wallet` Bearer token; quote/order wallet_token/cashback_use |
-| Atendimento | GET `/api/admin/inbox`; GET/DELETE `/inbox/:id`; POST `/inbox/:id/claim`, `/reply` (Idempotency-Key), `/close`, `/inbox/connect`; PUT `/inbox/bot` |
+| Atendimento | GET `/api/admin/inbox`, `/inbox/connection`; GET/DELETE `/inbox/:id` (before opcional no GET); POST `/inbox/:id/claim`, `/reply` (Idempotency-Key), `/close`, `/assign` user_id; POST `/inbox/connect`, `/inbox/preview` message, `/inbox/messages/:id/action` action queue/cancel; PUT `/inbox/bot`, `/inbox/delivery` enabled, `/inbox/settings`. Veja ATENDIMENTO.md para permissões e estados. |
 | Webhook | POST `/webhooks/inbox/:store_id`: X-Webhook-Token individual e instance coincidente; sem sessão/CSRF |
 | Entregador | POST `/api/admin/drivers/:id/location-link` revoke opcional; GET `/api/driver/route`, POST `/api/driver/location` Bearer individual; mutação também CSRF |
 | Despacho | GET `/api/admin/delivery-map`, POST `/delivery-map/dispatch`: driver_id e order_ids prontos, até 10, atômico |
