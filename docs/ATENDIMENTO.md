@@ -24,7 +24,7 @@ Até 12 regras, dez palavras/expressões por regra e 20 atalhos. Correspondênci
 
 Variáveis permitidas: `{nome}`, `{loja}`, `{link}`, `{horario}`, `{pix}`, `{entrega}`, `{minimo}`. O editor valida estrutura, tipos, comprimentos e identificadores. As preferências ficam na tabela privada existente `platform_settings`, em chaves prefixadas e derivadas da loja autenticada; não há nova tabela, exposição na Data API ou migração de esquema.
 
-Isso é atendimento por regras e pedido assistido. Não é um modelo de linguagem nem um fluxo autônomo completo de montagem do pedido dentro do chat.
+Além das regras e do pedido assistido, há uma opção separada de [pedido guiado no chat](PEDIDOS_CHAT.md), desligada por padrão, com confirmação e validação do servidor. A consulta opcional de catálogo com OpenRouter ajuda o atendente a preparar uma resposta; não envia texto gerado nem cria pedidos automaticamente por IA.
 
 ## Processamento da fila
 

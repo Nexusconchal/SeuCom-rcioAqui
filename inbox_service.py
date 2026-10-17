@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 VARIABLES = {'nome', 'loja', 'link', 'horario', 'pix', 'entrega', 'minimo'}
 DEFAULTS = {
     'closed_enabled': True,
+    'chat_enabled': False,
+    'ai_enabled': False,
     'closed_message': 'Olá, {nome}! A {loja} está fechada neste momento. {horario}. Confira o cardápio e os horários: {link}\nPara falar com a equipe, escreva ATENDENTE.',
     'rules': [
         {'id': 'menu', 'name': 'Cardápio e boas-vindas', 'keywords': ['menu', 'cardapio', 'oi', 'ola', 'bom dia', 'boa tarde', 'boa noite'], 'enabled': True, 'message': 'Olá, {nome}! Veja o cardápio da {loja}: {link}\nPara falar com a equipe, escreva ATENDENTE.'},
@@ -68,7 +70,9 @@ def validate_preferences(value):
 
     if not isinstance(value, dict) or type(value.get('closed_enabled')) is not bool:
         raise ValueError('Configuração de respostas inválida.')
-    result = {'closed_enabled': value['closed_enabled'], 'closed_message': message(value.get('closed_message'))}
+    for key in ('chat_enabled', 'ai_enabled'):
+        if type(value.get(key, False)) is not bool:raise ValueError('Configuração de automação inválida.')
+    result = {'chat_enabled': value.get('chat_enabled', False), 'ai_enabled': value.get('ai_enabled', False), 'closed_enabled': value['closed_enabled'], 'closed_message': message(value.get('closed_message'))}
     for family, maximum in [('rules', 12), ('quick_replies', 20)]:
         entries = value.get(family)
         if not isinstance(entries, list) or len(entries) > maximum:
@@ -133,6 +137,8 @@ def delivery_health(app, conn):
 def delivery_tick(app, limit=5, stop_event=None):
     from database import connect
     from inbox import dispatch_inbox
+    from chat_orders import process_chat_orders
+    process_chat_orders(app, stop_event=stop_event)
     result = dispatch_inbox(app, limit, stop_event=stop_event)
     conn = connect(app.config)
     try:

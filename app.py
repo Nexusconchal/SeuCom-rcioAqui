@@ -61,7 +61,7 @@ ROLE_ALLOWED = {
     "kitchen": ROLE_BASE | {"update_order", "kitchen_item_update"},
     "cashier": ROLE_BASE | {"motoja_send", "update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
                             "reviews", "store_qrcode", "coupons", "insights", "cash_overview", "cash_open", "cash_close", "cash_adjust", "order_receive",
-                            "dining_list", "dining_open", "dining_transfer", "dining_close", "pos_catalog", "pos_quote", "merchant_report", "export_orders", "inbox_list", "inbox_thread", "inbox_claim", "inbox_reply", "inbox_close", "inbox_connection", "inbox_message_action", "delivery_map", "driver_location_link", "route_dispatch", "shipping_settings", "kitchen_item_update"},
+                            "dining_list", "dining_open", "dining_transfer", "dining_close", "pos_catalog", "pos_quote", "merchant_report", "export_orders", "inbox_list", "inbox_thread", "inbox_claim", "inbox_reply", "inbox_close", "inbox_connection", "inbox_message_action", "inbox_catalog_lookup", "delivery_map", "driver_location_link", "route_dispatch", "shipping_settings", "kitchen_item_update"},
 }
 MANAGER_DENY = {"motoja_connect", "motoja_disconnect", "whatsapp_connect", "whatsapp_disconnect", "mp_connect", "mp_disconnect", "billing_subscribe", "billing_cancel", "billing_pix", "team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
                 "rename_key", "delete_key", "rotate_key", "test_key", "finance_settings"}
@@ -134,7 +134,7 @@ def create_app(test_config=None):
         PLAN_FREE_MONTHS=int(os.getenv("PLAN_FREE_MONTHS", "1")),
         MOTOJA_HOSTS={h.strip() for h in os.getenv("MOTOJA_HOSTS", "motoboy-conchal.onrender.com").split(",") if h.strip()},
         EVOLUTION_API_URL=os.getenv("EVOLUTION_API_URL", ""), EVOLUTION_API_KEY=os.getenv("EVOLUTION_API_KEY", ""), BILLING_EXEMPT_EMAILS=os.getenv("BILLING_EXEMPT_EMAILS", ""),
-        INBOX_DISPATCH_MODE=os.getenv('INBOX_DISPATCH_MODE','embedded'),
+        INBOX_DISPATCH_MODE=os.getenv('INBOX_DISPATCH_MODE','embedded'), OPENROUTER_API_KEY=os.getenv('OPENROUTER_API_KEY',''),
         VAPID_PRIVATE_KEY=os.getenv("VAPID_PRIVATE_KEY", "").replace("\\n", "\n"), PUSH_CONTACT=os.getenv("PUSH_CONTACT", "suporte@seucomercioaqui.com.br"),
         UPLOAD_DIR=os.getenv("UPLOAD_DIR", str(BASE / "instance" / "uploads")),
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=production,
@@ -732,11 +732,12 @@ def create_app(test_config=None):
         discount = subtotal * coupon["value"] // 100 if coupon["kind"] == "percent" else coupon["value"]
         return min(discount, subtotal), coupon["id"]
 
-    def price_items(conn, store, items):
+    def price_items(conn, store, items, pricing_value=None):
         subtotal, quantities, prepared = 0, {}, []
         recipes = recipe_map(conn, store['id'])
         rules = catalog_rule_map(conn,store['id'])
-        scheduled_price = schedule(store, request.get_json(silent=True) or {})
+        pricing_value = pricing_value if pricing_value is not None else (request.get_json(silent=True) or {})
+        scheduled_price = schedule(store, pricing_value)
         pricing_moment = datetime.fromisoformat(scheduled_price) if scheduled_price else datetime.now(timezone.utc)
         for item in items:
             if not isinstance(item, dict):
@@ -745,7 +746,7 @@ def create_app(test_config=None):
             product = conn.execute("SELECT * FROM products WHERE id=? AND store_id=? AND active=1", (pid, store["id"])).fetchone()
             if not product:
                 abort(400, description="Um produto não está mais disponível.")
-            product = apply_rules(conn, store, product, 'dining' if getattr(g, 'manual_order', False) and request.get_json(silent=True).get('account_id') else 'counter' if getattr(g, 'manual_order', False) else 'web', pricing_moment, rules=rules.get(pid,[]))
+            product = apply_rules(conn, store, product, 'dining' if getattr(g, 'manual_order', False) and pricing_value.get('account_id') else 'counter' if getattr(g, 'manual_order', False) else 'web', pricing_moment, rules=rules.get(pid,[]))
             if not product['active']:
                 abort(409, description='Este produto não está disponível neste canal e horário.')
             if recipes.get(pid):
@@ -773,7 +774,9 @@ def create_app(test_config=None):
     @app.post("/api/store/<slug>/quote")
     def quote(slug):
         limited("quote", 120)
-        value = data()
+        return order_quote(slug, data())
+
+    def order_quote(slug, value):
         store = one("SELECT * FROM stores WHERE slug=?", (slug,))
         if not store:
             abort(404, description="Loja não encontrada.")
@@ -783,7 +786,7 @@ def create_app(test_config=None):
         mode, items = value.get("mode"), value.get("items")
         if mode not in ("delivery", "pickup") or not isinstance(items, list) or not 1 <= len(items) <= 50:
             abort(400, description="Sacola inválida.")
-        subtotal, quantities, prepared = price_items(db(), store, items)
+        subtotal, quantities, prepared = price_items(db(), store, items, value)
         ingredient_demand(recipe_map(db(), store['id']), selected_quantities(quantities, prepared))
         for product, quantity, unit, extras, notes, _ in prepared:
             if product["stock"] is not None and quantities[product["id"]] > product["stock"]:
@@ -803,8 +806,9 @@ def create_app(test_config=None):
     @app.post("/api/store/<slug>/orders")
     def create_order(slug):
         limited("order", 30)
-        value = data()
-        key = request.headers.get("Idempotency-Key", "")
+        return place_order(slug, data(), request.headers.get("Idempotency-Key", ""))
+
+    def place_order(slug, value, key, source="web", chat_thread_id=None):
         if not re.fullmatch(r"[a-zA-Z0-9_-]{16,100}", key):
             abort(400, description="Identificador do pedido inválido.")
         digest = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -833,13 +837,21 @@ def create_app(test_config=None):
                 if previous["payload_hash"] != digest:
                     abort(409, description="Este identificador já pertence a outro pedido.")
                 return jsonify(token=previous["tracking_token"], number=previous["number"], total=previous["total"]), 200
+            if source == 'whatsapp':
+                from inbox_service import sending_since, preferences, read_json
+                thread = conn.execute('SELECT * FROM inbox_threads WHERE id=? AND store_id=?', (chat_thread_id, store['id'])).fetchone()
+                cart = read_json(conn, f"inbox.cart.{store['id']}.{chat_thread_id}", {})
+                if not thread or thread['assigned_to'] or thread['state'] != 'open' or not store['inbox_bot'] or not sending_since(conn,store['id']) or not preferences(conn,store['id']).get('chat_enabled') or cart.get('key') != key or cart.get('stage') != 'processing':
+                    abort(409,description='A montagem foi interrompida ou assumida pela equipe. Confira com o atendente.')
+                if cart.get('submitted_at','') < (datetime.now(timezone.utc)-timedelta(minutes=5)).isoformat(timespec='seconds'):
+                    abort(409,description='A confirmação expirou. Monte novamente o pedido para conferir as condições atuais.')
             accepting, status_text = store_status(store)
             scheduled = schedule(store, value)
             if not store["enabled"] or (not accepting and not scheduled and not getattr(g, 'manual_order', False)):
                 abort(409, description="A loja não está aceitando pedidos agora. " + status_text + ".")
             if (payment not in json.loads(store["payments"]) and not (payment == 'credit' and getattr(g,'manual_order',False))) or (payment == "pix_online" and not store["mp_token"]):
                 abort(400, description="Forma de pagamento indisponível.")
-            subtotal, quantities, prepared = price_items(conn, store, items)
+            subtotal, quantities, prepared = price_items(conn, store, items, value)
             if subtotal < store["minimum_order"]:
                 abort(400, description=f"Pedido mínimo de R$ {store['minimum_order']/100:.2f} em produtos.")
             for pid, quantity in quantities.items():
@@ -884,7 +896,7 @@ def create_app(test_config=None):
                 (store['default_delivery_cost'] if mode=='delivery' else 0,
                  (total*fees.get(payment,0)+5000)//10000,
                  ((subtotal-discount)*store['commission_bps']+5000)//10000,
-                 'counter' if getattr(g,'manual_order',False) else 'web',zone,scheduled,oid))
+                 'counter' if getattr(g,'manual_order',False) else source,zone,scheduled,oid))
             for raw_item, (product, quantity, unit, extras, item_notes, cost) in zip(items, prepared):
                 source_id, source_name = attribution(raw_item, product, prepared, store["id"])
                 conn.execute("INSERT INTO order_items(order_id,product_id,name,quantity,unit_price,unit_cost,extras,notes,production_sector,kitchen_state,suggested_by,suggested_by_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -913,6 +925,10 @@ def create_app(test_config=None):
             notify_store(app, store["id"], {"title": f"Novo pedido #{number}", "tag": f"pedido-{oid}", "url": "/painel",
                                             "body": f"{customer} • R$ {total/100:.2f}".replace(".", ",") + (" • entrega" if mode == "delivery" else " • retirada") + when})
         return jsonify(token=token, number=number, total=total), 201
+
+    app.extensions['chat_catalog'] = lambda slug: catalog(slug).get_json()
+    app.extensions['chat_quote'] = lambda slug, value: order_quote(slug, value).get_json()
+    app.extensions['chat_place_order'] = place_order
 
     @app.post('/api/admin/orders')
     @owner
