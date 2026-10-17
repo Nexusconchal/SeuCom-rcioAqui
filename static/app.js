@@ -1,4 +1,4 @@
-import { $, icon, brand, auth, bootstrap, api, bindForm, esc, toast, attachFallbacks } from './ui.js';
+import { $, icon, brand, auth, bootstrap, api, bindForm, esc, toast } from './ui.js';
 
 async function start(){
   try{
@@ -12,20 +12,11 @@ async function start(){
     if(path[0]==='painel')return auth.user?await (await import('./dashboard.js')).renderDashboard():location.replace('/entrar');
     if(path[0]==='entrar')return loginPage();
     if(path[0]==='termos'||path[0]==='privacidade')return legalPage(path[0]);
-    landing();
+    return (await import('./landing.js')).renderLanding();
   }catch(error){
     $('#app').innerHTML='<main id="main" class="loading">'+brand()+'<h1>Não conseguimos abrir esta página</h1><p>'+esc(error.message)+'</p><a class="btn" href="/">Ir ao início</a><button id="retry" class="btn secondary">Tentar novamente</button></main>';
     $('#retry').onclick=()=>location.reload();
   }
-}
-function landing(){
-  $('#app').innerHTML='<header class="site-head">'+brand()+'<nav><a href="#como-funciona">Como funciona</a><a class="btn secondary" href="'+(auth.user?'/painel':'/entrar')+'">'+(auth.user?'Meu painel':'Entrar')+'</a></nav></header>'+
-  '<main id="main"><section class="hero"><div class="hero-copy"><span class="eyebrow"><i></i> O seu comércio, conectado.</span><h1>Seu negócio.<br>Mais perto.<br><em>Mais pedidos.</em></h1><p>Um cardápio que dá vontade de pedir.<br>Um painel que deixa seu dia mais leve.</p><a class="btn lime large" href="'+(auth.user?'/painel':'/entrar?cadastro=1')+'">'+(auth.user?'Abrir meu painel':'Criar minha loja')+icon('arrow')+'</a><div class="hero-proof"><span>'+icon('check')+' Sem app para instalar</span><span>'+icon('check')+' Sua própria marca</span></div></div>'+
-  '<div class="hero-visual"><div class="floating-label">'+icon('bell')+' Mais simples, do pedido à entrega</div><div class="phone-preview"><div class="notch"></div><img class="preview-cover" alt="Hambúrguer artesanal" src="https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=900&auto=format&fit=crop&q=85"><div class="preview-store"><b>Bistrô da Vila</b><span class="badge green">Aberto</span><small>por SeuComércioAqui</small></div><div class="preview-content"><div class="fake-search">'+icon('search')+' O que você quer pedir?</div><div class="chips"><span class="chip active">Destaques</span><span class="chip">Lanches</span><span class="chip">Bebidas</span></div><div class="preview-product"><img src="https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=250&auto=format&fit=crop&q=80" alt=""><div><b>Burger da casa</b><small>Feito com carinho, do seu jeito.</small><strong>R$ 29,00</strong></div><span class="plus-circle">+</span></div><div class="preview-cart">'+icon('bag')+' Seu próximo pedido está aqui '+icon('arrow')+'</div></div></div><div class="floating-card">'+icon('chart')+'<div><b>Seu comércio em movimento</b><small>Cardápio, pedidos e vendas em um lugar.</small></div></div></div></section>'+
-  '<section class="feature-section" id="como-funciona"><span class="eyebrow">MENOS COMPLICAÇÃO. MAIS COMÉRCIO.</span><h2>Do link ao pedido,<br>tudo no seu ritmo.</h2><div class="features">'+
-  [['store','Um cardápio com a sua cara','Fotos, categorias, complementos e promoções. Compartilhe o link da loja com seus clientes.'],['bag','Pedidos bem organizados','Receba pedidos, acompanhe o preparo e organize as entregas em um painel simples.'],['chart','Você sabe como foi o dia','Vendas, recebimentos e despesas. Os números que ajudam você a cuidar do seu negócio.']].map(([i,t,d])=>'<article><span class="feature-icon">'+icon(i)+'</span><h3>'+t+'</h3><p>'+d+'</p></article>').join('')+'</div></section>'+
-  '<section class="landing-cta"><img src="/static/logo.svg" alt="" width="60"><div><h2>Seu comércio cabe aqui.</h2><p>Abra sua loja digital e dê o próximo passo.</p></div><a class="btn lime" href="/entrar?cadastro=1">Começar agora '+icon('arrow')+'</a></section></main><footer>'+brand()+'<p>Feito para quem faz o comércio acontecer.</p><p><a href="/termos">Termos de uso</a> • <a href="/privacidade">Privacidade</a></p></footer>';
-  attachFallbacks();
 }
 
 const LEGAL={
