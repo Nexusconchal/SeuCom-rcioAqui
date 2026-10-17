@@ -537,6 +537,7 @@ def register_business(app, helpers):
             conn.execute('DELETE FROM wallet_challenges WHERE store_id=? AND phone=?',(g.store['id'],key))
             conn.execute('DELETE FROM wallet_sessions WHERE store_id=? AND phone=?',(g.store['id'],key))
             conn.execute("UPDATE cashback_movements SET phone='' WHERE store_id=? AND phone=?",(g.store['id'],key))
+            conn.execute("DELETE FROM platform_settings WHERE key IN (SELECT 'inbox.cart.' || CAST(store_id AS TEXT) || '.' || CAST(id AS TEXT) FROM inbox_threads WHERE store_id=? AND phone=?)",(g.store['id'],key))
             conn.execute('DELETE FROM inbox_messages WHERE thread_id IN (SELECT id FROM inbox_threads WHERE store_id=? AND phone=?)',(g.store['id'],key))
             conn.execute('DELETE FROM inbox_threads WHERE store_id=? AND phone=?',(g.store['id'],key))
             conn.execute('DELETE FROM credit_accounts WHERE store_id=? AND phone=?',(g.store['id'],key))

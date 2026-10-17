@@ -10,6 +10,7 @@ import click
 from flask import abort,g,jsonify,request
 
 from connectors import Evolution
+from chat_orders import handle_chat, forget_cart
 from inbox_service import (preferences, sending_since, write_value, validate_preferences,
                            automatic_reply, template_values, render_message, delivery_health, normalize)
 
@@ -39,7 +40,7 @@ def dispatch_inbox(app,limit=20,stop_event=None):
         now=datetime.now(timezone.utc).isoformat(timespec='seconds')
         conn.execute("UPDATE inbox_messages SET status='uncertain' WHERE status='processing' AND claimed_at<?",((datetime.now(timezone.utc)-timedelta(minutes=5)).isoformat(timespec='seconds'),))
         conn.execute("UPDATE inbox_messages SET status='cancelled' WHERE status='queued' AND automated=1 AND created_at<?",((datetime.now(timezone.utc)-timedelta(minutes=5)).isoformat(timespec='seconds'),))
-        conn.execute("UPDATE inbox_messages SET status='held' WHERE status='queued' AND automated=0 AND COALESCE(claimed_at,created_at)<?",((datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds'),))
+        conn.execute("UPDATE inbox_messages SET status='held' WHERE status='queued' AND automated IN (0,2) AND COALESCE(claimed_at,created_at)<?",((datetime.now(timezone.utc)-timedelta(hours=24)).isoformat(timespec='seconds'),))
         for _ in range(max(1,min(limit,100))):
             if stop_event is not None and stop_event.is_set():break
             conn.execute('BEGIN IMMEDIATE')
@@ -49,7 +50,7 @@ def dispatch_inbox(app,limit=20,stop_event=None):
                     JOIN platform_settings gate ON gate.key='inbox.sending.' || CAST(s.id AS TEXT)
                     WHERE m.status='queued' AND s.enabled=1 AND s.wa_instance!='' AND s.inbox_hook_hash!=''
                     AND gate.value!=''
-                    AND (m.automated=0 OR (t.assigned_to IS NULL AND t.state='open' AND s.inbox_bot=1)) ORDER BY m.id LIMIT 1""").fetchone()
+                    AND (m.automated IN (0,2) OR (t.assigned_to IS NULL AND t.state='open' AND s.inbox_bot=1)) ORDER BY m.id LIMIT 1""").fetchone()
                 if not row:conn.execute('COMMIT');break
                 claimed=conn.execute("UPDATE inbox_messages SET status='processing',claimed_at=? WHERE id=? AND status='queued'",(now,row['id']))
                 conn.execute('COMMIT')
@@ -94,6 +95,7 @@ def register_inbox(app,helpers):
         h.limited('inbox-hook:'+str(sid),600,60)
         value=h.data()
         if value.get('instance')!=s['wa_instance']:abort(403)
+        if not isinstance(value.get('event',''),str):abort(400)
         if value.get('event','').lower().replace('_','.')!='messages.upsert':return jsonify(ignored=True)
         message=value.get('data')
         if not isinstance(message,dict):abort(400)
@@ -126,13 +128,16 @@ def register_inbox(app,helpers):
             normalized=normalize(body);reply=''
             human=bool(re.search(r'\b(atendente|humano)\b',normalized)) or body.startswith('[Mensagem de mídia:')
             if human:
+                forget_cart(conn,sid,thread['id'])
                 conn.execute("UPDATE inbox_threads SET state='human' WHERE id=?",(thread['id'],))
                 conn.execute("UPDATE inbox_messages SET status='cancelled' WHERE thread_id=? AND automated=1 AND status='queued'",(thread['id'],))
             elif s['inbox_bot'] and not thread['assigned_to'] and thread['state'] in ('open','closed'):
                 base=app.config['PUBLIC_URL'] or request.host_url.rstrip('/')
-                reply=automatic_reply(preferences(conn,sid),s,body,name,base)
+                guided=handle_chat(conn,app,s,thread,body,eid) if sending_since(conn,sid) else None
+                reply=guided if guided is not None else automatic_reply(preferences(conn,sid),s,body,name,base)
+                if guided is not None:conn.execute("UPDATE inbox_messages SET status='cancelled' WHERE thread_id=? AND automated=1 AND status='queued'",(thread['id'],))
                 if not reply:conn.execute("UPDATE inbox_threads SET state='human' WHERE id=?",(thread['id'],))
-                if thread['last_auto_at'] and thread['last_auto_at']>=(datetime.now(timezone.utc)-timedelta(seconds=3)).isoformat(timespec='seconds'):reply=''
+                if guided is None and thread['last_auto_at'] and thread['last_auto_at']>=(datetime.now(timezone.utc)-timedelta(seconds=3)).isoformat(timespec='seconds'):reply=''
                 if reply:
                     conn.execute("INSERT INTO inbox_messages(store_id,thread_id,direction,body,external_id,status,automated,created_at) VALUES(?,?,'out',?,?,'queued',1,?)",(sid,thread['id'],reply,'auto:'+eid,stamp))
                     conn.execute('UPDATE inbox_threads SET last_auto_at=? WHERE id=?',(stamp,thread['id']))
@@ -144,6 +149,7 @@ def register_inbox(app,helpers):
         settings=preferences(h.db(),g.store['id'])
         return jsonify(configured=bool(g.store['inbox_hook_hash']),available=provider().ready and bool(g.store['wa_instance']),
             provider_available=provider().ready,linked=bool(g.store['wa_instance']),bot=bool(g.store['inbox_bot']),
+            ai_configured=bool(app.config.get('OPENROUTER_API_KEY')),
             permissions={'connect':g.role=='owner','configure':g.role in ('owner','manager')},
             agents=h.rows('''SELECT id,name FROM users WHERE id=? OR id IN
                 (SELECT user_id FROM store_members WHERE store_id=? AND active=1 AND role!='kitchen') ORDER BY name''',(g.store['owner_id'],g.store['id'])),
@@ -172,6 +178,27 @@ def register_inbox(app,helpers):
         except ValueError as exc:abort(400,description=str(exc))
         write_value(h.db(),'inbox.config.'+str(g.store['id']),json.dumps(value))
         return jsonify(ok=True,settings=value)
+
+    @app.post('/api/admin/inbox/catalog-lookup')
+    @h.owner
+    def inbox_catalog_lookup():
+        from catalog_ai import lookup
+        from chat_orders import cash
+        h.limited('catalog-ai:'+str(g.store['id']),20,60)
+        catalog=app.extensions['chat_catalog'](g.store['slug'])
+        try:
+            result=lookup(app,h.db(),g.store,h.data().get('question'),catalog['products'],preferences(h.db(),g.store['id']).get('ai_enabled',False))
+        except ValueError as exc:abort(400,description=str(exc))
+        products={p['id']:p for p in catalog['products']}
+        items=[products[i] for i in result['product_ids'] if i in products]
+        base=app.config['PUBLIC_URL'] or request.host_url.rstrip('/')
+        reply='\n'.join(p['name']+' — preço base '+cash(p['price'])+'\n'+p['description'][:250] for p in items)
+        if result['intent']=='hours':
+            from app import store_status
+            reply=store_status(g.store)[1]
+        elif result['intent']=='menu':reply='Confira nosso cardápio:'
+        elif not reply:reply='Não encontrei um produto correspondente. Posso conferir com a equipe.'
+        return jsonify(**result,reply=reply+'\nVeja opções, adicionais e o total no cardápio: '+base+'/loja/'+g.store['slug'])
 
     @app.put('/api/admin/inbox/delivery')
     @h.owner
@@ -213,7 +240,11 @@ def register_inbox(app,helpers):
         settings=preferences(h.db(),g.store['id']);base=app.config['PUBLIC_URL'] or request.host_url.rstrip('/')
         values=template_values(g.store,thread['name'],base)
         assigned=h.one('SELECT name FROM users WHERE id=?',(thread['assigned_to'],)) if thread['assigned_to'] else None
+        from inbox_service import read_json
+        from chat_orders import cart_key
+        cart=read_json(h.db(),cart_key(g.store['id'],tid),{})
         return jsonify(thread={**dict(thread),'mine':thread['assigned_to']==g.user['id'],'assigned_name':assigned['name'] if assigned else None},messages=messages[:100],has_more=len(messages)>100,
+                       guided_order={'stage':cart.get('stage'),'expires':cart.get('expires')},
                        quick_replies=[{**r,'rendered':render_message(r['message'],values)} for r in settings['quick_replies']])
 
     @app.post('/api/admin/inbox/messages/<int:mid>/action')
@@ -240,6 +271,7 @@ def register_inbox(app,helpers):
             thread=h.owned('inbox_threads',tid);claim=h.boolean(value,'claim',True)
             if thread['assigned_to'] and thread['assigned_to']!=g.user['id'] and g.role not in ('owner','manager'):abort(409,description='Esta conversa já está com outro atendente.')
             conn.execute('UPDATE inbox_threads SET assigned_to=?,state=?,updated_at=? WHERE id=?',(g.user['id'] if claim else None,'human' if claim else 'open',h.now(),tid))
+            if claim:forget_cart(conn,g.store['id'],tid)
             if claim:conn.execute("UPDATE inbox_messages SET status='cancelled' WHERE thread_id=? AND automated=1 AND status='queued'",(tid,))
         return jsonify(ok=True)
 
@@ -270,6 +302,7 @@ def register_inbox(app,helpers):
             abort(404,description='Atendente não encontrado nesta loja.')
         with h.transaction() as conn:
             h.owned('inbox_threads',tid)
+            forget_cart(conn,g.store['id'],tid)
             conn.execute("UPDATE inbox_threads SET assigned_to=?,state='human',updated_at=? WHERE id=?",(uid,h.now(),tid))
             conn.execute("UPDATE inbox_messages SET status='cancelled' WHERE thread_id=? AND automated=1 AND status='queued'",(tid,))
         return jsonify(ok=True)
@@ -290,6 +323,7 @@ def register_inbox(app,helpers):
         with h.transaction() as conn:
             thread=h.owned('inbox_threads',tid)
             if thread['assigned_to'] not in (None,g.user['id']) and g.role not in ('owner','manager'):abort(403)
+            forget_cart(conn,g.store['id'],tid)
             conn.execute("UPDATE inbox_threads SET state='closed',assigned_to=NULL,unread=0 WHERE id=?",(tid,))
             conn.execute("UPDATE inbox_messages SET status='cancelled' WHERE thread_id=? AND automated=1 AND status='queued'",(tid,))
         return jsonify(ok=True)
@@ -300,6 +334,7 @@ def register_inbox(app,helpers):
         if g.role not in ('owner','manager'):abort(403)
         with h.transaction() as conn:
             h.owned('inbox_threads',tid)
+            forget_cart(conn,g.store['id'],tid)
             conn.execute('DELETE FROM inbox_messages WHERE thread_id=?',(tid,))
             conn.execute('DELETE FROM inbox_threads WHERE id=?',(tid,))
         return jsonify(ok=True)

@@ -58,7 +58,9 @@ def test_contextual_suggestion_checkout_and_report(live):
         page.get_by_label('Seu nome', exact=True).fill('Teste Combinação')
         page.get_by_label('WhatsApp com DDD').fill('11999999999')
         page.get_by_label('Endereço completo').fill('Rua Teste, 12, Centro')
-        page.get_by_role('button', name='Confirmar pedido').click()
+        with page.expect_response(lambda r: r.url.endswith('/orders') and r.request.method == 'POST') as order_response:
+            page.get_by_role('button', name='Confirmar pedido').click()
+        assert order_response.value.status in (200, 201), order_response.value.json()
         page.wait_for_url('**/pedido/**')
 
         # Complete only the fictitious local order, then inspect the real report UI/API.
