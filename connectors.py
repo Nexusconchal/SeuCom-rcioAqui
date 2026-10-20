@@ -96,6 +96,34 @@ class Evolution:
             digits = "55" + digits
         return self._call("POST", "/message/sendText/" + urllib.parse.quote(instance, safe=""), {"number": digits, "text": text})
 
+    def _media_call(self, path, body):
+        """Bound provider payloads and never forward its credential across redirects."""
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):return None
+        request=urllib.request.Request(self.base+path,method='POST',
+            headers={'apikey':self.key,'Content-Type':'application/json'},data=json.dumps(body).encode())
+        try:
+            with urllib.request.build_opener(NoRedirect).open(request,timeout=25) as response:
+                raw=response.read(6*1024*1024+1)
+                if len(raw)>6*1024*1024:return 0,{}
+                result=json.loads(raw)
+                return response.status,result if isinstance(result,dict) else {}
+        except (urllib.error.URLError,TimeoutError,ValueError,OSError):return 0,{}
+
+    def get_media(self, instance, key):
+        return self._media_call('/chat/getBase64FromMediaMessage/'+urllib.parse.quote(instance,safe=''),
+                                {'message':{'key':key},'convertToMp4':False})
+
+    def send_media(self, instance, phone, media, caption=''):
+        digits=re.sub(r'\D','',phone or '')
+        if len(digits) in (10,11):digits='55'+digits
+        if media['kind']=='audio':
+            return self._media_call('/message/sendWhatsAppAudio/'+urllib.parse.quote(instance,safe=''),
+                                    {'number':digits,'audio':media['base64'],'encoding':True})
+        return self._media_call('/message/sendMedia/'+urllib.parse.quote(instance,safe=''),
+                                {'number':digits,'mediatype':'image','mimetype':media['mime'],'media':media['base64'],
+                                 'fileName':media['name'],'caption':caption})
+
     def set_webhook(self, instance, url, token):
         return self._call('POST', '/webhook/set/' + urllib.parse.quote(instance, safe=''),
             {'webhook': {'enabled': True, 'url': url, 'headers': {'X-Webhook-Token': token},

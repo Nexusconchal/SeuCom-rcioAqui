@@ -1,6 +1,8 @@
 import { $, $$, api, esc, date, icon, toast, auth, bindForm, modal, closeModal } from './ui.js';
 import { matchesSearch } from './search.js';
 import { manualOrder } from './management.js';
+import { renderCustomer } from './inbox-customer.js';
+import { mediaMarkup, bindMediaButtons, attachmentDialog } from './inbox-attachments.js';
 
 const send=(path,value,method='POST')=>api(path,{method,body:JSON.stringify(value)});
 const labels={received:'Recebida',queued:'Na fila',processing:'Enviando',sent:'Aceita pelo serviço',uncertain:'Confira no WhatsApp',cancelled:'Cancelada',held:'Aguardando revisão'};
@@ -12,16 +14,17 @@ export async function inboxPage(root){
   const view=Symbol('inbox');root._inboxView=view;
   let stopped=false,timer,busy=false,data,selected=null,thread=null,filter='open',query='',requestVersion=0,connection={connected:null,state:'checking'};
   let guidedOrder={},messages=new Map(),quick=[],hasMore=false,formIdentity='',connectionCheckedAt=0;
+  let contextValue=null,contextAt=0,historyQuery='',qrTimer,contextRequest=0;
   const drafts=root._inboxDrafts??=new Map();
   const alive=()=>!stopped&&root.isConnected&&root.dataset.management==='inbox'&&root._inboxView===view;
-  root._inboxCleanup=()=>{stopped=true;clearTimeout(timer);};
+  root._inboxCleanup=()=>{stopped=true;clearTimeout(timer);clearTimeout(qrTimer);};
   data=await api('/api/admin/inbox');if(!alive())return;
-  root.innerHTML='<section class="inbox-hero"><div><span class="eyebrow">ATENDIMENTO DA SUA LOJA</span><h2>Uma boa conversa<br>faz o cliente voltar.</h2><p>Bot e equipe trabalhando juntos, com cada resposta no lugar.</p></div><div class="inbox-hero-actions"><button type="button" class="btn secondary" id="inbox-settings">'+icon('gear')+' Respostas e atalhos</button><button type="button" class="btn secondary" id="refresh-inbox">'+icon('clock')+' Atualizar</button><small id="inbox-sync" role="status">Atualização automática a cada 5 segundos</small></div></section>'+
+  root.innerHTML='<section class="inbox-hero"><div><span class="eyebrow">ATENDIMENTO DA SUA LOJA</span><h2>Conversas que viram pedidos.</h2><p>Atenda, consulte o cliente e acompanhe a venda no mesmo lugar.</p></div><div class="inbox-hero-actions"><button type="button" class="btn secondary" id="inbox-settings">'+icon('gear')+' Respostas e atalhos</button><button type="button" class="btn secondary" id="refresh-inbox">'+icon('clock')+' Atualizar</button><small id="inbox-sync" role="status">Atualização automática a cada 5 segundos</small></div></section>'+
     '<section class="panel inbox-connection"><div class="inbox-connection-head"><div><span class="eyebrow">CONEXÃO E ENVIO</span><h2>WhatsApp da loja</h2></div><div class="row-actions"><button type="button" class="btn secondary small" id="inbox-connection-action"></button><button type="button" class="btn small" id="inbox-delivery-action"></button></div></div><div class="inbox-status-grid" id="inbox-status-grid"></div><div class="inbox-bot-row"><label class="check-row"><span><input id="inbox-bot" type="checkbox"> Respostas automáticas do bot</span></label><button type="button" class="text-link" id="inbox-preview">Testar resposta '+icon('arrow')+'</button></div><p class="muted" id="inbox-operation-note"></p></section>'+
-    '<div class="inbox-workspace" id="inbox-workspace"><section class="panel inbox-list"><div class="section-heading"><h2>Conversas</h2><span class="badge gray" id="inbox-count"></span></div><label class="search">'+icon('search')+'<input type="search" id="inbox-search" aria-label="Buscar conversa" placeholder="Nome, telefone ou mensagem"></label><div class="inbox-filters" id="inbox-filters"></div><div class="inbox-contacts" id="inbox-contacts"></div></section><section class="panel inbox-conversation" id="inbox-conversation"><div class="inbox-empty"><span>'+icon('bell')+'</span><h3>Seu próximo atendimento começa aqui</h3><p>Escolha uma conversa. Assuma o atendimento, use uma resposta pronta ou monte o pedido enquanto conversa.</p></div></section></div>';
+    '<div class="inbox-workspace" id="inbox-workspace"><section class="panel inbox-list"><div class="section-heading"><h2>Conversas</h2><span class="badge gray" id="inbox-count"></span></div><label class="search">'+icon('search')+'<input type="search" id="inbox-search" aria-label="Buscar conversa" placeholder="Nome, telefone ou mensagem"></label><div class="inbox-filters" id="inbox-filters"></div><div class="inbox-contacts" id="inbox-contacts"></div></section><section class="panel inbox-conversation" id="inbox-conversation"><div class="inbox-empty"><span>'+icon('bell')+'</span><h3>Seu próximo atendimento começa aqui</h3><p>Escolha uma conversa. Assuma o atendimento, use uma resposta pronta ou monte o pedido enquanto conversa.</p></div></section><aside class="panel inbox-customer" id="inbox-customer" aria-label="Cliente e pedidos" hidden></aside></div>';
   $('#inbox-settings',root).hidden=!data.permissions.configure;
   $('#inbox-preview',root).hidden=!data.permissions.configure;
-  $('#refresh-inbox',root).onclick=async()=>{await load();await checkConnection();};
+  $('#refresh-inbox',root).onclick=async()=>{contextAt=0;await load();await checkConnection();};
   $('#inbox-search',root).oninput=e=>{query=e.target.value;drawContacts();};
   $('#inbox-settings',root).onclick=()=>settingsDialog(data.settings,load,data.ai_configured);
   $('#inbox-preview',root).onclick=previewDialog;
@@ -54,29 +57,50 @@ export async function inboxPage(root){
     $$('[data-thread]',root).forEach(b=>b.onclick=()=>selectThread(Number(b.dataset.thread)));
   }
   function draft(){if(!drafts.has(selected))drafts.set(selected,{text:'',key:crypto.randomUUID()});return drafts.get(selected);}
-  async function selectThread(tid){selected=tid;messages=new Map();hasMore=false;formIdentity='';drawContacts();$('#inbox-workspace',root).classList.add('inbox-chat-open');await openThread();}
-  function syncSendButton(){const b=$('#inbox-send',root);if(b)b.disabled=!!$('#inbox-reply',root)?.dataset.busy||!thread?.mine||!data.sending||connection.connected!==true;}
+  async function loadContext(){
+    if(!selected||!alive())return;
+    const tid=selected,version=++contextRequest;
+    try{
+      const result=await api('/api/admin/inbox/'+tid+'/context');
+      if(!alive()||selected!==tid||version!==contextRequest)return;
+      contextValue=result;contextAt=Date.now();
+      // Do not replace expanded order details while the operator is reading them.
+      const panel=$('#inbox-customer',root),next=JSON.stringify(result);
+      if(panel.dataset.value!==next){renderCustomer(panel,result,createCustomerOrder);panel.dataset.value=next;}
+    }catch(e){if(alive()&&selected===tid&&version===contextRequest){contextAt=Date.now();delete $('#inbox-customer',root).dataset.value;$('#inbox-customer',root).innerHTML='<p class="muted">Não foi possível carregar o histórico. Atualize para tentar novamente.</p>';}}
+  }
+  async function createCustomerOrder(prefill){
+    const tid=selected;
+    try{await manualOrder(async()=>{if(alive()&&selected===tid){contextAt=0;await loadContext();}},{...prefill,title:'Novo pedido pelo atendimento'});}
+    catch(e){if(alive())toast(e.message);}
+  }
+  async function selectThread(tid){selected=tid;messages=new Map();hasMore=false;formIdentity='';contextValue=null;contextAt=0;historyQuery='';$('#inbox-customer',root).hidden=false;delete $('#inbox-customer',root).dataset.value;$('#inbox-customer',root).innerHTML='<p class="muted">Carregando cliente e pedidos…</p>';drawContacts();$('#inbox-workspace',root).classList.add('inbox-chat-open','inbox-has-customer');$('#inbox-workspace',root).classList.remove('inbox-context-open');await openThread();}
+  function syncSendButton(){const allowed=thread?.mine&&data.sending&&connection.connected===true;const b=$('#inbox-send',root);if(b)b.disabled=!!$('#inbox-reply',root)?.dataset.busy||!allowed;const a=$('#inbox-attach',root);if(a)a.disabled=!allowed;}
   async function openThread(older=false){
     if(!selected||!alive())return;
     const tid=selected,version=++requestVersion;
     try{const before=older&&messages.size?Math.min(...messages.keys()):null;
       const r=await api('/api/admin/inbox/'+tid+(before?'?before='+before:''));if(!alive()||selected!==tid||version!==requestVersion)return;
       thread=r.thread;guidedOrder=r.guided_order||{};quick=r.quick_replies;hasMore=older?r.has_more:(messages.size>100?hasMore:r.has_more);
-      r.messages.forEach(m=>messages.set(m.id,m));drawConversation(older);
+      r.messages.forEach(m=>messages.set(m.id,m));drawConversation(older);if(!contextValue||Date.now()-contextAt>15000)await loadContext();
     }catch(e){if(alive())toast(e.message);}
   }
   function drawConversation(older=false){
     const t=thread,target=$('#inbox-conversation',root),identity=[t.id,t.assigned_to,t.state,data.sending].join(':');
     if(identity!==formIdentity&&!$('#inbox-reply',target)?.dataset.busy){
       const saved=draft();formIdentity=identity;
-      target.innerHTML='<div class="inbox-chat-head"><button type="button" class="icon-btn inbox-back" id="inbox-back" aria-label="Voltar às conversas">'+icon('back')+'</button><span class="inbox-avatar">'+avatar(t.name)+'</span><div><h2>'+esc(t.name)+'</h2><p>'+esc(t.phone)+' • '+esc(stateLabel(t))+'</p></div><div class="inbox-chat-actions"><button type="button" id="claim-inbox" class="btn secondary small">'+(t.mine?'Liberar conversa':'Assumir conversa')+'</button><button type="button" id="inbox-catalog" class="btn secondary small">Consultar catálogo</button><button type="button" id="inbox-order" class="btn secondary small">'+icon('plus')+' Montar pedido</button><button type="button" id="close-inbox" class="text-link">Encerrar</button></div></div>'+
+      target.innerHTML='<div class="inbox-chat-head"><button type="button" class="icon-btn inbox-back" id="inbox-back" aria-label="Voltar às conversas">'+icon('back')+'</button><span class="inbox-avatar">'+avatar(t.name)+'</span><div><h2>'+esc(t.name)+'</h2><p>'+esc(t.phone)+' • '+esc(stateLabel(t))+'</p></div><div class="inbox-chat-actions"><button type="button" id="claim-inbox" class="btn secondary small">'+(t.mine?'Liberar conversa':'Assumir conversa')+'</button><button type="button" id="inbox-catalog" class="btn secondary small">Consultar catálogo</button><button type="button" id="inbox-order" class="btn secondary small">'+icon('plus')+' Montar pedido</button><button type="button" class="btn secondary small" id="inbox-customer-toggle" aria-expanded="false">Cliente e pedidos</button><button type="button" id="close-inbox" class="text-link">Encerrar</button></div></div>'+
         (data.permissions.configure?'<div class="inbox-assignment"><label>Responsável<select id="inbox-assignee" aria-label="Responsável pela conversa"><option value="">Escolha um atendente</option>'+data.agents.map(a=>'<option value="'+a.id+'" '+(a.id===t.assigned_to?'selected':'')+'>'+esc(a.name)+'</option>').join('')+'</select></label><button type="button" class="btn secondary small" id="inbox-assign">Transferir</button></div>':'')+
-        '<p class="muted" id="inbox-guided-state" role="status"></p><div class="inbox-history" aria-label="Histórico da conversa"></div><form id="inbox-reply"><div id="inbox-quick-replies" class="inbox-quick-replies"></div><label>Resposta<textarea name="message" maxlength="4000" required '+(!t.mine?'disabled':'')+' placeholder="'+(t.mine?'Escreva ou use / para uma resposta rápida':'Assuma a conversa para responder')+'">'+esc(saved.text)+'</textarea></label><p class="form-error" role="alert" hidden></p><div class="inbox-compose-bottom"><small>'+(t.mine?'Ctrl + Enter para enviar. Revise antes de confirmar.':'O bot fica pausado durante o atendimento humano.')+'</small><button class="btn" id="inbox-send" type="submit">Enviar resposta '+icon('arrow')+'</button></div></form>';
-      $('#inbox-back',target).onclick=()=>{selected=null;thread=null;$('#inbox-workspace',root).classList.remove('inbox-chat-open');drawContacts();};
+        '<p class="muted" id="inbox-guided-state" role="status"></p><div class="inbox-history-tools"><label class="search">'+icon('search')+'<input type="search" id="inbox-history-search" aria-label="Buscar no histórico carregado" placeholder="Buscar no histórico carregado" value="'+esc(historyQuery)+'"></label><small id="inbox-history-count" role="status"></small></div><div class="inbox-history" aria-label="Histórico da conversa"></div><form id="inbox-reply"><div id="inbox-quick-replies" class="inbox-quick-replies"></div><label>Resposta<textarea name="message" maxlength="4000" required '+(!t.mine?'disabled':'')+' placeholder="'+(t.mine?'Escreva ou use / para uma resposta rápida':'Assuma a conversa para responder')+'">'+esc(saved.text)+'</textarea></label><p class="form-error" role="alert" hidden></p><div class="inbox-compose-bottom"><button type="button" id="inbox-attach" class="btn secondary small">Anexar foto ou áudio</button><small>'+(t.mine?'Ctrl + Enter para enviar. Revise antes de confirmar.':'O bot fica pausado durante o atendimento humano.')+'</small><button class="btn" id="inbox-send" type="submit">Enviar resposta '+icon('arrow')+'</button></div></form>';
+      $('#inbox-back',target).onclick=()=>{selected=null;thread=null;contextValue=null;$('#inbox-customer',root).hidden=true;$('#inbox-workspace',root).classList.remove('inbox-chat-open','inbox-context-open','inbox-has-customer');drawContacts();};
+      $('#inbox-customer-toggle',target).setAttribute('aria-expanded',String($('#inbox-workspace',root).classList.contains('inbox-context-open')));
+      $('#inbox-customer-toggle',target).onclick=e=>{const open=$('#inbox-workspace',root).classList.toggle('inbox-context-open');e.currentTarget.setAttribute('aria-expanded',String(open));};
+      $('#inbox-history-search',target).oninput=e=>{historyQuery=e.target.value;drawConversation();};
+      $('#inbox-attach',target).onclick=()=>attachmentDialog(t.id,()=>alive()&&selected===t.id&&thread?.mine&&data.sending&&connection.connected===true,()=>{if(alive()&&selected===t.id)return openThread();});
       $('#claim-inbox',target).onclick=async()=>{try{await send('/api/admin/inbox/'+t.id+'/claim',{claim:!t.mine});await load();}catch(e){toast(e.message);}};
       $('#close-inbox',target).onclick=async()=>{try{await send('/api/admin/inbox/'+t.id+'/close',{});await load();toast('Conversa encerrada.');}catch(e){toast(e.message);}};
       $('#inbox-catalog',target).onclick=()=>catalogDialog(t.id);
-      $('#inbox-order',target).onclick=()=>manualOrder(()=>toast('Pedido criado. Acompanhe em Pedidos.'),{customer:t.name,phone:t.phone});
+      $('#inbox-order',target).onclick=()=>createCustomerOrder({customer:t.name,phone:t.phone});
       if($('#inbox-assign',target))$('#inbox-assign',target).onclick=async()=>{const id=Number($('#inbox-assignee',target).value);if(!id)return toast('Escolha o atendente.');try{await send('/api/admin/inbox/'+t.id+'/assign',{user_id:id});await load();}catch(e){toast(e.message);}};
       const input=$('[name=message]',target);
       input.oninput=()=>{drafts.set(t.id,{text:input.value,key:crypto.randomUUID()});drawQuickReplies();};
@@ -86,11 +110,14 @@ export async function inboxPage(root){
     const stages={catalog:'Cliente escolhendo produtos',options:'Cliente escolhendo adicionais',quantity:'Cliente escolhendo quantidade',item_notes:'Observação do item',basket:'Cliente conferindo a sacola',mode:'Escolha de entrega ou retirada',zone:'Escolha do bairro',cep:'CEP da entrega',address:'Endereço da entrega',notes:'Observação do pedido',payment:'Escolha do pagamento',change:'Informação de troco',review:'Aguardando confirmação do cliente',submitted:'Confirmação na fila',processing:'Criando pedido',done:'Pedido guiado criado',failed:'Pedido precisa de revisão',paused:'Montagem pausada'};
     $('#inbox-guided-state',target).textContent=guidedOrder.stage?'Pedido pelo chat: '+(stages[guidedOrder.stage]||'Em montagem'):'';
     const history=$('.inbox-history',target),nearBottom=history.scrollHeight-history.scrollTop-history.clientHeight<70,oldHeight=history.scrollHeight;
-    const html=(hasMore?'<button type="button" class="btn secondary small inbox-older" id="inbox-older">Carregar mensagens anteriores</button>':'')+[...messages.values()].sort((a,b)=>a.id-b.id).map(m=>'<article class="inbox-bubble '+(m.direction==='out'?'out':'in')+' '+(['uncertain','held'].includes(m.status)?'needs-review':'')+'"><p>'+esc(m.body)+'</p><small>'+date(m.created_at)+' • '+(m.automated?'Bot • ':'')+esc(labels[m.status]||m.status)+'</small>'+(t.mine&&m.direction==='out'&&['held','queued'].includes(m.status)?'<div class="inbox-message-actions">'+(m.status==='held'&&data.sending&&!m.automated?'<button type="button" class="text-link" data-inbox-message="'+m.id+'" data-action="queue">Revisei, colocar na fila</button>':'')+'<button type="button" class="text-link" data-inbox-message="'+m.id+'" data-action="cancel">Cancelar pendência</button></div>':'')+(m.status==='uncertain'?'<p class="inbox-message-note">Confira no WhatsApp antes de reenviar. O resultado não foi confirmado.</p>':'')+'</article>').join('');
+    const shown=[...messages.values()].sort((a,b)=>a.id-b.id).filter(m=>matchesSearch(historyQuery,[m.body,m.media?.name]));
+    $('#inbox-history-count',target).textContent=historyQuery?shown.length+' resultado(s) nas mensagens carregadas':'';
+    const html=(hasMore?'<button type="button" class="btn secondary small inbox-older" id="inbox-older">Carregar mensagens anteriores</button>':'')+shown.map(m=>'<article class="inbox-bubble '+(m.direction==='out'?'out':'in')+' '+(['uncertain','held'].includes(m.status)?'needs-review':'')+'"><p>'+esc(m.body)+'</p>'+mediaMarkup(m)+'<small>'+date(m.created_at)+' • '+(m.automated?'Bot • ':'')+esc(labels[m.status]||m.status)+'</small>'+(t.mine&&m.direction==='out'&&['held','queued'].includes(m.status)?'<div class="inbox-message-actions">'+(m.status==='held'&&data.sending&&!m.automated?'<button type="button" class="text-link" data-inbox-message="'+m.id+'" data-action="queue">Revisei, colocar na fila</button>':'')+'<button type="button" class="text-link" data-inbox-message="'+m.id+'" data-action="cancel">Cancelar pendência</button></div>':'')+(m.status==='uncertain'?'<p class="inbox-message-note">Confira no WhatsApp antes de reenviar. O resultado não foi confirmado.</p>':'')+'</article>').join('');
     if(history.innerHTML!==html){history.innerHTML=html;if(older)history.scrollTop+=history.scrollHeight-oldHeight;else if(nearBottom||!history.dataset.loaded)history.scrollTop=history.scrollHeight;history.dataset.loaded='1';}
     if($('#inbox-older',target))$('#inbox-older',target).onclick=()=>openThread(true);
     $$('[data-inbox-message]',target).forEach(b=>b.onclick=async()=>{try{await send('/api/admin/inbox/messages/'+b.dataset.inboxMessage+'/action',{action:b.dataset.action});await load();}catch(e){toast(e.message);}});
-    drawQuickReplies();syncSendButton();
+    bindMediaButtons(history);drawQuickReplies();syncSendButton();
+    const attach=$('#inbox-attach',root);if(attach)attach.disabled=!t.mine||!data.sending||connection.connected!==true;
   }
   function drawQuickReplies(){
     const box=$('#inbox-quick-replies',root),input=$('#inbox-reply textarea',root);if(!box||!input)return;
@@ -100,15 +127,43 @@ export async function inboxPage(root){
   }
   async function load(){
     if(!alive()||busy)return;busy=true;
-    try{const next=await api('/api/admin/inbox');if(!alive())return;data=next;if(selected&&!data.threads.some(t=>t.id===selected)){selected=null;thread=null;messages.clear();formIdentity='';$('#inbox-conversation',root).innerHTML='<div class="inbox-empty"><p>Esta conversa não está mais disponível. Escolha outra na lista.</p></div>';$('#inbox-workspace',root).classList.remove('inbox-chat-open');}drawStatus();drawContacts();if(selected)await openThread();$('#inbox-sync',root).textContent='Atualizado agora • atualização automática';}
+    try{const next=await api('/api/admin/inbox');if(!alive())return;data=next;if(selected&&!data.threads.some(t=>t.id===selected)){selected=null;thread=null;messages.clear();formIdentity='';$('#inbox-conversation',root).innerHTML='<div class="inbox-empty"><p>Esta conversa não está mais disponível. Escolha outra na lista.</p></div>';$('#inbox-customer',root).hidden=true;contextValue=null;$('#inbox-workspace',root).classList.remove('inbox-chat-open','inbox-context-open','inbox-has-customer');}drawStatus();drawContacts();if(selected)await openThread();$('#inbox-sync',root).textContent='Atualizado agora • atualização automática';}
     catch(e){if(alive()){if(e.status===401){root._inboxCleanup();location.href='/entrar';return;}$('#inbox-sync',root).textContent='Atualização interrompida. Tentando novamente…';}}finally{busy=false;}
   }
   async function checkConnection(){connectionCheckedAt=Date.now();try{const result=await api('/api/admin/inbox/connection');if(alive()){connection=result;drawStatus();}}catch{if(alive()){connection={connected:false,state:'unknown'};drawStatus();}}}
   async function connectionAction(){
     if(data.linked&&!data.configured){try{await send('/api/admin/inbox/connect',{});await load();await checkConnection();toast('Recebimento de conversas ativado.');}catch(e){toast(e.message);}return;}
-    const d=modal('Conectar o WhatsApp da loja','<p>No celular da loja, abra WhatsApp → Aparelhos conectados → Conectar aparelho.</p><div id="inbox-qr"></div><button type="button" class="btn secondary full" id="inbox-create-qr">Gerar QR Code</button><button type="button" class="btn full" id="inbox-confirm-qr">Já conectei, verificar</button>');
-    $('#inbox-create-qr',d).onclick=async e=>{e.currentTarget.disabled=true;try{const r=await send('/api/admin/whatsapp/connect',{});if(!d.open)return;$('#inbox-qr',d).innerHTML=(r.qr?'<img class="wa-qr" alt="QR Code para conectar WhatsApp" src="'+esc(r.qr)+'" width="240" height="240">':'<p>O serviço não retornou um QR Code. Confira se o número já está conectado.</p>')+(r.pairing_code?'<p>Código: '+esc(r.pairing_code)+'</p>':'');}catch(err){toast(err.message);}finally{if(d.open)$('#inbox-create-qr',d).disabled=false;}};
-    $('#inbox-confirm-qr',d).onclick=async()=>{await checkConnection();if(!connection.connected)return toast('A conexão ainda não foi confirmada. Confira o celular e tente novamente.');try{await send('/api/admin/inbox/connect',{});closeModal();await load();toast('WhatsApp conectado e conversas ativadas.');}catch(e){toast(e.message);}};
+    const d=modal('Conectar o WhatsApp da loja','<div class="inbox-pairing-intro"><span class="eyebrow">SEU NÚMERO NO PAINEL</span><p>Use o WhatsApp Business da loja para vincular este atendimento.</p></div><ol class="inbox-pairing-steps"><li>Abra o WhatsApp no celular da loja.</li><li>Toque em <b>Aparelhos conectados → Conectar aparelho</b>.</li><li>Aponte a câmera para o QR Code abaixo.</li></ol><div id="inbox-qr" class="inbox-qr-placeholder"><p>Gere o código quando estiver com o celular em mãos.</p></div><p id="inbox-pairing-status" class="notice" role="status">A conexão será conferida automaticamente.</p><button type="button" class="btn secondary full" id="inbox-create-qr">Gerar QR Code</button><button type="button" class="btn full" id="inbox-confirm-qr">Já conectei, verificar</button><p class="muted">Se o código vencer, gere outro. Conectar não autoriza o envio de mensagens; essa opção é controlada separadamente.</p>');
+    const attempt=Symbol('pairing');d._inboxPairing=attempt;
+    const valid=()=>alive()&&d.open&&d._inboxPairing===attempt&&!!$('#inbox-pairing-status',d);
+    const status=message=>{if(valid())$('#inbox-pairing-status',d).textContent=message;};
+    let checking=false;
+    async function verify(manual=false){
+      if(!valid()||checking)return;checking=true;
+      try{
+        const result=await api('/api/admin/inbox/connection');
+        if(!valid())return;connection=result;drawStatus();
+        if(result.connected){
+          await send('/api/admin/inbox/connect',{});
+          if(valid()){closeModal();await load();toast('WhatsApp conectado e conversas ativadas.');}
+          clearTimeout(qrTimer);return;
+        }
+        status(manual?'Ainda não conectou. Confira a leitura do QR Code no celular.':'Aguardando a leitura no celular. A verificação continua automaticamente.');
+      }catch{status('Não foi possível verificar agora. Confira a internet; vamos tentar novamente.');}
+      finally{checking=false;if(valid()){clearTimeout(qrTimer);qrTimer=setTimeout(()=>verify(),4000);}}
+    }
+    $('#inbox-create-qr',d).onclick=async e=>{
+      const button=e.currentTarget;button.disabled=true;status('Preparando um QR Code para a loja…');
+      try{
+        const r=await send('/api/admin/whatsapp/connect',{});if(!valid())return;
+        // Only inline raster QR images are accepted; never load a provider URL in the browser.
+        const safeQR=typeof r.qr==='string'&&/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=\s]+$/.test(r.qr)&&r.qr.length<300000;
+        $('#inbox-qr',d).innerHTML=safeQR?'<img class="wa-qr" alt="QR Code para conectar WhatsApp" src="'+esc(r.qr)+'" width="240" height="240">':'<p>Não recebemos um QR Code. Vamos conferir se o número já está conectado.</p>';
+        button.textContent='Gerar outro QR Code';await verify();
+      }catch(err){status(err.message);}finally{if(valid())button.disabled=false;}
+    };
+    $('#inbox-confirm-qr',d).onclick=()=>verify(true);
+    d.addEventListener('close',()=>{if(d._inboxPairing===attempt)clearTimeout(qrTimer);},{once:true});
   }
   function catalogDialog(tid){
     const d=modal('Consultar o catálogo','<p class="muted">Escreva somente uma dúvida sobre produtos ou ingredientes. Não inclua nomes, contatos ou endereços. Nenhum histórico da conversa é enviado.</p><p class="notice">'+(data.settings.ai_enabled&&data.ai_configured?'Consulta opcional via OpenRouter gratuito. Se estiver indisponível, usamos a busca local.':'Busca local ativa. A IA gratuita depende de habilitação pela loja e configuração da plataforma.')+'</p><form id="catalog-lookup"><label>O que procurar?<input name="question" required minlength="2" maxlength="500" placeholder="Ex.: lanche com bacon"></label><p class="form-error" role="alert" hidden></p><button type="submit" class="btn full">Consultar produtos</button></form><div id="catalog-lookup-result" hidden><p class="muted" id="catalog-lookup-mode"></p><pre class="message-preview" id="catalog-lookup-text"></pre><p class="muted">Confira os ingredientes e as opções antes de responder. Nenhuma mensagem é enviada automaticamente.</p><button type="button" class="btn secondary full" id="catalog-lookup-use">Inserir na resposta para revisar</button></div>');
