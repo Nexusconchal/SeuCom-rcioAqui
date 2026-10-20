@@ -154,6 +154,7 @@ ADDITIONS['stores'].update({'timezone': "TEXT NOT NULL DEFAULT 'America/Sao_Paul
 ADDITIONS['stores'].update({'cashback_enabled': 'INTEGER NOT NULL DEFAULT 0', 'cashback_bps': 'INTEGER NOT NULL DEFAULT 500'})
 ADDITIONS['orders'].update({'cashback_discount': 'INTEGER NOT NULL DEFAULT 0', 'cashback_earned': 'INTEGER NOT NULL DEFAULT 0'})
 ADDITIONS['stores'].update({'inbox_hook_hash': "TEXT NOT NULL DEFAULT ''", 'inbox_bot': 'INTEGER NOT NULL DEFAULT 0'})
+ADDITIONS['inbox_messages']={'media': "TEXT NOT NULL DEFAULT ''", 'media_data': "TEXT NOT NULL DEFAULT ''"}
 ADDITIONS['obligations']={'order_id':'INTEGER REFERENCES orders(id)'}
 ADDITIONS['orders'].update({'latitude':'REAL','longitude':'REAL'})
 ADDITIONS['drivers']={'gps_hash':"TEXT NOT NULL DEFAULT ''",'gps_lat':'REAL','gps_lon':'REAL','gps_accuracy':'REAL','gps_at':'TEXT'}

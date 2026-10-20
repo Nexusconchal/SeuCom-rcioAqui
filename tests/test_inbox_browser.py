@@ -1,5 +1,7 @@
 """Browser → HTTP API → database → dispatcher → local Evolution-compatible HTTP stub."""
 import os
+import base64
+import io
 import re
 import threading
 import uuid
@@ -9,6 +11,7 @@ import pytest
 from flask import Flask, request, jsonify, abort
 from playwright.sync_api import sync_playwright, expect
 from werkzeug.serving import make_server
+from PIL import Image
 
 from connectors import Evolution
 from inbox_service import delivery_tick
@@ -28,6 +31,33 @@ def inbox_live(app):
 
     @service.get('/instance/connectionState/test-instance')
     def connection():return jsonify(instance={'state':'open'})
+
+    @service.post('/instance/create')
+    def existing_instance():return jsonify(message='Instance exists'),409
+
+    @service.get('/instance/connect/test-instance')
+    def qr():
+        output=io.BytesIO();Image.new('RGB',(24,24),'green').save(output,'PNG')
+        return jsonify(base64='data:image/png;base64,'+base64.b64encode(output.getvalue()).decode())
+
+    @service.post('/chat/getBase64FromMediaMessage/test-instance')
+    def media_content():
+        assert request.get_json()['message']['key']['id']
+        output=io.BytesIO();Image.new('RGB',(30,20),'orange').save(output,'PNG')
+        return jsonify(base64=base64.b64encode(output.getvalue()).decode(),mimetype='image/png',fileName='foto.png')
+
+    @service.post('/message/sendMedia/test-instance')
+    def send_photo():
+        value=request.get_json();outgoing.append(value)
+        assert value['number'].startswith('55') and value['mediatype']=='image'
+        assert base64.b64decode(value['media']).startswith(b'RIFF')
+        return jsonify(key={'id':uuid.uuid4().hex}),201
+
+    @service.post('/message/sendWhatsAppAudio/test-instance')
+    def send_audio():
+        value=request.get_json();outgoing.append(value)
+        assert value['number'].startswith('55') and base64.b64decode(value['audio']).startswith(b'RIFF')
+        return jsonify(key={'id':uuid.uuid4().hex}),201
 
     @service.post('/webhook/set/test-instance')
     def webhook():

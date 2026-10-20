@@ -3,14 +3,18 @@ import hashlib
 import json
 import re
 import secrets
+import base64
+import io
 from datetime import datetime,timedelta,timezone
 from types import SimpleNamespace
 
 import click
-from flask import abort,g,jsonify,request
+from flask import abort,g,jsonify,request,send_file
 
 from connectors import Evolution
 from chat_orders import handle_chat, forget_cart
+from inbox_media import (MAX_MEDIA, STORE_MEDIA_BUDGET, incoming_media, validate_media,
+                         public_media, read_media, decode_provider, cleanup_media)
 from inbox_service import (preferences, sending_since, write_value, validate_preferences,
                            automatic_reply, template_values, render_message, delivery_health, normalize)
 
@@ -24,7 +28,7 @@ CREATE TABLE IF NOT EXISTS inbox_messages (
  id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), thread_id INTEGER NOT NULL REFERENCES inbox_threads(id),
  direction TEXT NOT NULL CHECK(direction IN ('in','out')), body TEXT NOT NULL, external_id TEXT NOT NULL,
  status TEXT NOT NULL, automated INTEGER NOT NULL DEFAULT 0, actor_id INTEGER REFERENCES users(id),
- created_at TEXT NOT NULL, claimed_at TEXT, sent_at TEXT, payload_hash TEXT NOT NULL DEFAULT '', UNIQUE(store_id,external_id)
+ created_at TEXT NOT NULL, claimed_at TEXT, sent_at TEXT, payload_hash TEXT NOT NULL DEFAULT '', media TEXT NOT NULL DEFAULT '', media_data TEXT NOT NULL DEFAULT '', UNIQUE(store_id,external_id)
 );
 CREATE INDEX IF NOT EXISTS ix_inbox_thread ON inbox_messages(thread_id,id);
 CREATE INDEX IF NOT EXISTS ix_inbox_queue ON inbox_messages(status,id);
@@ -34,9 +38,10 @@ CREATE INDEX IF NOT EXISTS ix_inbox_queue ON inbox_messages(status,id);
 def dispatch_inbox(app,limit=20,stop_event=None):
     from database import connect
     provider=app.extensions.get('evolution') or Evolution(app.config.get('EVOLUTION_API_URL',''),app.config.get('EVOLUTION_API_KEY',''))
-    if not provider.ready:return {'sent':0,'uncertain':0,'configured':False}
     result={'sent':0,'uncertain':0,'configured':True};conn=connect(app.config)
     try:
+        cleanup_media(conn)
+        if not provider.ready:return {'sent':0,'uncertain':0,'configured':False}
         now=datetime.now(timezone.utc).isoformat(timespec='seconds')
         conn.execute("UPDATE inbox_messages SET status='uncertain' WHERE status='processing' AND claimed_at<?",((datetime.now(timezone.utc)-timedelta(minutes=5)).isoformat(timespec='seconds'),))
         conn.execute("UPDATE inbox_messages SET status='cancelled' WHERE status='queued' AND automated=1 AND created_at<?",((datetime.now(timezone.utc)-timedelta(minutes=5)).isoformat(timespec='seconds'),))
@@ -57,7 +62,13 @@ def dispatch_inbox(app,limit=20,stop_event=None):
                 if claimed.rowcount!=1:continue
             except Exception:conn.execute('ROLLBACK');raise
             try:
-                code,_=provider.send_text(row['wa_instance'],row['phone'],row['body'])
+                media=read_media(row['media'])
+                if media:
+                    media['base64']=row['media_data']
+                    code,confirmation=provider.send_media(row['wa_instance'],row['phone'],media,media.get('caption',''))
+                    if not isinstance(confirmation,dict) or not (confirmation.get('key') or {}).get('id'):
+                        raise RuntimeError('not confirmed')
+                else:code,_=provider.send_text(row['wa_instance'],row['phone'],row['body'])
                 if code not in (200,201):raise RuntimeError('not confirmed')
                 conn.execute("UPDATE inbox_messages SET status='sent',sent_at=? WHERE id=? AND status='processing'",(now,row['id']))
                 result['sent']+=1
@@ -110,12 +121,17 @@ def register_inbox(app,helpers):
         if not isinstance(eid,str) or not 1<=len(eid)<=200:abort(400)
         content=message.get('message') or {}
         if not isinstance(content,dict):abort(400)
+        private_media=False
         for _ in range(2):
             wrapper=content.get('ephemeralMessage') or content.get('viewOnceMessage')
+            private_media=private_media or bool(wrapper or content.get('viewOnceMessageV2') or content.get('viewOnceMessageV2Extension'))
             if isinstance(wrapper,dict) and isinstance(wrapper.get('message'),dict):content=wrapper['message']
         extended=content.get('extendedTextMessage') or {}
         if not isinstance(extended,dict):abort(400)
-        body=content.get('conversation') or extended.get('text') or '[Mensagem de mídia: confira no WhatsApp]'
+        media=incoming_media(content,key,private_media)
+        caption=(content.get('imageMessage') or {}).get('caption','') if isinstance(content.get('imageMessage') or {},dict) else ''
+        if not isinstance(caption,str):caption=''
+        body=content.get('conversation') or extended.get('text') or (('[Foto recebida] '+caption) if media and media['kind']=='image' else '[Áudio recebido]' if media else '[Mensagem de mídia: confira no WhatsApp]')
         if not isinstance(body,str):abort(400)
         body=body[:4000];name=str(message.get('pushName') or phone)[:100];stamp=h.now()
         with h.transaction() as conn:
@@ -124,9 +140,9 @@ def register_inbox(app,helpers):
                 ON CONFLICT(store_id,phone) DO UPDATE SET name=excluded.name,updated_at=excluded.updated_at''',(sid,phone,name,stamp))
             thread=conn.execute('SELECT * FROM inbox_threads WHERE store_id=? AND phone=?',(sid,phone)).fetchone()
             conn.execute("UPDATE inbox_threads SET unread=unread+1,state=CASE WHEN state='closed' THEN 'open' ELSE state END WHERE id=?",(thread['id'],))
-            conn.execute("INSERT INTO inbox_messages(store_id,thread_id,direction,body,external_id,status,created_at) VALUES(?,?,'in',?,?,'received',?)",(sid,thread['id'],body,'in:'+eid,stamp))
+            conn.execute("INSERT INTO inbox_messages(store_id,thread_id,direction,body,external_id,status,created_at,media) VALUES(?,?,'in',?,?,'received',?,?)",(sid,thread['id'],body,'in:'+eid,stamp,json.dumps(media) if media else ''))
             normalized=normalize(body);reply=''
-            human=bool(re.search(r'\b(atendente|humano)\b',normalized)) or body.startswith('[Mensagem de mídia:')
+            human=bool(media) or bool(re.search(r'\b(atendente|humano)\b',normalized)) or body.startswith('[Mensagem de mídia:')
             if human:
                 forget_cart(conn,sid,thread['id'])
                 conn.execute("UPDATE inbox_threads SET state='human' WHERE id=?",(thread['id'],))
@@ -236,7 +252,8 @@ def register_inbox(app,helpers):
         h.db().execute('UPDATE inbox_threads SET unread=0 WHERE id=?',(tid,))
         before=request.args.get('before','')
         if before and (not before.isdigit() or len(before)>16):abort(400)
-        messages=h.rows('SELECT id,direction,body,status,automated,created_at FROM inbox_messages WHERE thread_id=?'+(' AND id<?' if before else '')+' ORDER BY id DESC LIMIT 101',(tid,int(before)) if before else (tid,))
+        messages=h.rows('SELECT id,direction,body,status,automated,created_at,media FROM inbox_messages WHERE thread_id=?'+(' AND id<?' if before else '')+' ORDER BY id DESC LIMIT 101',(tid,int(before)) if before else (tid,))
+        messages=[{**dict(m),'media':public_media(m)} for m in messages]
         settings=preferences(h.db(),g.store['id']);base=app.config['PUBLIC_URL'] or request.host_url.rstrip('/')
         values=template_values(g.store,thread['name'],base)
         assigned=h.one('SELECT name FROM users WHERE id=?',(thread['assigned_to'],)) if thread['assigned_to'] else None
@@ -246,6 +263,61 @@ def register_inbox(app,helpers):
         return jsonify(thread={**dict(thread),'mine':thread['assigned_to']==g.user['id'],'assigned_name':assigned['name'] if assigned else None},messages=messages[:100],has_more=len(messages)>100,
                        guided_order={'stage':cart.get('stage'),'expires':cart.get('expires')},
                        quick_replies=[{**r,'rendered':render_message(r['message'],values)} for r in settings['quick_replies']])
+
+    @app.get('/api/admin/inbox/messages/<int:mid>/media')
+    @h.owner
+    def inbox_media(mid):
+        h.limited('inbox-media:'+str(g.store['id']),60,60)
+        message=h.owned('inbox_messages',mid);media=read_media(message['media'])
+        if not media:abort(404)
+        if media.get('expired'):abort(410,description='Este anexo saiu do armazenamento após sete dias. O histórico da conversa foi mantido.')
+        if message['direction']=='in':
+            if not provider().ready or not g.store['wa_instance']:abort(409,description='Conecte o WhatsApp para carregar esta mídia.')
+            code,value=provider().get_media(g.store['wa_instance'],media['key'])
+            if code!=200:abort(502,description='A mídia não está disponível no WhatsApp. Tente novamente ou confira no celular.')
+            try:media=decode_provider(value,media['kind'])
+            except ValueError:abort(502,description='A mídia não está disponível em um formato aceito ou excede 4 MB.')
+        else:media['base64']=message['media_data']
+        try:raw=base64.b64decode(media['base64'],validate=True)
+        except (ValueError,KeyError):abort(410,description='Mídia indisponível.')
+        if not raw or len(raw)>MAX_MEDIA:abort(410,description='Mídia indisponível.')
+        response=send_file(io.BytesIO(raw),mimetype=media['mime'],download_name=media['name'],conditional=True,max_age=0)
+        response.headers['Cache-Control']='no-store'
+        return response
+
+    @app.post('/api/admin/inbox/<int:tid>/attachment')
+    @h.owner
+    def inbox_attachment(tid):
+        h.limited('inbox-attachment:'+str(g.store['id']),20,60)
+        h.owned('inbox_threads',tid)
+        key=request.headers.get('Idempotency-Key','')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{16,100}',key):abort(400,description='Identificador da mensagem inválido.')
+        file=request.files.get('file')
+        if not file:abort(400,description='Selecione uma foto ou áudio.')
+        caption=request.form.get('caption','').strip()
+        if len(caption)>1000:abort(400,description='Use uma legenda de até 1000 caracteres.')
+        raw=file.stream.read(MAX_MEDIA+1)
+        try:media=validate_media(raw,file.mimetype,file.filename)
+        except ValueError as error:abort(400,description=str(error))
+        if media['kind']=='audio' and caption:abort(400,description='Envie o áudio sem legenda. Escreva a mensagem separadamente.')
+        media['caption']=caption
+        encoded_data=media.pop('base64')
+        encoded=json.dumps(media,separators=(',',':'))
+        digest=hashlib.sha256(json.dumps([tid,media['sha256'],caption]).encode()).hexdigest()
+        if not provider().ready or not g.store['wa_instance']:abort(409,description='Conecte o WhatsApp antes de responder.')
+        with h.transaction() as conn:
+            thread=h.owned('inbox_threads',tid)
+            prior=conn.execute('SELECT * FROM inbox_messages WHERE store_id=? AND external_id=?',(g.store['id'],'out:'+key)).fetchone()
+            if prior:
+                if prior['payload_hash']!=digest:abort(409,description='Este identificador pertence a outra mensagem.')
+                return jsonify(id=prior['id'],status=prior['status']),200
+            if thread['assigned_to']!=g.user['id']:abort(409,description='Assuma esta conversa antes de responder.')
+            used=conn.execute("SELECT COALESCE(SUM(LENGTH(media_data)),0) FROM inbox_messages WHERE store_id=?",(g.store['id'],)).fetchone()[0]
+            if used+len(encoded_data)>STORE_MEDIA_BUDGET:abort(409,description='O armazenamento privado de anexos da loja atingiu o limite. Remova conversas antigas antes de anexar novos arquivos.')
+            body=('[Foto enviada]' if media['kind']=='image' else '[Áudio enviado]')+(' '+caption if caption else '')
+            mid=conn.execute("INSERT INTO inbox_messages(store_id,thread_id,direction,body,external_id,status,actor_id,created_at,payload_hash,media,media_data) VALUES(?,?,'out',?,?,'queued',?,?,?,?,?)",(g.store['id'],tid,body,'out:'+key,g.user['id'],h.now(),digest,encoded,encoded_data)).lastrowid
+            conn.execute('UPDATE inbox_threads SET updated_at=? WHERE id=?',(h.now(),tid))
+        return jsonify(id=mid,status='queued'),202
 
     @app.post('/api/admin/inbox/messages/<int:mid>/action')
     @h.owner

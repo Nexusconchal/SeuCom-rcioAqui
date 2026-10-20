@@ -28,6 +28,7 @@ from campaign_queue import register_campaign_queue
 from customer_segments import register_customer_segments
 from cashback import register_cashback
 from inbox import register_inbox
+from inbox_context import register_inbox_context
 from inbox_service import install_dispatcher
 from credit import register_credit
 from delivery_map import register_delivery_map
@@ -61,7 +62,7 @@ ROLE_ALLOWED = {
     "kitchen": ROLE_BASE | {"update_order", "kitchen_item_update"},
     "cashier": ROLE_BASE | {"motoja_send", "update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
                             "reviews", "store_qrcode", "coupons", "insights", "cash_overview", "cash_open", "cash_close", "cash_adjust", "order_receive",
-                            "dining_list", "dining_open", "dining_transfer", "dining_close", "pos_catalog", "pos_quote", "merchant_report", "export_orders", "inbox_list", "inbox_thread", "inbox_claim", "inbox_reply", "inbox_close", "inbox_connection", "inbox_message_action", "inbox_catalog_lookup", "delivery_map", "driver_location_link", "route_dispatch", "shipping_settings", "kitchen_item_update"},
+                            "dining_list", "dining_open", "dining_transfer", "dining_close", "pos_catalog", "pos_quote", "merchant_report", "export_orders", "inbox_list", "inbox_thread", "inbox_claim", "inbox_reply", "inbox_close", "inbox_connection", "inbox_message_action", "inbox_catalog_lookup", "inbox_context", "inbox_media", "inbox_attachment", "delivery_map", "driver_location_link", "route_dispatch", "shipping_settings", "kitchen_item_update"},
 }
 MANAGER_DENY = {"motoja_connect", "motoja_disconnect", "whatsapp_connect", "whatsapp_disconnect", "mp_connect", "mp_disconnect", "billing_subscribe", "billing_cancel", "billing_pix", "team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
                 "rename_key", "delete_key", "rotate_key", "test_key", "finance_settings"}
@@ -1643,6 +1644,7 @@ def create_app(test_config=None):
     register_customer_segments(app, shared)
     register_cashback(app, shared)
     register_inbox(app, shared)
+    register_inbox_context(app, shared)
     register_credit(app, shared)
     register_delivery_map(app, shared)
     register_shipping(app, shared)
