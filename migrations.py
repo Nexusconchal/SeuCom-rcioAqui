@@ -141,6 +141,7 @@ from cashback import DDL as CASHBACK_DDL
 from inbox import DDL as INBOX_DDL
 from credit import DDL as CREDIT_DDL
 from store_network import DDL as NETWORK_DDL
+from online_payments import DDL as ONLINE_PAYMENTS_DDL
 
 TABLES += OPERATIONS_DDL + MERCHANDISING_DDL + PURCHASING_DDL
 TABLES += CAMPAIGN_DDL
@@ -148,7 +149,7 @@ TABLES += SEGMENTS_DDL
 TABLES += CASHBACK_DDL
 TABLES += INBOX_DDL
 TABLES += CREDIT_DDL
-TABLES += NETWORK_DDL
+TABLES += NETWORK_DDL + ONLINE_PAYMENTS_DDL
 TABLES += "CREATE UNIQUE INDEX IF NOT EXISTS ix_driver_gps ON drivers(gps_hash) WHERE gps_hash!='';"
 ADDITIONS['stores'].update({'timezone': "TEXT NOT NULL DEFAULT 'America/Sao_Paulo'", 'auto_accept': 'INTEGER NOT NULL DEFAULT 0'})
 ADDITIONS['stores'].update({'cashback_enabled': 'INTEGER NOT NULL DEFAULT 0', 'cashback_bps': 'INTEGER NOT NULL DEFAULT 500'})
@@ -159,6 +160,7 @@ ADDITIONS['obligations']={'order_id':'INTEGER REFERENCES orders(id)'}
 ADDITIONS['orders'].update({'latitude':'REAL','longitude':'REAL'})
 ADDITIONS['drivers']={'gps_hash':"TEXT NOT NULL DEFAULT ''",'gps_lat':'REAL','gps_lon':'REAL','gps_accuracy':'REAL','gps_at':'TEXT'}
 ADDITIONS['stores'].update({'postal_zones':"TEXT NOT NULL DEFAULT '[]'"})
+ADDITIONS['orders']['payer_email'] = "TEXT NOT NULL DEFAULT ''"
 ADDITIONS['orders'].update({'postal_code':"TEXT NOT NULL DEFAULT ''"})
 ADDITIONS['orders'].update({'route_position':'INTEGER NOT NULL DEFAULT 0'})
 ADDITIONS['products'].update({'production_sector':"TEXT NOT NULL DEFAULT 'Cozinha'"})
@@ -206,7 +208,7 @@ def postgres_ddl():
                 statements.append(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition};')
     statements.extend(s+';' for s in TABLES.split(';') if s.strip() and not s.strip().startswith('CREATE TABLE'))
     for table in ('cash_sessions', 'cash_adjustments', 'order_receipts', 'dining_tables', 'dining_accounts', 'dining_orders',
-                  'catalog_rules', 'option_recipes', 'suppliers', 'obligations', 'obligation_settlements', 'production_recipes', 'production_batches', 'marketing_jobs', 'customer_segments', 'wallet_challenges', 'wallet_sessions', 'cashback_movements', 'inbox_threads', 'inbox_messages', 'credit_accounts', 'store_networks', 'network_stores', 'network_invites'):
+                  'catalog_rules', 'option_recipes', 'suppliers', 'obligations', 'obligation_settlements', 'production_recipes', 'production_batches', 'marketing_jobs', 'customer_segments', 'wallet_challenges', 'wallet_sessions', 'cashback_movements', 'inbox_threads', 'inbox_messages', 'credit_accounts', 'store_networks', 'network_stores', 'network_invites', 'order_payment_attempts', 'order_payment_transactions'):
         statements.append(f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; REVOKE ALL ON {table} FROM PUBLIC,anon,authenticated;')
     for table in ('api_keys', 'delivery_links', 'integration_events', 'stock_movements', 'platform_ledger', 'audit_log', 'platform_notices', 'store_members', 'platform_settings', 'push_subscriptions', 'support_messages', 'ingredients', 'recipes', 'ingredient_movements', 'customer_opt_ins', 'shopping_sessions', 'marketing_campaigns'):
         statements.extend([f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;', f'REVOKE ALL ON {table} FROM PUBLIC,anon,authenticated;'])

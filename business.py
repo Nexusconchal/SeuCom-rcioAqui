@@ -19,7 +19,7 @@ from billing import OK_STATES, billing_state, extend_paid_until
 
 ZONE = ZoneInfo('America/Sao_Paulo')
 MONTHS = ('janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro')
-PAY = {'pix': 'Pix', 'pix_online': 'Pix automático', 'cash': 'Dinheiro', 'card': 'Cartão', 'credit': 'Fiado'}
+PAY = {'pix': 'Pix', 'pix_online': 'Pix automático', 'card_online': 'Cartão online (Mercado Pago)', 'cash': 'Dinheiro', 'card': 'Cartão', 'credit': 'Fiado'}
 STATUS = {'new': 'Novo', 'preparing': 'Em preparo', 'ready': 'Pronto', 'delivering': 'Em entrega', 'completed': 'Concluído', 'cancelled': 'Cancelado'}
 
 
@@ -118,9 +118,9 @@ def register_business(app, helpers):
     def finance_settings():
         value = h.data()
         fees = value.get('payment_fees', {})
-        if not isinstance(fees,dict) or any(k not in ('pix','pix_online','cash','card') for k in fees):
+        if not isinstance(fees,dict) or any(k not in ('pix','pix_online','card_online','cash','card') for k in fees):
             abort(400, description='Taxas inválidas.')
-        sanitized = {m:h.integer(fees,m,maximum=10000) for m in ('pix','pix_online','cash','card') if m in fees}
+        sanitized = {m:h.integer(fees,m,maximum=10000) for m in ('pix','pix_online','card_online','cash','card') if m in fees}
         delivery = value.get('default_delivery_cost')
         if delivery is not None:
             delivery = h.integer(value,'default_delivery_cost')
@@ -528,7 +528,7 @@ def register_business(app, helpers):
                 abort(404,description='Cliente não encontrado.')
             conn.execute(f"UPDATE obligations SET description='Fiado • Cliente removido' WHERE store_id=? AND order_id IN (SELECT id FROM orders WHERE store_id=? AND {normalized}=?)",(g.store['id'],g.store['id'],phone))
             conn.execute(f"UPDATE order_items SET notes='' WHERE order_id IN (SELECT id FROM orders WHERE store_id=? AND {normalized}=?)",(g.store['id'],phone))
-            conn.execute(f"""UPDATE orders SET customer='Cliente removido',phone='00000000000',address='',notes='',review='',latitude=NULL,longitude=NULL
+            conn.execute(f"""UPDATE orders SET payer_email='',customer='Cliente removido',phone='00000000000',address='',notes='',review='',latitude=NULL,longitude=NULL
                 WHERE store_id=? AND {normalized}=?""",(g.store['id'],phone))
             key = phone_key(phone)
             conn.execute('DELETE FROM customer_opt_ins WHERE store_id=? AND phone=?', (g.store['id'], key))
@@ -753,7 +753,7 @@ def register_business(app, helpers):
             {'title':'Vendas por dia','columns':[('Dia','text'),('Pedidos concluídos','int'),('Vendas','money')],'rows':[[d,c,t] for d,(c,t) in by_day.items()]},
             {'title':'Formas de pagamento','columns':[('Forma','text'),('Pedidos','int'),('Valor','money'),('Valor em pedidos quitados','money')],
              'rows':[[PAY[m],sum(o['payment']==m for o in valid),sum(o['total'] for o in valid if o['payment']==m),
-                      sum(o['total'] for o in valid if o['payment']==m and o['paid'])] for m in ('pix','pix_online','cash','card','credit')]},
+                      sum(o['total'] for o in valid if o['payment']==m and o['paid'])] for m in ('pix','pix_online','card_online','cash','card','credit')]},
             {'title':'Produtos mais vendidos','columns':[('Produto','text'),('Quantidade','int'),('Vendas','money')],'rows':[[p['name'],p['quantity'],p['total']] for p in products]},
             {'title':'Pedidos','columns':[('Nº','int'),('Data','date'),('Cliente','text'),('Tipo','text'),('Bairro','text'),('Pagamento','text'),('Situação','text'),('Pago','text'),('Total','money')],
              'rows':[[o['number'],o['created_at'],o['customer'],'Entrega' if o['mode']=='delivery' else 'Retirada',o['zone'],PAY[o['payment']],STATUS[o['status']],

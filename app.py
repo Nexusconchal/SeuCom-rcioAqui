@@ -28,6 +28,7 @@ from campaign_queue import register_campaign_queue
 from customer_segments import register_customer_segments
 from cashback import register_cashback
 from inbox import register_inbox
+from online_payments import register_online_payments
 from inbox_context import register_inbox_context
 from inbox_service import install_dispatcher
 from credit import register_credit
@@ -62,7 +63,7 @@ ROLE_ALLOWED = {
     "kitchen": ROLE_BASE | {"update_order", "kitchen_item_update"},
     "cashier": ROLE_BASE | {"motoja_send", "update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
                             "reviews", "store_qrcode", "coupons", "insights", "cash_overview", "cash_open", "cash_close", "cash_adjust", "order_receive",
-                            "dining_list", "dining_open", "dining_transfer", "dining_close", "pos_catalog", "pos_quote", "merchant_report", "export_orders", "inbox_list", "inbox_thread", "inbox_claim", "inbox_reply", "inbox_close", "inbox_connection", "inbox_message_action", "inbox_catalog_lookup", "inbox_context", "inbox_media", "inbox_attachment", "delivery_map", "driver_location_link", "route_dispatch", "shipping_settings", "kitchen_item_update"},
+                            "dining_list", "dining_open", "dining_transfer", "dining_close", "pos_catalog", "pos_quote", "merchant_report", "export_orders", "inbox_list", "inbox_thread", "inbox_claim", "inbox_reply", "inbox_close", "inbox_connection", "inbox_message_action", "inbox_catalog_lookup", "inbox_context", "inbox_media", "inbox_attachment", "delivery_map", "driver_location_link", "route_dispatch", "shipping_settings", "kitchen_item_update", "online_order_check"},
 }
 MANAGER_DENY = {"motoja_connect", "motoja_disconnect", "whatsapp_connect", "whatsapp_disconnect", "mp_connect", "mp_disconnect", "billing_subscribe", "billing_cancel", "billing_pix", "team_list", "team_add", "team_update", "team_password", "integrations", "create_key", "revoke_key",
                 "rename_key", "delete_key", "rotate_key", "test_key", "finance_settings"}
@@ -286,7 +287,7 @@ def create_app(test_config=None):
             value.pop(key, None)
         value.pop("mp_webhook_key", None)
         if not value["mp_connected"]:
-            value["payments"] = [p for p in value["payments"] if p != "pix_online"]
+            value["payments"] = [p for p in value["payments"] if p not in ("pix_online","card_online")]
         if not private:
             value.pop("mp_account", None)
             for key in ("motoja_url", "motoja_auto", "motoja_trigger", "wa_instance", "wa_enabled", "billing_exempt", "sub_status", "sub_payer_email", "sub_next_payment", "sub_used_trial", "paid_until", "trial_until", "billing_state"):
@@ -449,11 +450,13 @@ def create_app(test_config=None):
         value["motoja"] = {**motoja, "status": value.get("motoja_status", ""), "label": MOTOJA_LABEL.get(value.get("motoja_status", ""), "")}
         value["motoboy"], value["tracking_url"] = motoja.get("motoboy", ""), motoja.get("trackingUrl", "")
         if private:
+            if order["payment"] in ("pix_online","card_online"):
+                value["online_payment"]=app.extensions["online_state"](order)
             value["driver_name"] = (one("SELECT name FROM drivers WHERE id=?", (value["driver_id"],)) or {"name": ""})["name"]
         else:
             value = {k: value[k] for k in ("number", "mode", "zone", "scheduled_for", "rating", "motoboy", "tracking_url", "payment", "subtotal", "discount", "delivery_fee",
                 "total", "paid", "received_amount", "remaining_amount", "cashback_discount", "cashback_earned", "status", "status_label", "items", "events", "created_at")}
-        for key in ("tracking_hash", "payload_hash", "idempotency_key", "motoja_info"):
+        for key in ("tracking_hash", "payload_hash", "idempotency_key", "motoja_info", "payer_email"):
             value.pop(key, None)
         return value
 
@@ -821,6 +824,9 @@ def create_app(test_config=None):
         if mode not in ("delivery", "pickup"):
             abort(400, description="Escolha entrega ou retirada.")
         address = text(value, "address", 8 if mode == "delivery" else 0, 400)
+        payer_email = text(value,"payment_email",0,254)
+        if payment in ("pix_online","card_online") and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",payer_email):
+            abort(400,description="Informe seu e-mail para o pagamento online.")
         notes = text(value, "notes", 0, 500)
         coupon_code = text(value, "coupon", 0, 30).upper()
         change_for = value.get("change_for")
@@ -850,7 +856,7 @@ def create_app(test_config=None):
             scheduled = schedule(store, value)
             if not store["enabled"] or (not accepting and not scheduled and not getattr(g, 'manual_order', False)):
                 abort(409, description="A loja não está aceitando pedidos agora. " + status_text + ".")
-            if (payment not in json.loads(store["payments"]) and not (payment == 'credit' and getattr(g,'manual_order',False))) or (payment == "pix_online" and not store["mp_token"]):
+            if (payment not in json.loads(store["payments"]) and not (payment == 'credit' and getattr(g,'manual_order',False))) or (payment in ("pix_online","card_online") and not store["mp_token"]):
                 abort(400, description="Forma de pagamento indisponível.")
             subtotal, quantities, prepared = price_items(conn, store, items, value)
             if subtotal < store["minimum_order"]:
@@ -881,6 +887,8 @@ def create_app(test_config=None):
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (store["id"], number, hashlib.sha256(token.encode()).hexdigest(),
                 customer, phone, mode, address if mode == "delivery" else "", payment, change_for if payment == "cash" else None, notes,
                 subtotal, discount, fee, total, coupon_id, key, digest, token, stamp, stamp)).lastrowid
+            if total==0 and payment in ('pix_online','card_online'):
+                conn.execute('UPDATE orders SET paid=1 WHERE id=?',(oid,))
             reserve_ingredients(conn, store['id'], quantities, oid, number, stamp, prepared)
             app.extensions['attach_dining'](conn, store, oid, value)
             app.extensions['wallet_reserve'](conn, store, oid, value, cashback, subtotal-discount)
@@ -889,7 +897,7 @@ def create_app(test_config=None):
             cep=text(value,'cep',0,9)
             if cep and not re.fullmatch(r'\d{5}-?\d{3}',cep):
                 abort(400,description='Informe um CEP válido, com oito dígitos.')
-            conn.execute('UPDATE orders SET postal_code=? WHERE id=?',(cep.replace('-','') if mode=='delivery' else '',oid))
+            conn.execute('UPDATE orders SET postal_code=?,payer_email=? WHERE id=?',(cep.replace('-','') if mode=='delivery' else '',payer_email if payment in ('pix_online','card_online') else '',oid))
             app.extensions['marketing_order'](conn, store['id'], oid, value)
             fees=json.loads(store['payment_fees'])
             conn.execute("UPDATE orders SET loyalty_discount=? WHERE id=?", (reward, oid))
@@ -901,26 +909,26 @@ def create_app(test_config=None):
             for raw_item, (product, quantity, unit, extras, item_notes, cost) in zip(items, prepared):
                 source_id, source_name = attribution(raw_item, product, prepared, store["id"])
                 conn.execute("INSERT INTO order_items(order_id,product_id,name,quantity,unit_price,unit_cost,extras,notes,production_sector,kitchen_state,suggested_by,suggested_by_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                             (oid, product["id"], product["name"], quantity, unit, cost, json.dumps([{k:v for k,v in x.items() if k!='unit_cost' and not k.startswith('_')} for x in extras]), item_notes, product['production_sector'], 'preparing' if store['auto_accept'] and not scheduled and payment!='pix_online' else 'new', source_id, source_name))
+                             (oid, product["id"], product["name"], quantity, unit, cost, json.dumps([{k:v for k,v in x.items() if k!='unit_cost' and not k.startswith('_')} for x in extras]), item_notes, product['production_sector'], 'preparing' if store['auto_accept'] and not scheduled and (payment not in ('pix_online','card_online') or total==0) else 'new', source_id, source_name))
             for pid, quantity in quantities.items():
                 balance=conn.execute('SELECT stock FROM products WHERE id=?',(pid,)).fetchone()[0]
                 if balance is not None:
                     conn.execute('INSERT INTO stock_movements(store_id,product_id,delta,balance,reason,created_at) VALUES(?,?,?,?,?,?)',
                         (store['id'],pid,-quantity,balance,'Venda #'+str(number),stamp))
             conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, "new", stamp))
-            if store['auto_accept'] and not scheduled and payment != 'pix_online':
+            if store['auto_accept'] and not scheduled and (payment not in ('pix_online','card_online') or total==0):
                 conn.execute("UPDATE orders SET status='preparing' WHERE id=?", (oid,))
                 conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, "preparing", stamp))
             if coupon_id:
                 conn.execute("UPDATE coupons SET uses=uses+1 WHERE id=?", (coupon_id,))
         app.extensions["on_new_order"](store["id"], oid)
-        if store['auto_accept'] and not scheduled and payment!='pix_online':
+        if store['auto_accept'] and not scheduled and (payment not in ('pix_online','card_online') or total==0):
             app.extensions["on_status"](store["id"],oid,"preparing")
-        if payment == "pix_online":
+        if payment in ("pix_online","card_online") and total>0:
             try:
-                create_pix(store["id"], oid)
+                app.extensions["online_create"](store["id"],oid,"pix" if payment=="pix_online" else "card")
             except PaymentError:
-                app.logger.warning("Pix automático não gerado para o pedido %s", oid)
+                app.logger.warning("Pagamento online ainda não gerado para o pedido %s", oid)
         if not getattr(g, "manual_order", False):
             when = (" • agendado " + datetime.fromisoformat(scheduled).astimezone(ZoneInfo(store['timezone'])).strftime("%d/%m %H:%M")) if scheduled else ""
             notify_store(app, store["id"], {"title": f"Novo pedido #{number}", "tag": f"pedido-{oid}", "url": "/painel",
@@ -945,7 +953,7 @@ def create_app(test_config=None):
         if not order:
             abort(404, description="Pedido não encontrado.")
         store = one("SELECT * FROM stores WHERE id=?", (order["store_id"],))
-        if order["payment"] == "pix_online" and not order["paid"] and order["pix_provider_id"] and order["status"] != "cancelled":
+        if order["payment"] in ("pix_online","card_online"):
             last = order["pix_checked_at"]
             if not last or datetime.fromisoformat(last) < datetime.now(timezone.utc) - timedelta(seconds=8):
                 try:
@@ -957,8 +965,10 @@ def create_app(test_config=None):
         public["loyalty"] = loyalty_status(db(), store, order["phone"])
         public["loyalty_discount"] = order["loyalty_discount"]
         if order["payment"] == "pix_online":
-            public["pix"] = {"code": order["pix_code"] if not order["paid"] else "", "expires": order["pix_expires"],
+            public["pix"] = {"code": app.extensions["online_state"](order)["code"], "expires": order["pix_expires"],
                              "expired": bool(order["pix_expires"] and datetime.fromisoformat(order["pix_expires"]) < datetime.now(timezone.utc))}
+        if order["payment"] in ("pix_online","card_online"):
+            public["online_payment"]=app.extensions["online_state"](order)
         return jsonify(order=public, store=store_dict(store))
 
     def mp_token(store):
@@ -968,37 +978,10 @@ def create_app(test_config=None):
         return token
 
     def create_pix(store_id, oid):
-        store = one("SELECT * FROM stores WHERE id=?", (store_id,))
-        order = one("SELECT * FROM orders WHERE id=? AND store_id=?", (oid, store_id))
-        attempt = order["pix_attempts"] + 1
-        db().execute("UPDATE orders SET pix_attempts=? WHERE id=?", (attempt, oid))
-        expires = datetime.now(ZONE) + timedelta(minutes=30)
-        payload = {"transaction_amount": round(order["total"] / 100, 2), "payment_method_id": "pix",
-                   "description": f"Pedido #{order['number']} - {store['name']}"[:200], "external_reference": f"sca-{store_id}-{oid}",
-                   "date_of_expiration": expires.isoformat(timespec="milliseconds"),
-                   "payer": {"email": f"pedido{oid}.loja{store_id}@seucomercioaqui.com.br", "first_name": order["customer"].split(" ")[0][:40]}}
-        base = public_base()
-        if base.startswith("https://") and store["mp_webhook_key"]:
-            payload["notification_url"] = f"{base}/webhooks/mercadopago/{store['mp_webhook_key']}"
-        result = app.extensions["mercadopago"].create_pix(mp_token(store), payload, f"sca-{store_id}-{oid}-{attempt}")
-        code = ((result.get("point_of_interaction") or {}).get("transaction_data") or {}).get("qr_code", "")
-        if not result.get("id") or not code:
-            raise PaymentError("O Mercado Pago não devolveu o código Pix.")
-        db().execute("UPDATE orders SET pix_provider_id=?,pix_code=?,pix_expires=?,pix_checked_at=? WHERE id=?",
-                     (str(result["id"]), code, expires.astimezone(timezone.utc).isoformat(timespec="seconds"), now(), oid))
+        return app.extensions['online_create'](store_id,oid,'pix')
 
     def sync_pix(order, store):
-        """Consulta o Mercado Pago e marca como pago só se o valor e o pedido baterem."""
-        db().execute("UPDATE orders SET pix_checked_at=? WHERE id=?", (now(), order["id"]))
-        info = app.extensions["mercadopago"].get_payment(mp_token(store), order["pix_provider_id"])
-        approved = (info.get("status") == "approved" and info.get("external_reference") == f"sca-{store['id']}-{order['id']}"
-                    and round(float(info.get("transaction_amount", 0)) * 100) == order["total"])
-        if approved and not order["paid"]:
-            fee = sum(round(float(f.get("amount", 0)) * 100) for f in info.get("fee_details") or [])
-            db().execute("UPDATE orders SET paid=1,payment_fee=?,updated_at=? WHERE id=? AND paid=0", (fee, now(), order["id"]))
-            notify_store(app, store["id"], {"title": f"Pix confirmado • pedido #{order['number']}", "tag": f"pago-{order['id']}",
-                                            "url": "/painel", "body": f"{order['customer']} pagou R$ {order['total']/100:.2f}".replace(".", ",")})
-        return info.get("status")
+        return app.extensions['online_sync'](order,store)
 
     @app.get("/api/track/<token>/pix.svg")
     def pix_qrcode(token):
@@ -1006,8 +989,11 @@ def create_app(test_config=None):
         order = one("SELECT * FROM orders WHERE tracking_hash=?", (hashlib.sha256(token.encode()).hexdigest(),))
         if not order or order["payment"] != "pix_online" or not order["pix_code"] or order["paid"]:
             abort(404, description="Pix não encontrado.")
+        payment=app.extensions['online_state'](order)
+        if order['status']=='cancelled' or payment['status']!='pending' or not payment['code']:
+            abort(404,description='Pix não disponível para pagamento.')
         output = io.BytesIO()
-        segno.make(order["pix_code"], error="m").save(output, kind="svg", scale=8, border=2, xmldecl=False)
+        segno.make(payment['code'], error="m").save(output, kind="svg", scale=8, border=2, xmldecl=False)
         response = app.response_class(output.getvalue(), mimetype="image/svg+xml")
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -1020,6 +1006,7 @@ def create_app(test_config=None):
             abort(404, description="Pedido não encontrado.")
         if order["paid"] or order["status"] == "cancelled":
             abort(409, description="Este pedido não precisa de um novo Pix.")
+        save_payment_email(order,data())
         if order["pix_attempts"] >= 5:
             abort(409, description="Limite de tentativas atingido. Fale com a loja.")
         if order["pix_code"] and order["pix_expires"] and datetime.fromisoformat(order["pix_expires"]) > datetime.now(timezone.utc):
@@ -1030,6 +1017,46 @@ def create_app(test_config=None):
             abort(502, description=str(error))
         return jsonify(ok=True)
 
+    def save_payment_email(order,value):
+        email=text(value,'payment_email',0,254)
+        if not order['payer_email']:
+            if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+',email):
+                abort(400,description='Informe seu e-mail para o pagamento online.')
+            db().execute("UPDATE orders SET payer_email=? WHERE id=? AND paid=0 AND status!='cancelled' AND payer_email=''",(email,order['id']))
+
+    @app.post('/api/track/<token>/payment')
+    def online_order_start(token):
+        limited('online-start',10)
+        order=one('SELECT * FROM orders WHERE tracking_hash=?',(hashlib.sha256(token.encode()).hexdigest(),))
+        if not order or order['payment'] not in ('pix_online','card_online'):abort(404)
+        if order['paid'] or order['status']=='cancelled':abort(409,description='Este pedido não precisa de outro pagamento.')
+        save_payment_email(order,data())
+        try:
+            app.extensions['online_create'](order['store_id'],order['id'],'pix' if order['payment']=='pix_online' else 'card')
+        except PaymentError as error:abort(502,description=str(error))
+        return jsonify(payment=app.extensions['online_state'](order))
+
+    @app.post('/api/admin/orders/<int:oid>/payment/check')
+    @owner
+    def online_order_check(oid):
+        limited('online-check',30)
+        order=owned('orders',oid)
+        if order['payment'] not in ('pix_online','card_online'):abort(400)
+        try:app.extensions['online_sync'](order,g.store)
+        except PaymentError as error:abort(502,description=str(error))
+        return jsonify(payment=app.extensions['online_state'](order))
+
+    @app.post('/api/admin/orders/<int:oid>/payment/refund')
+    @owner
+    def online_order_refund(oid):
+        if g.role!='owner':abort(403)
+        if data().get('confirm') is not True:abort(400,description='Confirme o estorno integral deste pagamento.')
+        order=owned('orders',oid)
+        if order['payment'] not in ('pix_online','card_online'):abort(400)
+        try:app.extensions['online_refund'](g.store,order)
+        except PaymentError as error:abort(502,description=str(error))
+        return jsonify(payment=app.extensions['online_state'](order))
+
     @app.post("/webhooks/mercadopago/<key>")
     def mercadopago_webhook(key):
         limited("mp-webhook", 300, 60)
@@ -1037,14 +1064,15 @@ def create_app(test_config=None):
         if not store:
             return jsonify(ok=True)
         body = request.get_json(silent=True) or {}
-        payment_id = str((body.get("data") or {}).get("id") or request.args.get("data.id") or request.args.get("id") or "")
-        if payment_id.isdigit():
-            order = one("SELECT * FROM orders WHERE store_id=? AND pix_provider_id=?", (store["id"], payment_id))
-            if order and not order["paid"]:
-                try:
-                    sync_pix(order, store)
-                except PaymentError:
-                    pass
+        if not isinstance(body,dict):abort(400)
+        data_value=body.get('data') or {}
+        if not isinstance(data_value,dict):abort(400)
+        payment_id=str(data_value.get('id') or request.args.get('data.id') or request.args.get('id') or '')
+        if payment_id.isdigit() and len(payment_id)<30:
+            try:app.extensions['online_webhook'](store,payment_id)
+            except PaymentError:
+                # A retry must be made by the provider; do not acknowledge a failed verification.
+                return jsonify(error='Não foi possível conferir o pagamento.'),503
         return jsonify(ok=True)
 
     @app.put("/api/admin/payments/mercadopago")
@@ -1058,16 +1086,25 @@ def create_app(test_config=None):
         except PaymentError as error:
             abort(400, description="Token não aceito pelo Mercado Pago. Confira se copiou o Access Token de produção. " + str(error))
         label = account.get("nickname") or account.get("email") or str(account.get("id", ""))
-        key = g.store["mp_webhook_key"] or secrets.token_urlsafe(24)
-        db().execute("UPDATE stores SET mp_token=?,mp_account=?,mp_webhook_key=? WHERE id=?",
-                     (seal(app.config["SECRET_KEY"], token), label, key, g.store["id"]))
+        with transaction() as conn:
+            pending=conn.execute("SELECT id,collector_id FROM order_payment_attempts WHERE store_id=? AND status IN ('creating','pending','uncertain','authorized','in_process','in_mediation','review') LIMIT 1",(g.store['id'],)).fetchone()
+            if pending and str(account.get('id',''))!=pending['collector_id']:
+                abort(409,description='Confira ou cancele as cobranças pendentes antes de trocar a conta Mercado Pago.')
+            current=conn.execute('SELECT mp_webhook_key FROM stores WHERE id=?',(g.store['id'],)).fetchone()
+            key = current['mp_webhook_key'] or secrets.token_urlsafe(24)
+            conn.execute("UPDATE stores SET mp_token=?,mp_account=?,mp_webhook_key=? WHERE id=?",
+                         (seal(app.config["SECRET_KEY"], token), label, key, g.store["id"]))
         return jsonify(connected=True, account=label)
 
     @app.delete("/api/admin/payments/mercadopago")
     @owner
     def mp_disconnect():
-        payments = [p for p in json.loads(g.store["payments"]) if p != "pix_online"] or ["cash"]
-        db().execute("UPDATE stores SET mp_token='',mp_account='',payments=? WHERE id=?", (json.dumps(payments), g.store["id"]))
+        with transaction() as conn:
+            if conn.execute("SELECT id FROM order_payment_attempts WHERE store_id=? AND status IN ('creating','pending','uncertain','authorized','in_process','in_mediation','review') LIMIT 1",(g.store['id'],)).fetchone():
+                abort(409,description='Confira ou cancele as cobranças pendentes antes de desconectar o Mercado Pago.')
+            current=conn.execute('SELECT payments FROM stores WHERE id=?',(g.store['id'],)).fetchone()
+            payments = [p for p in json.loads(current['payments']) if p not in ("pix_online","card_online")] or ["cash"]
+            conn.execute("UPDATE stores SET mp_token='',mp_account='',payments=? WHERE id=?", (json.dumps(payments), g.store["id"]))
         return jsonify(connected=False)
 
     @app.post("/api/track/<token>/review")
@@ -1225,10 +1262,10 @@ def create_app(test_config=None):
         payments = value.get("payments", [])
         if not g.store['enabled'] and value.get('open'):
             abort(403,description='Loja suspensa pela plataforma. Entre em contato com o suporte.')
-        if not isinstance(payments, list) or not payments or any(p not in ("pix", "pix_online", "cash", "card") for p in payments):
+        if not isinstance(payments, list) or not payments or any(p not in ("pix", "pix_online", "card_online", "cash", "card") for p in payments):
             abort(400, description="Selecione ao menos uma forma de pagamento.")
-        if "pix_online" in payments and not g.store["mp_token"]:
-            abort(400, description="Conecte sua conta do Mercado Pago para usar o Pix automático.")
+        if any(p in payments for p in ("pix_online","card_online")) and not g.store["mp_token"]:
+            abort(400, description="Conecte sua conta do Mercado Pago para receber Pix ou cartão online.")
         pix = text(value, "pix_key", 0, 200)
         if "pix" in payments and not pix and "pix_online" not in payments:
             abort(400, description="Informe sua chave Pix ou desative Pix.")
@@ -1465,6 +1502,8 @@ def create_app(test_config=None):
             if not isinstance(status, str) or status not in STATUSES:
                 abort(400, description="Status inválido.")
             if status != order["status"]:
+                if status not in ("new","cancelled") and order["payment"] in ("pix_online","card_online") and not order["paid"]:
+                    abort(409,description="Aguarde a confirmação do pagamento online antes de preparar ou entregar.")
                 if status not in STATUSES[order["status"]] or (order["mode"] == "pickup" and status == "delivering") or (order["mode"] == "delivery" and order["status"] == "ready" and status == "completed"):
                     abort(409, description="Esta mudança de status não é permitida.")
                 if status == "cancelled":
@@ -1479,11 +1518,6 @@ def create_app(test_config=None):
                                 (g.store['id'],item['product_id'],item['qty'],balance,'Cancelamento #'+str(order['number']),now()))
                     if order["coupon_id"]:
                         conn.execute("UPDATE coupons SET uses=CASE WHEN uses>0 THEN uses-1 ELSE 0 END WHERE id=?", (order["coupon_id"],))
-                    if order["payment"] == "pix_online" and order["pix_provider_id"] and not order["paid"]:
-                        try:
-                            app.extensions["mercadopago"].cancel(mp_token(g.store), order["pix_provider_id"])
-                        except PaymentError:
-                            pass
                 conn.execute("INSERT INTO order_events(order_id,status,created_at) VALUES(?,?,?)", (oid, status, now()))
                 if status=='preparing':conn.execute("UPDATE order_items SET kitchen_state='preparing' WHERE order_id=? AND kitchen_state='new'",(oid,))
                 elif status in ('ready','delivering','completed','cancelled'):conn.execute('UPDATE order_items SET kitchen_state=? WHERE order_id=?',('cancelled' if status=='cancelled' else 'ready',oid))
@@ -1494,8 +1528,8 @@ def create_app(test_config=None):
                 abort(409, description='Use o Caixa para receber ou estornar este pedido; ele já tem recebimentos registrados.')
             if paid != bool(order['paid']) and order['payment']=='credit':
                 abort(409, description='Receba o fiado pelo Caixa para manter a conta conciliada.')
-            if paid != bool(order['paid']) and order['payment']=='pix_online':
-                abort(409, description='Pix online é confirmado pela integração de pagamentos.')
+            if paid != bool(order['paid']) and order['payment'] in ('pix_online','card_online'):
+                abort(409, description='Pagamentos online são confirmados pela integração de pagamentos.')
             if paid and not order['paid']:
                 app.extensions['cash_confirm_from_order'](conn,order,status)
             driver = value.get("driver_id", order["driver_id"])
@@ -1509,6 +1543,9 @@ def create_app(test_config=None):
                     abort(400, description="Retirada não usa entregador.")
             conn.execute("UPDATE orders SET status=?,paid=?,driver_id=?,updated_at=? WHERE id=?",
                          (status, int(paid), driver, now(), oid))
+        if status=="cancelled" and status!=order["status"] and order["payment"] in ("pix_online","card_online"):
+            try:app.extensions["online_cancel"](g.store,order)
+            except PaymentError:app.logger.warning("Cancelamento de cobrança pendente exige conferência: pedido %s",oid)
         if status != order["status"]:
             app.extensions["on_status"](g.store["id"], oid, status)
         return jsonify(order=order_dict(one("SELECT * FROM orders WHERE id=?", (oid,))))
@@ -1589,7 +1626,7 @@ def create_app(test_config=None):
                 "completed": completed, "ticket": revenue // completed if completed else 0,
                 "active": sum(o["status"] not in ("completed", "cancelled") for o in orders),
                 "chart": chart, "expenses": expenses,
-                "payments": [{"method": m, "total": method_totals.get(m,0)} for m in ("pix", "pix_online", "cash", "card", "credit")]}
+                "payments": [{"method": m, "total": method_totals.get(m,0)} for m in ("pix", "pix_online", "card_online", "cash", "card", "credit")]}
 
     @app.get("/api/admin/summary")
     @owner
@@ -1645,6 +1682,7 @@ def create_app(test_config=None):
     register_cashback(app, shared)
     register_inbox(app, shared)
     register_inbox_context(app, shared)
+    register_online_payments(app, dict(shared,public_base=public_base))
     register_credit(app, shared)
     register_delivery_map(app, shared)
     register_shipping(app, shared)

@@ -14,8 +14,9 @@ def register_production(app,helpers):
         if state not in ('preparing','ready'):abort(400,description='Escolha em preparo ou pronto.')
         changed=False
         with h.transaction() as conn:
-            item=conn.execute('SELECT i.*,o.store_id,o.status FROM order_items i JOIN orders o ON o.id=i.order_id WHERE i.id=? AND o.store_id=?',(iid,g.store['id'])).fetchone()
+            item=conn.execute('SELECT i.*,o.store_id,o.status,o.payment,o.paid FROM order_items i JOIN orders o ON o.id=i.order_id WHERE i.id=? AND o.store_id=?',(iid,g.store['id'])).fetchone()
             if not item:abort(404,description='Item não encontrado.')
+            if item['payment'] in ('pix_online','card_online') and not item['paid']:abort(409,description='Aguarde a confirmação do pagamento online antes de preparar.')
             if item['kitchen_state']==state:return jsonify(ok=True,status=item['status'])
             if item['status'] not in ('new','preparing') or (item['kitchen_state'],state) not in (('new','preparing'),('preparing','ready')):
                 abort(409,description='Este item não pode avançar para essa etapa agora.')

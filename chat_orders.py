@@ -41,7 +41,7 @@ def payload(cart, thread):
     name=thread['name'].strip()
     return {'customer': name if len(name)>=2 else 'Cliente WhatsApp', 'phone': thread['phone'], 'mode': cart['mode'],
             'address': cart.get('address', ''), 'zone': cart.get('zone', ''), 'cep': cart.get('cep', ''),
-            'payment': cart['payment'], 'change_for': cart.get('change_for'),
+            'payment': cart['payment'], 'payment_email': cart.get('payment_email',''), 'change_for': cart.get('change_for'),
             'notes': cart.get('notes', ''), 'coupon': cart.get('coupon', ''),
             'items': cart['items'], 'marketing_consent': False}
 
@@ -129,9 +129,10 @@ def handle_chat(conn, app, store, thread, body, eid):
         prompts={'quantity':'Informe uma quantidade de 1 a 50.','item_notes':'Escreva uma observação do item ou 0 para continuar.',
                  'mode':'1. Entrega\n2. Retirada na loja','cep':'Informe o CEP com oito dígitos.',
                  'address':'Informe rua, número, bairro e complemento.','notes':'Escreva uma observação do pedido ou 0 para continuar.',
+                 'payment_email':'Informe seu e-mail para o pagamento online.',
                  'change':'Informe o valor para troco, como 100,00, ou 0 se não precisar.'}
         if stage=='zone':return save('Escolha o bairro:\n'+'\n'.join(f'{i+1}. {name}' for i,name in enumerate(cart['zones'])))
-        if stage=='payment':return save('Escolha o pagamento:\n'+'\n'.join(f'{i+1}. '+{'pix':'Pix manual','pix_online':'Pix online','card':'Cartão na entrega/retirada','cash':'Dinheiro'}[name] for i,name in enumerate(cart['payments'])))
+        if stage=='payment':return save('Escolha o pagamento:\n'+'\n'.join(f'{i+1}. '+{'pix':'Pix manual','pix_online':'Pix online','card_online':'Cartão online (Mercado Pago)','card':'Cartão na entrega/retirada','cash':'Dinheiro'}[name] for i,name in enumerate(cart['payments'])))
         return save(prompts.get(stage,'Escreva VOLTAR para rever a sacola.'))
 
     if stage == 'catalog':
@@ -219,16 +220,23 @@ def handle_chat(conn, app, store, thread, body, eid):
         return save('Observação do pedido? Escreva 0 se não tiver.')
     if stage == 'notes':
         cart['notes'] = '' if command=='0' else body.strip()[:500]
-        cart['payments'] = [p for p in public['payments'] if p in ('cash','card','pix') or (p=='pix_online' and public.get('mp_connected'))]
+        cart['payments'] = [p for p in public['payments'] if p in ('cash','card','pix') or (p in ('pix_online','card_online') and public.get('mp_connected'))]
         if not cart['payments']:return save('Nenhuma forma de pagamento está disponível. Escreva ATENDENTE.')
         cart['stage'] = 'payment'
-        names = {'cash':'Dinheiro','card':'Cartão na entrega/retirada','pix':'Pix com confirmação pela loja','pix_online':'Pix online'}
+        names = {'cash':'Dinheiro','card':'Cartão na entrega/retirada','pix':'Pix com confirmação pela loja','pix_online':'Pix online','card_online':'Cartão online (Mercado Pago)'}
         return save('Como vai pagar?\n'+'\n'.join(f"{i+1}. {names[p]}" for i,p in enumerate(cart['payments'])))
     if stage == 'payment':
         if not command.isdigit() or not 1<=int(command)<=len(cart['payments']):return save('Escolha o número de uma forma de pagamento listada.')
         cart['payment'] = cart['payments'][int(command)-1]
         if cart['payment']=='cash':cart['stage']='change';return save('Troco para quanto? Informe o valor em reais ou 0 se não precisar de troco.')
+        if cart['payment'] in ('pix_online','card_online'):
+            cart['stage']='payment_email'
+            return save('Informe seu e-mail para identificar o pagamento online no Mercado Pago. Os dados do cartão são informados apenas na página segura de pagamento.')
         cart['stage'] = 'review'
+    elif stage == 'payment_email':
+        email=body.strip()
+        if len(email)>254 or not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+',email):return save('Confira o e-mail, por exemplo nome@dominio.com.br.')
+        cart['payment_email']=email;cart['stage']='review'
     elif stage == 'change':
         if not re.fullmatch(r'\d{1,6}(?:[,.]\d{1,2})?',body.strip()):return save('Informe um valor, como 100,00, ou 0 para não precisar de troco.')
         value = round(float(body.replace(',','.'))*100)
@@ -249,7 +257,7 @@ def handle_chat(conn, app, store, thread, body, eid):
             lines.append(f"{line['quantity']}× {product['name']}")
             if line['option_ids']:lines.append('Opções: '+', '.join(f"{line['option_ids'].count(oid)}× {options[oid]}" for oid in dict.fromkeys(line['option_ids'])))
             if line['notes']:lines.append('Obs. do item: '+line['notes'])
-        payment={'pix':'Pix com confirmação pela loja','pix_online':'Pix online','card':'Cartão na entrega/retirada','cash':'Dinheiro'}[cart['payment']]
+        payment={'pix':'Pix com confirmação pela loja','pix_online':'Pix online','card_online':'Cartão online (Mercado Pago)','card':'Cartão na entrega/retirada','cash':'Dinheiro'}[cart['payment']]
         summary='Confira antes de confirmar:\n'+'\n'.join(lines)+f"\nProdutos: {cash(quote['subtotal'])}\nDescontos: {cash(quote['discount'])}\nEntrega: {cash(quote['delivery_fee'])}\nTOTAL: {cash(quote['total'])}\nPagamento: {payment}\n"+('Retirada na loja' if cart['mode']=='pickup' else 'Entrega: '+cart.get('address','')+(' · CEP '+cart['cep'] if cart.get('cep') else ''))
         if cart.get('change_for'):summary+='\nTroco para: '+cash(cart['change_for'])
         if cart.get('notes'):summary+='\nObs. do pedido: '+cart['notes']

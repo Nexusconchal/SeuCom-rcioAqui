@@ -14,3 +14,7 @@ dialog{border:0;border-radius:22px;background:#fff;color:var(--ink);padding:24px
 @media print{body>*{display:none!important}body:has(dialog[open])>#modal{display:block!important}dialog[open]{position:static;margin:0;width:100%;max-width:none;max-height:none;box-shadow:none;padding:10px;border-radius:0;overflow:visible}dialog::backdrop{display:none}dialog button,dialog form,dialog .help{display:none!important}.dialog-head{margin-bottom:10px}.notice{background:white;border-color:#bbb}body{background:white}}
 
 @media(max-width:760px){.order-panel .section-heading>div{flex:1;min-width:0}.order-panel .section-heading>.text-link{flex:none;white-space:nowrap}.dashboard-nav button{padding:12px 10px;font-size:10px}.store-title>.badge{top:49px}.product-photo{background:#edf1e5;border-radius:14px}.shop-cover>img{background:#edf1e5}}
+
+/* Provider-confirmed payment status in the customer and merchant views. */
+.online-payment{border-top:4px solid var(--green,#123f40);background:linear-gradient(135deg,#fff,#f6f8f1)}
+.online-payment h2{margin:10px 0}.online-payment .pix-qr{display:block;margin:20px auto}.online-payment .pix-key{margin:18px 0;max-width:100%}.online-payment code{overflow-wrap:anywhere;word-break:break-all;min-width:0}.online-payment label{max-width:420px}.online-payment>.btn{margin-top:10px}.payment-review{border-top-color:#d49a37}.online-merchant .row-actions{flex-wrap:wrap}
