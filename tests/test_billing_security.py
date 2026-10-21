@@ -20,7 +20,9 @@ def provider(c):
 
 def sql(c,query,args=()):
     db=connect(c.application.config)
-    try:return db.execute(query,args).fetchall()
+    try:
+        result=db.execute(query,args)
+        return result.fetchall() if query.lstrip().upper().startswith('SELECT') else []
     finally:db.close()
 
 

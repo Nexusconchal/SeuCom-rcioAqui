@@ -8,9 +8,9 @@ function checkoutUrl(value){try{const u=new URL(value);return u.protocol==='http
 export function trackingPayment(o,token){
   const p=o.online_payment;if(!onlineMethod(o)||!p)return '';
   const pix=o.payment==='pix_online',active=!p.paid&&o.status!=='cancelled'&&!p.review;
-  return '<section class="panel online-payment '+(p.review?'payment-review':'')+'" aria-labelledby="online-payment-title"><span class="eyebrow">PAGAMENTO DO PEDIDO</span><h2 id="online-payment-title">'+esc(p.status==='pending'?(pix?'Pague com Pix':'Pague com cartão'):paymentLabel(p))+'</h2><p>'+money(o.total)+' • '+(pix?'Pix com confirmação automática':'Cartão online pelo Mercado Pago')+'</p>'+
+  return '<section class="panel online-payment '+(p.review?'payment-review':'')+'" aria-labelledby="online-payment-title"><span class="eyebrow">PAGAMENTO DO PEDIDO</span><h2 id="online-payment-title">'+esc(o.total===0?'Sem saldo a pagar':p.status==='pending'?(pix?'Pague com Pix':'Pague com cartão'):paymentLabel(p))+'</h2><p>'+money(o.total)+' • '+(pix?'Pix com confirmação automática':'Cartão online pelo Mercado Pago')+'</p>'+
     (p.review?'<div class="notice">Fale com a loja antes de pagar novamente. Há um pagamento que precisa ser conferido.</div>':'')+
-    (p.status==='approved'?'<p>O Mercado Pago confirmou o pagamento. Acompanhe o atendimento nesta página.</p>':'')+
+    (p.status==='approved'?(o.total===0?'<p>O valor final deste pedido é zero. Nenhuma cobrança foi criada.</p>':'<p>O Mercado Pago confirmou o pagamento. Acompanhe o atendimento nesta página.</p>'):'')+
     (['refunded','charged_back'].includes(p.status)?'<p>Consulte a devolução ou contestação no aplicativo do seu banco ou cartão.</p>':'')+
     (active&&p.code?'<img class="pix-qr" src="/api/track/'+encodeURIComponent(token)+'/pix.svg" alt="QR Code Pix deste pedido" width="220" height="220"><div class="pix-key"><code>'+esc(p.code)+'</code><button id="online-copy-code" class="btn secondary small">Copiar Pix</button></div>':'')+
     (active&&p.expires?'<p class="muted">Validade: '+date(p.expires)+'. A confirmação aparece aqui automaticamente.</p>':'')+
