@@ -33,8 +33,8 @@ def payment_note(order):
         return f"Cobrar {total} em dinheiro{change}."
     if order["payment"] == "card":
         return f"Cobrar {total} no cartão (levar maquininha)."
-    if order["payment"] == "pix_online":
-        return "Pix online ainda não confirmado - confirmar com a loja."
+    if order["payment"] in ("pix_online","card_online"):
+        return "Pagamento online ainda não confirmado - confirmar com a loja."
     return f"Cliente paga {total} por Pix para a loja."
 
 

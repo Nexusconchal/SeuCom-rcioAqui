@@ -32,7 +32,7 @@ export const icons = {
 export const icon = name => '<svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">'+(icons[name]||icons.store)+'</svg>';
 export const brand = () => '<a class="brand" href="/" aria-label="SeuComércioAqui, início"><img src="/static/logo.svg" alt="" width="40" height="40"><span>SeuComércio<b>Aqui</b><em class="brand-tag">Cardápio</em><small>Seu negócio. Mais perto.</small></span></a>';
 export const statuses = {new:'Novo',preparing:'Em preparo',ready:'Pronto',delivering:'Em entrega',completed:'Concluído',cancelled:'Cancelado'};
-export const pay = {pix:'Pix',pix_online:'Pix automático (QR Code)',cash:'Dinheiro',card:'Cartão na entrega/retirada',credit:'Fiado autorizado'};
+export const pay = {pix:'Pix',pix_online:'Pix automático (QR Code)',card_online:'Cartão online (Mercado Pago)',cash:'Dinheiro',card:'Cartão na entrega/retirada',credit:'Fiado autorizado'};
 export let auth = {csrf:'',user:null,registration:true};
 export async function bootstrap(){Object.assign(auth,await api('/api/session'));}
 export async function api(url,options={}){

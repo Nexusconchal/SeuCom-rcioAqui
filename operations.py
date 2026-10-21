@@ -175,13 +175,13 @@ def register_operations(app, helpers):
                 if previous['payload_hash'] != digest:
                     abort(409, description='Este identificador já pertence a outra operação.')
                 return jsonify(id=previous['id']), 200
+            if order['payment'] in ('pix_online','card_online'):
+                abort(409,description='Recebimentos e estornos online são feitos pela integração, sem lançamento manual no caixa.')
             current = active_session(conn)
             balance = received(conn, g.store['id'], order)
             original = None
             reason = h.text(value, 'reason', 3 if kind == 'refund' else 0, 200)
             if kind == 'receipt':
-                if order['payment']=='pix_online':
-                    abort(409,description='Pix online é conciliado automaticamente. Não registre um segundo recebimento manual.')
                 if order['status'] == 'cancelled' or amount > order['total'] - balance:
                     abort(409, description='O valor excede o saldo do pedido ou o pedido foi cancelado.')
             else:

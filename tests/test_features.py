@@ -344,10 +344,16 @@ class FakeMercadoPago:
         return {"id": 1, "nickname": "LOJA_TESTE"}
 
     def create_pix(self, token, payload, idempotency):
+        for old_token,old_payload,old_key in self.created:
+            if old_key==idempotency:
+                match=next(p for p in self.payments.values() if p['external_reference']==old_payload['external_reference'])
+                return {'id':match['id'],'point_of_interaction':{'transaction_data':{'qr_code':'00020126PIXCOPIAECOLA'+str(match['id'])}}}
         pid = 9000 + len(self.created)
         self.created.append((token, payload, idempotency))
         self.payments[pid] = {"id": pid, "status": "pending", "external_reference": payload["external_reference"],
-                              "transaction_amount": payload["transaction_amount"], "fee_details": [{"amount": 0.99}]}
+                              "transaction_amount": payload["transaction_amount"], "fee_details": [{"amount": 0.99}],
+                              "currency_id":"BRL","collector_id":1,"payment_method_id":"pix","payment_type_id":"bank_transfer",
+                              "transaction_amount_refunded":0}
         return {"id": pid, "point_of_interaction": {"transaction_data": {"qr_code": "00020126PIXCOPIAECOLA" + str(pid)}}}
 
     def get_payment(self, token, pid):
@@ -355,6 +361,8 @@ class FakeMercadoPago:
 
     def cancel(self, token, pid):
         self.cancelled.append(int(pid))
+        self.payments[int(pid)]['status']='cancelled'
+        return self.payments[int(pid)]
 
 
 def test_pix_online_with_mercado_pago(app, shop):
@@ -376,7 +384,7 @@ def test_pix_online_with_mercado_pago(app, shop):
     raw = conn.execute("SELECT mp_token,mp_webhook_key FROM stores").fetchone()
     conn.close()
     assert "APP_USR" not in raw[0]
-    created = send(client, "POST", "/api/store/minha-loja/orders", payload(pid, payment="pix_online"), uuid.uuid4().hex)
+    created = send(client, "POST", "/api/store/minha-loja/orders", payload(pid, payment="pix_online", payment_email="cliente@example.test"), uuid.uuid4().hex)
     assert created.status_code == 201
     token = created.json["token"]
     tracked = client.get("/api/track/" + token).json["order"]
@@ -388,7 +396,7 @@ def test_pix_online_with_mercado_pago(app, shop):
     mp.payments[payment_id]["status"] = "approved"
     mp.payments[payment_id]["transaction_amount"] = 1.0
     hook = app.test_client().post(f"/webhooks/mercadopago/{raw[1]}", json={"data": {"id": str(payment_id)}})
-    assert hook.status_code == 200 and not client.get("/api/admin/orders").json["orders"][0]["paid"]
+    assert hook.status_code == 503 and not client.get("/api/admin/orders").json["orders"][0]["paid"]
     mp.payments[payment_id]["transaction_amount"] = created.json["total"] / 100
     assert app.test_client().post("/webhooks/mercadopago/chave-falsa-que-nao-existe-123", json={"data": {"id": str(payment_id)}}).status_code == 200
     assert not client.get("/api/admin/orders").json["orders"][0]["paid"]
@@ -397,7 +405,7 @@ def test_pix_online_with_mercado_pago(app, shop):
     assert order["paid"] and order["payment_fee"] == 99
     assert client.get(f"/api/track/{token}/pix.svg").status_code == 404
     # Cancelar um Pix ainda pendente avisa o Mercado Pago.
-    second = send(client, "POST", "/api/store/minha-loja/orders", payload(pid, payment="pix_online"), uuid.uuid4().hex).json
+    second = send(client, "POST", "/api/store/minha-loja/orders", payload(pid, payment="pix_online", payment_email="cliente@example.test"), uuid.uuid4().hex).json
     oid = client.get("/api/admin/orders").json["orders"][0]["id"]
     assert send(client, "PATCH", f"/api/admin/orders/{oid}", {"status": "cancelled"}).status_code == 200
     assert mp.cancelled == [9001]
@@ -473,11 +481,22 @@ class FakeSubscriptions(FakeMercadoPago):
         super().__init__()
         self.preapprovals, self.charges = {}, {}
 
-    def create_preapproval(self, token, payload):
+    def me(self, token):
+        return {'id':1,'nickname':'PLATAFORMA_TESTE'}
+
+    def create_pix(self, token, payload, idempotency):
+        result=super().create_pix(token,payload,idempotency)
+        self.payments[int(result['id'])].update(currency_id='BRL',collector_id=1,payment_method_id='pix',
+                                              date_created=datetime.now(timezone.utc).isoformat())
+        return result
+
+    def create_preapproval(self, token, payload, idempotency=None):
         pid = "pre%04d" % (len(self.preapprovals) + 1)
-        self.preapprovals[pid] = {"id": pid, "status": "pending", "external_reference": payload["external_reference"], "payload": payload}
+        init_point="https://www.mercadopago.com.br/subscriptions/checkout?preapproval_id="+pid
+        self.preapprovals[pid] = {'id':pid,'status':'pending','external_reference':payload['external_reference'],
+            'collector_id':1,'auto_recurring':payload['auto_recurring'],'init_point':init_point,'payload':payload}
         self.charges[pid] = []
-        return {"id": pid, "status": "pending", "init_point": "https://www.mercadopago.com.br/subscriptions/checkout?preapproval_id=" + pid}
+        return {'id':pid,'status':'pending','init_point':init_point}
 
     def get_preapproval(self, token, pid):
         return {k: v for k, v in self.preapprovals[pid].items() if k != "payload"}
@@ -487,7 +506,18 @@ class FakeSubscriptions(FakeMercadoPago):
         return self.preapprovals[pid]
 
     def authorized_payments(self, token, pid):
-        return {"results": self.charges[pid]}
+        values=[]
+        for charge in self.charges[pid]:
+            value={'preapproval_id':pid,'currency_id':'BRL',**charge}
+            payment=value.get('payment') or {};payment_id=payment.get('id')
+            if payment_id:
+                existing=self.payments.setdefault(payment_id,{})
+                defaults={'id':payment_id,'status':payment.get('status'),'transaction_amount':value['transaction_amount'],
+                    'currency_id':'BRL','collector_id':1,'external_reference':self.preapprovals[pid]['external_reference'],
+                    'date_approved':payment.get('date_approved') or datetime.now(timezone.utc).isoformat()}
+                for key,item in defaults.items():existing.setdefault(key,item)
+            values.append(value)
+        return {'results':values}
 
     def authorized_payment(self, token, payment_id):
         return next({"preapproval_id": p} for p, items in self.charges.items() for c in items if c["id"] == int(payment_id))

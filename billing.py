@@ -2,8 +2,8 @@
 
 Regras: teste grátis curto ao criar a conta; ao assinar, o primeiro mês sai por R$ 0
 (uma vez por loja) e depois o Mercado Pago cobra o valor do plano todo mês. A loja
-recebe pedidos enquanto estiver isenta, em teste, com assinatura autorizada ou paga
-até uma data. Contas isentas são definidas por hash do e-mail (nada de e-mail no código),
+recebe pedidos enquanto estiver isenta, em teste ou paga até uma data.
+Uma autorização de cartão não substitui o recebimento. Contas isentas são definidas por hash do e-mail (nada de e-mail no código),
 pela variável BILLING_EXEMPT_EMAILS ou pelo dono da plataforma na Central.
 """
 import hashlib
@@ -12,9 +12,11 @@ import json
 import re
 import secrets
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from functools import wraps
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
+from urllib.parse import urlsplit
 
 from flask import abort, g, jsonify, request, session
 
@@ -58,9 +60,11 @@ def billing_state(store, moment=None):
     if _get(store, "billing_exempt", 1):
         return "exempt"
     status = _get(store, "sub_status", "")
+    moment = moment or datetime.now(timezone.utc)
+    today = moment.astimezone(ZONE).date().isoformat()
     if status == "authorized":
-        return "active"
-    today = (moment or datetime.now(timezone.utc)).astimezone(ZONE).date().isoformat()
+        if _get(store, 'paid_until', '') >= today or trial_active(_get(store, 'trial_until', ''), moment):
+            return "active"
     if _get(store, "paid_until", "") >= today:
         return "paid"
     if trial_active(_get(store, "trial_until", ""), moment):
@@ -93,6 +97,24 @@ def billing_timestamp(value):
         return ''
 
 
+def amount_cents(value):
+    try:
+        amount = Decimal(str(value)) * 100
+        return int(amount) if amount.is_finite() and amount == amount.to_integral_value() and 0 <= amount <= 100_000_000 else None
+    except (InvalidOperation, ValueError, TypeError, OverflowError):
+        return None
+
+
+def secure_checkout_url(value):
+    try:
+        url = urlsplit(value)
+        return bool(url.scheme == 'https' and url.hostname == 'www.mercadopago.com.br'
+                    and not url.username and not url.password and url.port in (None,443)
+                    and url.path.startswith('/subscriptions/'))
+    except (ValueError, TypeError):
+        return False
+
+
 def register_billing(app, helpers):
     h = SimpleNamespace(**helpers)
     config = app.config
@@ -120,14 +142,39 @@ def register_billing(app, helpers):
     def price():
         return config["PLAN_PRICE"]
 
+    def setting(key, conn=None):
+        row=(conn or h.db()).execute('SELECT value FROM platform_settings WHERE key=?',(key,)).fetchone()
+        try:return json.loads(row['value']) if row else {}
+        except (ValueError,TypeError):return {}
+
+    def remember(key, value, conn=None):
+        (conn or h.db()).execute('INSERT INTO platform_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                               (key,json.dumps(value,separators=(',',':'))))
+
+    def platform_account():
+        if not hasattr(g,'billing_account'):
+            value=mp().me(token())
+            if not isinstance(value,dict) or not str(value.get('id','')).isdigit():
+                raise PaymentError('Não foi possível conferir a conta de recebimento da plataforma.')
+            g.billing_account=str(value['id'])
+        return g.billing_account
+
+    def matching_payment(value, expected, pid):
+        return (isinstance(value,dict) and str(value.get('id',''))==str(pid)
+                and value.get('currency_id')=='BRL' and value.get('external_reference')==expected['reference']
+                and amount_cents(value.get('transaction_amount'))==expected['amount']
+                and str(value.get('collector_id',''))==str(expected['collector']))
+
     def info(store):
         state = billing_state(store)
         return {"state": state, "ok": state in OK_STATES, "price": price(), "free_months": config["PLAN_FREE_MONTHS"] if not store["sub_used_trial"] else 0,
                 "trial_until": store["trial_until"] if trial_active(store["trial_until"]) else "", "sub_status": store["sub_status"],
                 "payer_email": store["sub_payer_email"], "next_payment": store["sub_next_payment"], "paid_until": store["paid_until"],
-                "configured": bool(config.get("MP_PLATFORM_ACCESS_TOKEN")), "manage_url": "https://www.mercadopago.com.br/subscriptions"}
+                "configured": bool(config.get("MP_PLATFORM_ACCESS_TOKEN")), "manage_url": "https://www.mercadopago.com.br/subscriptions",
+                "pix_pending": bool(store['sub_pix_id']), "pix_expires": store['sub_pix_expires'],
+                "payments":h.rows("SELECT amount,description,paid_at,created_at FROM platform_ledger WHERE store_id=? AND is_subscription=1 AND kind='receipt' AND voided_at IS NULL ORDER BY id DESC LIMIT 12",(store['id'],)) if getattr(g,"role",None)=="owner" else []}
 
-    def record_payment(store_id, payment_id, amount, paid_on, description, paid_at=''):
+    def record_payment(store_id, payment_id, amount, paid_on, description, paid_at='', stack=False):
         """Lança o recebimento na Central do Dono uma única vez e libera a loja até o próximo mês."""
         key = "mp-sub-" + str(payment_id)
         with h.transaction() as conn:
@@ -137,6 +184,8 @@ def register_billing(app, helpers):
             conn.execute("""INSERT INTO platform_ledger(store_id,kind,description,amount,created_at,idempotency_key,payload_hash,paid_at,is_subscription)
                 VALUES(?,?,?,?,?,?,?,?,1)""", (store_id, "receipt", description, amount, stamp, key, "mercadopago", billing_timestamp(paid_at)))
             current = conn.execute("SELECT paid_until FROM stores WHERE id=?", (store_id,)).fetchone()[0]
+            if stack and current and current >= paid_on.isoformat():
+                paid_on=date.fromisoformat(current)
             conn.execute("UPDATE stores SET paid_until=?,subscribed_at=CASE WHEN subscribed_at='' THEN ? ELSE subscribed_at END WHERE id=?",
                          (extend_paid_until(current, paid_on), stamp, store_id))
         return True
@@ -144,43 +193,48 @@ def register_billing(app, helpers):
     def sync(store):
         if not store["sub_id"] or not config.get("MP_PLATFORM_ACCESS_TOKEN"):
             return store
-        h.db().execute("UPDATE stores SET sub_checked_at=? WHERE id=?", (h.now(), store["id"]))
-        detail = mp().get_preapproval(token(), store["sub_id"])
-        if detail.get("external_reference") not in (None, "", f"store-{store['id']}"):
-            return store
-        status = detail.get("status") or store["sub_status"]
-        next_payment = (detail.get("next_payment_date") or "")[:25]
-        # Confirmation is observed here, not inferred from invoice creation or next debit.
-        confirmed = h.now() if status == 'authorized' and store['sub_status'] != 'authorized' else ''
-        h.db().execute("UPDATE stores SET sub_status=?,sub_next_payment=?,subscribed_at=CASE WHEN subscribed_at='' THEN ? ELSE subscribed_at END WHERE id=?",
-                       (status, next_payment, confirmed, store["id"]))
-        results = mp().authorized_payments(token(), store["sub_id"]).get("results") or []
+        detail=mp().get_preapproval(token(),store['sub_id'])
+        expected=setting('billing.subscription.'+store['sub_id']) or {
+            'reference':f"store-{store['id']}",'amount':price(),'collector':platform_account(),'free_months':0}
+        recurring=detail.get('auto_recurring') or {}
+        if (str(detail.get('id',''))!=store['sub_id'] or detail.get('external_reference')!=expected['reference']
+                or str(detail.get('collector_id',''))!=str(expected['collector']) or platform_account()!=str(expected['collector'])
+                or recurring.get('currency_id')!='BRL' or amount_cents(recurring.get('transaction_amount'))!=expected['amount']
+                or recurring.get('frequency')!=1 or recurring.get('frequency_type')!='months'):
+            raise PaymentError('Os dados da assinatura não correspondem ao plano e à conta da plataforma. Peça uma conferência ao suporte.')
+        status=detail.get('status')
+        if status not in ('pending','authorized','paused','cancelled'):
+            raise PaymentError('Situação de assinatura não reconhecida. Tente atualizar mais tarde.')
+        next_payment=billing_timestamp(detail.get('next_payment_date'))
+        stamp=h.now()
+        with h.transaction() as conn:
+            current=conn.execute('SELECT * FROM stores WHERE id=?',(store['id'],)).fetchone()
+            if current['sub_id']!=store['sub_id']:return current
+            meta=setting('billing.subscription.'+store['sub_id'],conn) or expected
+            if status=='authorized' and meta.get('free_months',0)>0 and not meta.get('trial_granted'):
+                until=datetime.fromisoformat(stamp)
+                for _ in range(min(meta['free_months'],12)):
+                    until=add_month(until)
+                trial_until=max(current['trial_until'] or '',until.isoformat(timespec='seconds'))
+                conn.execute('UPDATE stores SET trial_until=? WHERE id=?',(trial_until,store['id']))
+                meta['trial_granted']=True;remember('billing.subscription.'+store['sub_id'],meta,conn)
+            confirmed=stamp if status=='authorized' and current['sub_status']!='authorized' else ''
+            conn.execute("UPDATE stores SET sub_status=?,sub_next_payment=?,sub_checked_at=?,subscribed_at=CASE WHEN subscribed_at='' THEN ? ELSE subscribed_at END WHERE id=?",
+                         (status,next_payment,stamp,confirmed,store['id']))
+        results=mp().authorized_payments(token(),store['sub_id']).get('results') or []
         for item in results:
-            payment = item.get("payment") or {}
-            if payment.get("status") != "approved":
-                continue
-            amount = round(float(item.get("transaction_amount") or 0) * 100)
-            if amount <= 0:
-                continue
-            payment_id = payment.get('id') or item.get('id')
-            if h.one('SELECT id FROM platform_ledger WHERE idempotency_key=?', ('mp-sub-' + str(payment_id),)):
-                continue
-            paid_at = billing_timestamp(payment.get('date_approved'))
-            if not paid_at and payment.get('id'):
-                try:
-                    approved = mp().get_payment(token(), payment['id'])
-                    if approved.get('status') == 'approved':
-                        paid_at = billing_timestamp(approved.get('date_approved'))
-                except PaymentError:
-                    # A missing approval instant must not be replaced with a fabricated time.
-                    pass
-            raw_date = (item.get("debit_date") or item.get("date_created") or h.now())[:10]
-            try:
-                paid_on = date.fromisoformat(raw_date)
-            except ValueError:
-                paid_on = datetime.now(ZONE).date()
-            record_payment(store["id"], payment_id, amount, paid_on, "Assinatura mensal (Mercado Pago)", paid_at)
-        return h.one("SELECT * FROM stores WHERE id=?", (store["id"],))
+            if not isinstance(item,dict) or item.get('preapproval_id')!=store['sub_id'] or item.get('currency_id')!='BRL':continue
+            payment=item.get('payment') or {};pid=payment.get('id')
+            if payment.get('status')!='approved' or not str(pid or '').isdigit():continue
+            if h.one('SELECT id FROM platform_ledger WHERE idempotency_key=?',('mp-sub-'+str(pid),)):continue
+            approved=mp().get_payment(token(),pid)
+            if (not matching_payment(approved,expected,pid) or approved.get('status')!='approved'
+                    or amount_cents(approved.get('transaction_amount_refunded',0))!=0):continue
+            paid_at=billing_timestamp(approved.get('date_approved'))
+            if not paid_at:continue
+            paid_on=datetime.fromisoformat(paid_at).astimezone(ZONE).date()
+            record_payment(store['id'],pid,expected['amount'],paid_on,'Assinatura mensal (Mercado Pago)',paid_at)
+        return h.one('SELECT * FROM stores WHERE id=?',(store['id'],))
 
     app.extensions["billing_sync"] = sync
     app.extensions["billing_info"] = info
@@ -211,6 +265,13 @@ def register_billing(app, helpers):
             abort(409, description="Sua loja tem uso gratuito, não precisa assinar.")
         if store["sub_status"] == "authorized":
             abort(409, description="Sua assinatura já está ativa.")
+        if store['sub_pix_id']:
+            try:
+                paid=check_plan_pix(store)
+            except PaymentError:
+                abort(502,description='Não foi possível conferir o Pix anterior. Atualize a situação antes de mudar para cartão.')
+            if not paid and store['sub_pix_expires']>h.now():
+                abort(409,description='Há um Pix de mensalidade ainda válido. Aguarde a confirmação ou o vencimento antes de iniciar a cobrança no cartão.')
         payer = h.text(h.data(), "payer_email", 5, 254).lower()
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", payer):
             abort(400, description="Informe o e-mail da sua conta do Mercado Pago.")
@@ -221,19 +282,39 @@ def register_billing(app, helpers):
         payload = {"reason": "SeuComércioAqui - Plano mensal", "external_reference": f"store-{store['id']}",
                    "payer_email": payer, "back_url": h.public_base() + "/painel?assinatura=1",
                    "auto_recurring": recurring, "status": "pending"}
-        if store["sub_id"] and store["sub_status"] == "pending":
-            try:
-                mp().update_preapproval(token(), store["sub_id"], {"status": "cancelled"})
-            except PaymentError:
-                pass
+        account=platform_account()
+        if store['sub_id'] and store['sub_status']=='pending':
+            detail=mp().get_preapproval(token(),store['sub_id'])
+            if (detail.get('external_reference')==f"store-{store['id']}" and str(detail.get('collector_id',''))==account
+                    and detail.get('status')=='pending' and secure_checkout_url(detail.get('init_point',''))):
+                return jsonify(init_point=detail['init_point'])
+            abort(409,description='Há uma assinatura pendente. Atualize a situação antes de iniciar outra.')
+        intent_key='billing.creating.card.'+str(store['id'])
+        with h.transaction() as conn:
+            latest=conn.execute('SELECT sub_id,sub_status,sub_pix_id FROM stores WHERE id=?',(store['id'],)).fetchone()
+            if latest['sub_id']!=store['sub_id'] or latest['sub_status']!=store['sub_status'] or (latest['sub_pix_id'] and latest['sub_pix_id']!=store['sub_pix_id']):
+                abort(409,description='A assinatura foi atualizada em outra tentativa. Atualize a situação antes de continuar.')
+            if setting('billing.creating.pix.'+str(store['id']),conn).get('state')=='creating':
+                abort(409,description='Um Pix aguarda conferência. Atualize a situação antes de mudar para cartão.')
+            intent=setting(intent_key,conn)
+            if intent.get('state') in ('creating','uncertain'):
+                abort(409,description='Uma criação de assinatura aguarda conferência. Atualize a situação ou peça ajuda ao suporte antes de repetir.')
+            intent={'state':'creating','key':'plan-card-'+secrets.token_hex(16),'at':h.now()}
+            remember(intent_key,intent,conn)
         try:
-            created = mp().create_preapproval(token(), payload)
-        except PaymentError as error:
-            abort(502, description="O Mercado Pago não aceitou criar a assinatura agora. " + str(error))
-        if not created.get("id") or not created.get("init_point"):
-            abort(502, description="O Mercado Pago não devolveu o link da assinatura.")
-        h.db().execute("UPDATE stores SET sub_id=?,sub_status=?,sub_payer_email=?,sub_used_trial=?,sub_checked_at=? WHERE id=?",
-                       (created["id"], created.get("status") or "pending", payer, int(bool(recurring.get("free_trial")) or store["sub_used_trial"]), h.now(), store["id"]))
+            created=mp().create_preapproval(token(),payload,intent['key'])
+        except PaymentError:
+            remember(intent_key,{**intent,'state':'uncertain'})
+            abort(502,description='Não foi possível confirmar a criação da assinatura. Evite repetir; confira no Mercado Pago ou com o suporte.')
+        if not created.get('id') or not secure_checkout_url(created.get('init_point','')):
+            remember(intent_key,{**intent,'state':'uncertain'})
+            abort(502,description='O Mercado Pago não devolveu um endereço seguro para a assinatura. Peça conferência ao suporte.')
+        with h.transaction() as conn:
+            remember('billing.subscription.'+str(created['id']),{'store_id':store['id'],'reference':payload['external_reference'],
+                     'amount':price(),'collector':account,'free_months':config['PLAN_FREE_MONTHS'] if recurring.get('free_trial') else 0},conn)
+            remember(intent_key,{**intent,'state':'done','id':str(created['id'])},conn)
+            conn.execute("UPDATE stores SET sub_id=?,sub_status='pending',sub_payer_email=?,sub_used_trial=?,sub_checked_at=? WHERE id=?",
+                         (str(created['id']),payer,int(bool(recurring.get('free_trial')) or store['sub_used_trial']),h.now(),store['id']))
         h.audit("billing.subscribe", payer, store["id"])
         return jsonify(init_point=created["init_point"])
 
@@ -260,8 +341,8 @@ def register_billing(app, helpers):
         return jsonify(info(h.one("SELECT * FROM stores WHERE id=?", (g.store["id"],))))
 
     # ---------- Mensalidade por Pix (paga um mês por vez)
-    def create_plan_pix(amount, reference, description, payer, idempotency):
-        expires = datetime.now(ZONE) + timedelta(minutes=30)
+    def create_plan_pix(amount, reference, description, payer, idempotency, expiration=None):
+        expires = datetime.fromisoformat(expiration) if expiration else datetime.now(ZONE) + timedelta(minutes=30)
         payload = {"transaction_amount": round(amount / 100, 2), "payment_method_id": "pix", "description": description,
                    "external_reference": reference, "date_of_expiration": expires.isoformat(timespec="milliseconds"),
                    "payer": {"email": payer}}
@@ -270,21 +351,35 @@ def register_billing(app, helpers):
             payload["notification_url"] = f"{base}/webhooks/mercadopago-assinaturas/{webhook_secret()}"
         result = mp().create_pix(token(), payload, idempotency)
         code = ((result.get("point_of_interaction") or {}).get("transaction_data") or {}).get("qr_code", "")
-        if not result.get("id") or not code:
+        if not str(result.get("id", "")).isdigit() or not isinstance(code,str) or not 20<=len(code)<=2048:
             raise PaymentError("O Mercado Pago não devolveu o código Pix. Confira se a sua conta tem uma chave Pix cadastrada.")
         return str(result["id"]), code, expires.astimezone(timezone.utc).isoformat(timespec="seconds")
 
-    def check_plan_pix(store):
-        """Confere o Pix da mensalidade no Mercado Pago e libera a loja por um mês se foi pago certinho."""
-        if not store["sub_pix_id"]:
+    def check_plan_pix(store, payment_id=None):
+        """Verify a specific immutable intent, including old Pix links after renewal."""
+        pid=str(payment_id or store['sub_pix_id'] or '')
+        if not pid:return False
+        value=mp().get_payment(token(),pid)
+        expected=setting('billing.pix.'+pid)
+        if not expected:
+            # Legacy links have no snapshot: only migrate a full identity match.
+            reference=value.get('external_reference','')
+            if not isinstance(reference,str) or not re.fullmatch(r"plan-"+str(store['id'])+r"-[a-f0-9]{8,64}",reference):return False
+            expected={'store_id':store['id'],'reference':reference,'amount':price(),'collector':platform_account()}
+        if (expected.get('store_id')!=store['id'] or platform_account()!=str(expected['collector'])
+                or not matching_payment(value,expected,pid) or value.get('payment_method_id')!='pix'):
             return False
-        info = mp().get_payment(token(), store["sub_pix_id"])
-        ok = (info.get("status") == "approved" and str(info.get("external_reference", "")).startswith(f"plan-{store['id']}-")
-              and round(float(info.get("transaction_amount", 0)) * 100) == price())
+        status=value.get('status','pending');expected['status']=status
+        remember('billing.pix.'+pid,expected)
+        ok=status=='approved' and amount_cents(value.get('transaction_amount_refunded',0))==0
         if ok:
-            paid_at = billing_timestamp(info.get('date_approved'))
-            record_payment(store["id"], "pix-" + store["sub_pix_id"], price(), datetime.now(ZONE).date(), "Mensalidade por Pix (Mercado Pago)", paid_at)
-            h.db().execute("UPDATE stores SET sub_pix_id='',sub_pix_code='',sub_pix_expires='' WHERE id=?", (store["id"],))
+            paid_at=billing_timestamp(value.get('date_approved'))
+            # A verified creation instant is the fallback period anchor, never the time of a late poll.
+            period_at=paid_at or billing_timestamp(value.get('date_created'))
+            if not period_at:return False
+            paid_on=datetime.fromisoformat(period_at).astimezone(ZONE).date()
+            record_payment(store['id'],'pix-'+pid,expected['amount'],paid_on,'Mensalidade por Pix (Mercado Pago)',paid_at,stack=True)
+            h.db().execute("UPDATE stores SET sub_pix_id='',sub_pix_code='',sub_pix_expires='' WHERE id=? AND sub_pix_id=?",(store['id'],pid))
         return ok
 
     def qr_svg(code):
@@ -298,20 +393,48 @@ def register_billing(app, helpers):
     @app.post("/api/admin/billing/pix")
     @h.owner
     def billing_pix():
-        store = g.store
-        if store["billing_exempt"]:
-            abort(409, description="Sua loja tem uso gratuito, não precisa pagar.")
-        h.limited("billing-pix", 10, 3600)
-        if store["sub_pix_code"] and store["sub_pix_expires"] > datetime.now(timezone.utc).isoformat():
-            return jsonify(code=store["sub_pix_code"], amount=price(), expires=store["sub_pix_expires"])
+        store=g.store
+        if store['billing_exempt']:abort(409,description='Sua loja tem uso gratuito, não precisa pagar.')
+        if store['sub_status'] in ('authorized','pending','paused'):
+            abort(409,description='Sua loja tem uma assinatura no cartão ativa ou pendente. Cancele essa assinatura antes de pagar outro mês por Pix.')
+        h.limited('billing-pix',10,3600)
+        account=platform_account()
         try:
-            pid, code, expires = create_plan_pix(price(), f"plan-{store['id']}-{secrets.token_hex(4)}", "SeuComércioAqui - mensalidade",
-                                                 f"loja{store['id']}@seucomercioaqui.com.br", f"plan-{store['id']}-{secrets.token_hex(8)}")
-        except PaymentError as error:
-            abort(502, description=str(error))
-        h.db().execute("UPDATE stores SET sub_pix_id=?,sub_pix_code=?,sub_pix_expires=? WHERE id=?", (pid, code, expires, store["id"]))
-        h.audit("billing.pix", pid, store["id"])
-        return jsonify(code=code, amount=price(), expires=expires)
+            if store['sub_pix_id'] and check_plan_pix(store):return jsonify(paid=True,billing=info(h.one('SELECT * FROM stores WHERE id=?',(store['id'],))))
+        except PaymentError:
+            abort(502,description='Não foi possível conferir o Pix anterior. Tente novamente antes de gerar outra cobrança.')
+        if store['sub_pix_code'] and store['sub_pix_expires']>datetime.now(timezone.utc).isoformat():
+            meta=setting('billing.pix.'+store['sub_pix_id'])
+            return jsonify(code=store['sub_pix_code'],amount=meta.get('amount',price()),expires=store['sub_pix_expires'])
+        intent_key='billing.creating.pix.'+str(store['id'])
+        with h.transaction() as conn:
+            latest=conn.execute('SELECT sub_pix_id,sub_status FROM stores WHERE id=?',(store['id'],)).fetchone()
+            if latest['sub_pix_id']!=store['sub_pix_id'] or latest['sub_status'] in ('authorized','pending','paused'):
+                abort(409,description='O Pix foi atualizado em outra tentativa. Atualize a situação antes de continuar.')
+            if setting('billing.creating.card.'+str(store['id']),conn).get('state') in ('creating','uncertain'):
+                abort(409,description='Uma assinatura no cartão aguarda conferência. Atualize a situação antes de gerar Pix.')
+            intent=setting(intent_key,conn)
+            if intent.get('state')=='creating':
+                at=billing_timestamp(intent.get('at'))
+                if at and datetime.fromisoformat(at)>datetime.now(timezone.utc)-timedelta(seconds=45):
+                    abort(409,description='O Pix está sendo preparado. Aguarde alguns segundos antes de tentar novamente.')
+            else:
+                intent={'state':'creating','reference':f"plan-{store['id']}-{secrets.token_hex(8)}",'amount':price(),
+                        'collector':account,'key':'plan-pix-'+secrets.token_hex(16),'expires':(datetime.now(timezone.utc)+timedelta(minutes=30)).isoformat(),
+                        'payer':g.user['email']}
+            intent['at']=h.now();remember(intent_key,intent,conn)
+        try:
+            pid,code,expires=create_plan_pix(intent['amount'],intent['reference'],'SeuComércioAqui - mensalidade',
+                                             intent['payer'],intent['key'],intent['expires'])
+        except PaymentError:
+            abort(502,description='Não foi possível confirmar a geração do Pix. A próxima tentativa recupera a mesma cobrança; aguarde alguns segundos.')
+        with h.transaction() as conn:
+            remember('billing.pix.'+pid,{'store_id':store['id'],'reference':intent['reference'],'amount':intent['amount'],
+                     'collector':intent['collector'],'expires':expires,'status':'pending'},conn)
+            remember(intent_key,{**intent,'state':'done','id':pid},conn)
+            conn.execute('UPDATE stores SET sub_pix_id=?,sub_pix_code=?,sub_pix_expires=? WHERE id=?',(pid,code,expires,store['id']))
+        h.audit('billing.pix',pid,store['id'])
+        return jsonify(code=code,amount=intent['amount'],expires=expires)
 
     @app.get("/api/admin/billing/pix.svg")
     @h.owner
@@ -328,7 +451,7 @@ def register_billing(app, helpers):
             paid = check_plan_pix(g.store)
         except PaymentError as error:
             abort(502, description=str(error))
-        return jsonify(paid=paid, billing=info(h.one("SELECT * FROM stores WHERE id=?", (g.store["id"],))))
+        return jsonify(paid=paid or (not g.store["sub_pix_id"] and billing_state(g.store)=="paid"), expired=bool(g.store["sub_pix_expires"] and g.store["sub_pix_expires"]<h.now()), billing=info(h.one("SELECT * FROM stores WHERE id=?", (g.store["id"],))))
 
     # ---------- Teste de R$ 1,00 do dono da plataforma
     def test_pix_state():
@@ -339,14 +462,16 @@ def register_billing(app, helpers):
     def platform_test_pix():
         platform_only()
         h.limited("platform-test-pix", 10, 3600)
+        reference=f"teste-{secrets.token_hex(6)}"
         try:
-            pid, code, expires = create_plan_pix(100, f"teste-{secrets.token_hex(6)}", "SeuComércioAqui - teste de R$ 1,00",
-                                                 "teste-pix@seucomercioaqui.com.br", "teste-" + secrets.token_hex(10))
+            collector=platform_account()
+            payer=h.one('SELECT email FROM users WHERE id=?',(g.user['id'],))['email']
+            pid, code, expires = create_plan_pix(100, reference, "SeuComércioAqui - teste de R$ 1,00",
+                                                 payer, "teste-" + secrets.token_hex(10))
         except PaymentError as error:
             abort(502, description=str(error))
-        state = {"id": pid, "code": code, "expires": expires, "status": "pending"}
-        h.db().execute("DELETE FROM platform_settings WHERE key='test_pix'")
-        h.db().execute("INSERT INTO platform_settings(key,value) VALUES('test_pix',?)", (json.dumps(state),))
+        state = {"id": pid, "code": code, "expires": expires, "status": "pending",'reference':reference,'amount':100,'collector':collector}
+        remember('test_pix',state)
         return jsonify(state)
 
     @app.get("/api/platform/billing/test-pix.svg")
@@ -365,12 +490,16 @@ def register_billing(app, helpers):
             abort(404, description="Gere o Pix de teste primeiro.")
         try:
             payment = mp().get_payment(token(), state["id"])
+            valid=(state.get('reference') and state.get('collector') and platform_account()==str(state['collector'])
+                   and matching_payment(payment,state,state['id']) and payment.get('payment_method_id')=='pix')
         except PaymentError as error:
             abort(502, description=str(error))
+        if not valid:
+            abort(409,description='Os dados do teste não puderam ser conferidos. Consulte o Mercado Pago antes de gerar outro.')
         state["status"] = payment.get("status", "pending")
-        state["net"] = round(float((payment.get("transaction_details") or {}).get("net_received_amount") or 0) * 100)
+        state["net"] = amount_cents((payment.get("transaction_details") or {}).get("net_received_amount") or 0) or 0
         h.db().execute("UPDATE platform_settings SET value=? WHERE key='test_pix'", (json.dumps(state),))
-        return jsonify(status=state["status"], approved=state["status"] == "approved", net=state["net"])
+        return jsonify(status=state["status"], approved=state["status"] == "approved" and amount_cents(payment.get('transaction_amount_refunded',0))==0, net=state["net"])
 
     @app.post("/webhooks/mercadopago-assinaturas/<secret>")
     def billing_webhook(secret):
@@ -378,13 +507,15 @@ def register_billing(app, helpers):
         if secret != webhook_secret():
             return jsonify(ok=True)
         body = request.get_json(silent=True) or {}
+        if not isinstance(body,dict) or not isinstance(body.get('data',{}),dict):abort(400)
         kind = body.get("type") or request.args.get("type") or ""
         ref = str((body.get("data") or {}).get("id") or request.args.get("data.id") or "")
         try:
             if kind == "payment" and ref.isdigit():
-                store = h.one("SELECT * FROM stores WHERE sub_pix_id=?", (ref,))
+                meta=setting('billing.pix.'+ref)
+                store=h.one('SELECT * FROM stores WHERE id=?',(meta['store_id'],)) if meta.get('store_id') else h.one('SELECT * FROM stores WHERE sub_pix_id=?',(ref,))
                 if store:
-                    check_plan_pix(store)
+                    check_plan_pix(store,ref)
                 return jsonify(ok=True)
             if kind == "subscription_authorized_payment" and ref.isdigit():
                 ref = str(mp().authorized_payment(token(), ref).get("preapproval_id") or "")
