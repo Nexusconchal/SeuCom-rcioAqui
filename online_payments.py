@@ -103,6 +103,7 @@ def register_online_payments(app, helpers):
         live=[p for p in transactions if p['status']=='approved' and p['amount']>p['refunded']]
         review=bool((current['status']=='cancelled' and live) or len(live)>1 or any(p['refunded'] and p['refunded']<p['amount'] for p in transactions) or any(p['status']=='in_mediation' for p in transactions))
         status='approved' if current['paid'] else latest['status'] if latest else 'not_started'
+        if not current['paid'] and current['payment']=='card_online' and any(p['status'] in ('pending','authorized','in_process') for p in transactions):status='in_process'
         if latest and latest['expires_at'] and latest['expires_at']<now() and status=='pending':status='expired'
         if current['status']=='cancelled' and not live:status='cancelled'
         if review:status='review'
@@ -111,7 +112,7 @@ def register_online_payments(app, helpers):
                 'code':latest['pix_code'] if latest and latest['kind']=='pix' and not current['paid'] and status=='pending' else '',
                 'expires':latest['expires_at'] if latest else '',
                 'checkout_url':safe_checkout_url(latest['checkout_url']) if latest and not current['paid'] and status=='pending' else '',
-                'can_retry':not current['paid'] and current['status']!='cancelled' and not review and len(rows)<5 and status not in ('creating','uncertain'),
+                'can_retry':not current['paid'] and current['status']!='cancelled' and not review and len(rows)<5 and status not in ('creating','uncertain','authorized','in_process','in_mediation'),
                 'review':review,'needs_email':current['payment'] in ONLINE_METHODS and not email and not current['paid']}
 
     def verify(info,attempt,pid):
@@ -227,6 +228,7 @@ def register_online_payments(app, helpers):
             sync(order,store)
             store,order=store_order(sid,oid)
             if order['paid']:return state(order)
+            if state(order)['status'] in ('authorized','in_process','in_mediation'):return state(order)
             if state(order)['review']:raise PaymentError('A cobrança precisa de conferência pela loja antes de outra tentativa.')
         account=collector(store)
         reference='';recover=False

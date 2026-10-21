@@ -271,3 +271,19 @@ def test_cancellation_during_remote_creation_never_exposes_checkout_and_expires_
     assert attempt['status']=='cancelled'
     if kind=='pix':assert provider.cancelled==[9000]
     else:assert provider.preferences[0]['expires'] is True
+
+
+@pytest.mark.parametrize('status',['pending','authorized','in_process'])
+def test_card_in_analysis_never_opens_a_second_checkout_after_expiry(shop,status):
+    c,pid=shop;provider=setup_online(c,'card');order,_=create_order(c,pid,'card_online')
+    provider.approve_card(status=status)
+    store=sql(c,'SELECT * FROM stores')[0];core(c,'online_sync',order,store)
+    sql(c,"UPDATE order_payment_attempts SET expires_at='2020-01-01T00:00:00+00:00'")
+    before=core(c,'online_state',order)
+    assert before['status']=='in_process' and not before['can_retry']
+    after=core(c,'online_create',order['store_id'],order['id'],'card')
+    assert after['status']=='in_process' and len(provider.preferences)==1
+    provider.payments[20001]['status']='rejected'
+    core(c,'online_sync',order,store)
+    core(c,'online_create',order['store_id'],order['id'],'card')
+    assert len(provider.preferences)==2

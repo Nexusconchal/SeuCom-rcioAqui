@@ -1,7 +1,7 @@
 import { $, api, esc, money, date, copy, toast, modal, closeModal } from './ui.js';
 
 export const onlineMethod=o=>['pix_online','card_online'].includes(o.payment);
-const labels={not_started:'Pagamento ainda não iniciado',creating:'Preparando pagamento',pending:'Aguardando pagamento',approved:'Pagamento confirmado',rejected:'Pagamento recusado',cancelled:'Cobrança cancelada',expired:'Prazo de pagamento encerrado',refunded:'Pagamento estornado',charged_back:'Pagamento contestado',uncertain:'Conferindo com o Mercado Pago',review:'Pagamento precisa de conferência'};
+const labels={not_started:'Pagamento ainda não iniciado',creating:'Preparando pagamento',pending:'Aguardando pagamento',authorized:'Pagamento em análise',in_process:'Pagamento em análise',in_mediation:'Pagamento em contestação',approved:'Pagamento confirmado',rejected:'Pagamento recusado',cancelled:'Cobrança cancelada',expired:'Prazo de pagamento encerrado',refunded:'Pagamento estornado',charged_back:'Pagamento contestado',uncertain:'Conferindo com o Mercado Pago',review:'Pagamento precisa de conferência'};
 export function paymentLabel(p){return labels[p?.status]||'Conferir pagamento';}
 function checkoutUrl(value){try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&['www.mercadopago.com.br','mercadopago.com.br','sandbox.mercadopago.com.br'].includes(u.hostname)&&(!u.port||u.port==='443')&&u.pathname.startsWith('/checkout/')?u.href:'';}catch{return '';}}
 
@@ -16,7 +16,7 @@ export function trackingPayment(o,token){
     (active&&p.expires?'<p class="muted">Validade: '+date(p.expires)+'. A confirmação aparece aqui automaticamente.</p>':'')+
     (active&&p.needs_email?'<label>E-mail para o pagamento<input id="online-email" type="email" autocomplete="email" maxlength="254" required></label>':'')+
     (active&&checkoutUrl(p.checkout_url)?'<button class="btn" id="online-checkout">Pagar no Mercado Pago</button><p class="muted">Você informa os dados do cartão na página segura do Mercado Pago.</p>':active&&(p.can_retry||['creating','uncertain'].includes(p.status))&&!p.code?'<button class="btn" id="online-start">'+(['creating','uncertain'].includes(p.status)?'Conferir tentativa':pix?'Gerar Pix':'Abrir pagamento seguro')+'</button>':'')+
-    (active&&['creating','uncertain'].includes(p.status)?'<p class="notice">Estamos conferindo a cobrança. Aguarde a atualização para evitar pagar duas vezes.</p>':'')+'</section>';
+    (active&&['creating','uncertain','authorized','in_process'].includes(p.status)?'<p class="notice">Estamos conferindo a cobrança. Aguarde a atualização para evitar pagar duas vezes.</p>':'')+'</section>';
 }
 export function bindTrackingPayment(o,token,refresh){
   const p=o.online_payment;if(!p)return;
