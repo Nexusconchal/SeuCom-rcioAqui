@@ -1,5 +1,7 @@
 import { onlineMethod, merchantPayment, bindMerchantPayment } from './online-payments.js';
 import { printDocument } from './printing.js';
+import { initPrintJournal, enqueuePrint, pendingPrints, trackedPrint, mountPrintJournal } from './print-journal.js';
+import { setupPanel, operationNotices, receivablesPage, operationsHealthPage, installConnectionNotice } from './reliability.js';
 import { networkSettings, networkInvite } from './network.js';
 import { matchesSearch, productMatches } from './search.js';
 import { bindQuickNavigation } from './quick-navigation.js';
@@ -15,13 +17,13 @@ import { $, $$, icon, brand, money, esc, image, api, auth, useTimeZone, modal, c
 let store, products=[], categories=[], drivers=[], orders=[], tab='overview', period=7, timer, generation=0, role='owner', roleLabel='Dono';
 const ROLE_TABS={kitchen:['kitchen','orders','settings','printing','support'],cashier:['overview','pos','cash','dining','reports','inbox','deliverymap','orders','kitchen','customers','drivers','sales','settings','printing','support'],manager:null,owner:null};
 export async function renderDashboard(){
-  const me=await api('/api/admin/store');store=me.store;useTimeZone(store.timezone);role=me.role;roleLabel=me.role_label;document.title='Painel • '+store.name;
-  $('#app').innerHTML='<div class="dashboard"><header class="dashboard-head">'+brand()+'<nav class="dashboard-nav">'+[['overview','Visão geral'],['orders','Pedidos'],['pos','PDV / Balcão'],['cash','Caixa por turno'],['dining','Mesas e comandas'],['kitchen','Cozinha'],['products','Cardápio'],['stock','Estoque'],['ingredients','Insumos e fichas'],['customers','Clientes'],['inbox','Atendimento WhatsApp'],['marketing','Marketing'],['promotions','Promoções e horários'],['drivers','Entregas'],['deliverymap','Mapa de entregas'],['sales','Vendas e caixa'],['finance','Lucro e custos'],['purchasing','Contas e fornecedores'],['reports','Gerar relatório'],['fiscal','Fiscal'],['integrations','Integrações'],['network','Minha rede'],['printing','Imprimir notinha'],['support','Suporte']].filter(([id])=>role==='owner'||(role==='manager'?!['integrations','network'].includes(id):ROLE_TABS[role].includes(id))).map(([id,label])=>'<button data-tab="'+id+'">'+label+'</button>').join('')+'</nav>'+'<div class="head-actions"><button id="sound-toggle" class="icon-btn sound-toggle" aria-label="Som de novos pedidos">'+icon('bell')+'</button><button class="icon-btn" data-tab="settings" aria-label="Configurações">'+icon('gear')+'</button><button id="logout" class="icon-btn" aria-label="Sair">'+icon('logout')+'</button></div></header><main id="main" class="dashboard-main"><section class="dashboard-title"><div><span class="eyebrow" id="page-kicker">SEU COMÉRCIO EM MOVIMENTO</span><h1 id="page-title">Seu dia em um olhar</h1><p id="page-subtitle">Tudo pronto para vender mais.</p></div><div class="title-actions"><button id="store-toggle" class="badge gray"><i></i>Loja fechada</button><a class="btn" href="/loja/'+esc(store.slug)+'" target="_blank" rel="noopener">Ver minha loja '+icon('eye')+'</a></div></section><section id="platform-notices"></section><section id="dashboard-content" aria-live="polite"></section></main><footer class="dashboard-footer"><span>SeuComércioAqui</span><span>'+esc(store.name)+' • '+esc(auth.user.name)+' ('+esc(roleLabel)+')</span></footer></div>';
+  const me=await api('/api/admin/store');store=me.store;useTimeZone(store.timezone);role=me.role;roleLabel=me.role_label;initPrintJournal(store.id,auth.user.id);document.title='Painel • '+store.name;
+  $('#app').innerHTML='<div class="dashboard"><header class="dashboard-head">'+brand()+'<nav class="dashboard-nav">'+[['overview','Visão geral'],['orders','Pedidos'],['pos','PDV / Balcão'],['cash','Caixa por turno'],['dining','Mesas e comandas'],['kitchen','Cozinha'],['products','Cardápio'],['stock','Estoque'],['ingredients','Insumos e fichas'],['customers','Clientes'],['inbox','Atendimento WhatsApp'],['marketing','Marketing'],['promotions','Promoções e horários'],['drivers','Entregas'],['deliverymap','Mapa de entregas'],['sales','Vendas e caixa'],['finance','Lucro e custos'],['receivables','Recebíveis online'],['diagnostics','Diagnóstico da loja'],['purchasing','Contas e fornecedores'],['reports','Gerar relatório'],['fiscal','Fiscal'],['integrations','Integrações'],['network','Minha rede'],['printing','Imprimir notinha'],['support','Suporte']].filter(([id])=>role==='owner'||(role==='manager'?!['integrations','network'].includes(id):ROLE_TABS[role].includes(id))).map(([id,label])=>'<button data-tab="'+id+'">'+label+'</button>').join('')+'</nav>'+'<div class="head-actions"><button id="sound-toggle" class="icon-btn sound-toggle" aria-label="Som de novos pedidos">'+icon('bell')+'</button><button class="icon-btn" data-tab="settings" aria-label="Configurações">'+icon('gear')+'</button><button id="logout" class="icon-btn" aria-label="Sair">'+icon('logout')+'</button></div></header><main id="main" class="dashboard-main"><section class="dashboard-title"><div><span class="eyebrow" id="page-kicker">SEU COMÉRCIO EM MOVIMENTO</span><h1 id="page-title">Seu dia em um olhar</h1><p id="page-subtitle">Tudo pronto para vender mais.</p></div><div class="title-actions"><button id="store-toggle" class="badge gray"><i></i>Loja fechada</button><a class="btn" href="/loja/'+esc(store.slug)+'" target="_blank" rel="noopener">Ver minha loja '+icon('eye')+'</a></div></section><section id="platform-notices"></section><section id="operation-notices"></section><section id="dashboard-content" aria-live="polite"></section></main><footer class="dashboard-footer"><span>SeuComércioAqui</span><span>'+esc(store.name)+' • '+esc(auth.user.name)+' ('+esc(roleLabel)+')</span></footer></div>';
   $$('[data-tab]').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
   bindQuickNavigation(switchTab,store.id+'.'+auth.user.id);
   $('#logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'});location.href='/entrar';}catch(e){toast(e.message);}};
   $('#store-toggle').onclick=async()=>{try{const result=await api('/api/admin/store/open',{method:'POST',body:JSON.stringify({open:!store.open})});store=result.store;updateStoreButton();toast(store.open?'Loja aberta para pedidos.':'Loja fechada.');platformNotices();}catch(e){toast(e.message);}};
-  updateStoreButton();updateSoundButton();
+  updateStoreButton();updateSoundButton();installConnectionNotice();
   document.addEventListener('pointerdown',unlockAudio,{once:true});
   $('#sound-toggle').onclick=()=>{try{localStorage.setItem('sca.sound',soundOn()?'0':'1');}catch{}unlockAudio();updateSoundButton();
     if(soundOn()){chime();if('Notification' in window&&Notification.permission==='default')Notification.requestPermission().catch(()=>{});}
@@ -35,7 +37,7 @@ export async function renderDashboard(){
 }
 function updateStoreButton(){const b=$('#store-toggle');const paused=store.billing_state&&!['exempt','active','paid','trial'].includes(store.billing_state);b.className='badge '+(store.open_now?'green':store.open&&!paused?'amber':'gray');b.innerHTML='<i></i>'+(paused?'Loja pausada (assinatura)':!store.open?'Loja fechada':store.open_now?'Loja aberta':'Aberta • fora do horário');b.title=store.open?'Clique para fechar a loja agora':'Clique para abrir a loja';}
 const days=['Segunda','Terça','Quarta','Quinta','Sexta','Sábado','Domingo'];
-let seen=null,motojaSeen=null,watchTimer,audio;
+let seen=null,motojaSeen=null,watchTimer,audio,journalWarning=false,printSeen=null,watchBusy=false;
 const soundOn=()=>{try{return localStorage.getItem('sca.sound')!=='0';}catch{return true;}};
 function unlockAudio(){try{audio=audio||new (window.AudioContext||window.webkitAudioContext)();audio.resume();}catch{}}
 function chime(){
@@ -88,22 +90,33 @@ function motojaWatch(list){
 }
 function updateSoundButton(){const b=$('#sound-toggle');if(!b)return;b.classList.toggle('active',soundOn());b.setAttribute('aria-pressed',String(soundOn()));b.title=soundOn()?'Som de novos pedidos ligado':'Som de novos pedidos desligado';}
 async function watchOrders(){
+  if(watchBusy)return;watchBusy=true;
   clearTimeout(watchTimer);
   try{
     const active=(await api('/api/admin/orders?status=active')).orders,list=active.filter(o=>o.status==='new');
     const moved=motojaWatch(active);
     if(moved&&['overview','orders','drivers'].includes(tab))switchTab(tab,true);
     if(seen){const fresh=list.filter(o=>!seen.has(o.id));if(fresh.length){
-      chime();if(autoPrint())fresh.slice().reverse().forEach(autoPrintTicket);const first=fresh[0];toast(fresh.length>1?fresh.length+' novos pedidos chegaram!':'Novo pedido #'+first.number+' • '+money(first.total));
+      chime();const first=fresh[0];toast(fresh.length>1?fresh.length+' novos pedidos chegaram!':'Novo pedido #'+first.number+' • '+money(first.total));
       if('Notification' in window&&Notification.permission==='granted'&&document.hidden){try{new Notification('Novo pedido #'+first.number,{body:first.customer+' • '+money(first.total),icon:'/static/icon-192.png',tag:'pedido-'+first.id});}catch{}}
       if(['overview','orders','kitchen'].includes(tab))switchTab(tab,true);
     }}
+    if(autoPrint()){
+      try{
+        const candidates=active.filter(o=>['new','preparing'].includes(o.status)&&(!onlineMethod(o)||o.paid||o.total===0));
+        candidates.forEach(o=>{const sector=printSector();if(!sector||o.items.some(i=>(i.production_sector||'Cozinha')===sector))enqueuePrint(o,sector?'sector:'+sector:'all');});
+        if(printSeen)candidates.filter(o=>!printSeen.has(o.id)).slice().reverse().forEach(autoPrintTicket);
+        else if(pendingPrints().length)toast('Há pendências de impressão. Abra Imprimir notinha e confira antes de repetir.');
+        printSeen=new Set(candidates.map(o=>o.id));
+      }catch{if(!journalWarning){journalWarning=true;toast('Não consegui guardar as pendências de impressão. Confira o armazenamento deste navegador.');}}
+    }
+    if(['owner','manager'].includes(role))operationNotices($('#operation-notices'),switchTab);
     supportCheck();
-    seen=new Set(list.map(o=>o.id));document.title=(list.length?'('+list.length+') ':'')+'Painel • '+store.name;
-  }catch(e){if(e.status===401){location.href='/entrar';return;}}
+    seen=new Set(active.map(o=>o.id));document.title=(list.length?'('+list.length+') ':'')+'Painel • '+store.name;
+  }catch(e){if(e.status===401){location.href='/entrar';return;}}finally{watchBusy=false;}
   watchTimer=setTimeout(watchOrders,15000);
 }
-const autoPrint=()=>{try{return localStorage.getItem('sca.autoprint')==='1';}catch{return false;}};
+const autoPrint=()=>{try{return (localStorage.getItem('sca.autoprint.'+store.id)??localStorage.getItem('sca.autoprint'))==='1';}catch{return false;}};
 const b64=s=>{const p='='.repeat((4-s.length%4)%4);const raw=atob((s+p).replace(/-/g,'+').replace(/_/g,'/'));return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));};
 async function pushState(){
   if(!('serviceWorker' in navigator)||!('PushManager' in window))return 'unsupported';
@@ -145,7 +158,7 @@ function driverSlipHTML(o){
     '<p>'+volumes+(volumes===1?' item':' itens')+(driver?' • Entregador: '+esc(driver.name):'')+'</p>'+(o.notes?'<p><b>Obs.:</b> '+esc(o.notes)+'</p>':'')+'<p class="t-center t-foot">SeuComércioAqui</p></div>';
 }
 const pref=(k,d)=>{try{return localStorage.getItem('sca.'+k)??d;}catch{return d;}};
-const setPref=(k,v)=>{try{localStorage.setItem('sca.'+k,v);}catch{}};
+const setPref=(k,v)=>{try{localStorage.setItem('sca.'+k+(k==='autoprint'?'.'+store.id:''),v);}catch{}};
 const printProfiles={'80':{label:'Bobina de 80 mm',width:72,max:76},'58':{label:'Bobina de 58 mm',width:48,max:50},'76':{label:'Bobina de 76 mm',width:68,max:68},'112':{label:'Bobina de 112 mm',width:104,max:104},a4:{label:'Folha A4',width:190,max:200},custom:{label:'Outra largura',width:72,max:200}};
 const paperWidth=()=>Object.hasOwn(printProfiles,pref('paper','80'))?pref('paper','80'):'80';
 const printContentWidth=()=>{const profile=printProfiles[paperWidth()],saved=Number(pref('print-width.'+paperWidth(),profile.width));return Number.isFinite(saved)&&saved>=32&&saved<=profile.max?saved:profile.width;};
@@ -162,17 +175,17 @@ function kitchenSlipHTML(o,sector){
  return '<div class="ticket"><p class="t-tag">PRODUÇÃO • '+esc(sector||'Todos os setores')+'</p><h1>'+esc(store.name)+'</h1><p class="t-center t-big">PEDIDO #'+o.number+'</p><p>'+esc(o.customer)+' • '+date(o.created_at)+'</p>'+items.map(i=>'<div class="t-item"><b>'+i.quantity+' × '+esc(i.name)+'</b></div>'+i.extras.map(x=>'<div class="t-sub">'+esc(x.name)+'</div>').join('')+(i.notes?'<p class="t-box">'+esc(i.notes)+'</p>':'')).join('')+(o.notes?'<p class="t-box">'+esc(o.notes)+'</p>':'')+'</div>';
 }
 const printSector=()=>{try{return localStorage.getItem('sca.print-sector.'+store.id)||'';}catch{return '';}};
-function autoPrintTicket(o){const sector=printSector();if(!sector)return printTicket(o);if(o.items.some(i=>(i.production_sector||'Cozinha')===sector))printTicket(o,'sector:'+sector);}
+function autoPrintTicket(o){const sector=printSector();if(!sector)return printTicket(o,'all',false,true);if(o.items.some(i=>(i.production_sector||'Cozinha')===sector))printTicket(o,'sector:'+sector,false,true);}
 function printJobHTML(o,what='all'){
   const sector=typeof what==='string'&&what.startsWith('sector:')?what.slice(7):null;
   const slip=sector===null&&o.mode==='delivery'&&(what==='driver'||driverCopy());
   return sector!==null?kitchenSlipHTML(o,sector):(what==='driver'?'':ticketHTML(o))+(slip?(what==='driver'?'':'<div class="t-cut"></div>')+driverSlipHTML(o):'');
 }
 function calibrationHTML(){return '<div class="t-calibration"><b>TESTE DE IMPRESSÃO</b><p>Acentos: pão, ação, açúcar, café.<br>Valores: R$ 12,34 • 2 × produto.</p><div class="t-ruler">20 mm</div><p>Confira a linha com uma régua. Se cortar texto, reduza a área útil; se a linha mudar de tamanho, confira a escala de 100% no navegador.</p></div>';}
-function printTicket(o,what='all',calibration=false){
+function printTicket(o,what='all',calibration=false,automatic=false){
   const html=printJobHTML(o,what)+(calibration?calibrationHTML():'');
   const settings={paper:paperWidth(),width:printContentWidth(),font:printFont()};
-  printDocument(html,settings);
+  return o.id?trackedPrint(o,what,()=>printDocument(html,settings),automatic):printDocument(html,settings);
 }
 const sampleOrder=()=>({id:0,number:123,created_at:new Date().toISOString(),customer:'Cliente Teste',phone:'(19) 99999-0000',mode:'delivery',zone:'Centro',address:store.address||'Rua Exemplo, 100 - Centro',
   items:[{quantity:2,name:'Produto de teste com nome comprido',unit_price:2500,extras:[{name:'Adicional: queijo e açúcar à parte'}],notes:'Sem cebola. Embalar separadamente.'}],notes:'Notinha de teste • confira se o texto está completo.',subtotal:5000,delivery_fee:500,discount:0,total:5500,payment:'cash',paid:false,change_for:10000});
@@ -205,7 +218,7 @@ function printPanel(){
       '<h3>Notinha de pedido e outros equipamentos</h3><p class="muted">Esta impressão é um comprovante de pedido, sem emissão de NFC-e/NF-e. Impressoras fiscais ECF, etiquetadoras, conexões apenas por comandos e impressoras embutidas em maquininhas precisam de integração específica. Android e iPhone dependem do serviço de impressão disponível no aparelho e do suporte do modelo.</p></details></section>';
   return '<section class="workspace-hero"><div class="workspace-hero-copy"><span class="workspace-kicker">DO PEDIDO AO PAPEL</span><h2>Uma notinha clara.<br>Uma operação mais leve.</h2><p>Ajuste o papel, confira a leitura e deixe cada pedido pronto para a cozinha ou para a entrega.</p><div class="workspace-hero-actions"><button type="button" class="btn" id="print-test">'+icon('print')+' Imprimir teste</button><button type="button" class="btn secondary" id="print-preview">'+icon('eye')+' Ver prévia</button></div><div class="workspace-summary"><span>'+icon('print')+' <span id="print-paper-summary">'+esc(printProfiles[paperWidth()].label)+'</span></span><span>'+icon('clock')+' <span id="print-auto-summary">'+(autoPrint()?'Impressão automática ligada':'Impressão manual')+'</span></span></div></div><div class="print-hero-symbol" aria-hidden="true">'+icon('print')+'<span>Feito para o seu caixa</span></div></section>'+
     '<div class="print-workspace">'+settings+'<aside class="print-preview-panel"><span class="eyebrow">PRÉVIA AO VIVO</span><h3>Como sua notinha vai sair</h3><p class="muted">Um pedido de exemplo, com os ajustes deste aparelho.</p><div class="print-preview-stage" tabindex="0" aria-label="Prévia da notinha com rolagem"><div id="print-live-sheet"></div></div><p class="print-preview-caption">'+icon('eye')+' A prévia acompanha o papel e o tamanho das letras.</p><div class="print-guidance"><b>Escolha sua impressora na janela de impressão</b><p>Bematech, Elgin e outras marcas dependem do driver instalado no Windows. Escolha o destino no Chrome ou Edge e confira a escala de 100%.</p></div></aside></div>'+
-    '<div class="print-guidance"><b>Confira antes de atender</b><p>O teste não cria pedidos nem movimenta o caixa. Confira acentos, valores e a linha de 20 mm. A prévia não confirma conexão com a impressora ou saída do papel.</p></div>'+help;
+    '<section class="panel" id="print-history"></section><div class="print-guidance"><b>Confira antes de atender</b><p>O teste não cria pedidos nem movimenta o caixa. Confira acentos, valores e a linha de 20 mm. A prévia não confirma conexão com a impressora ou saída do papel.</p></div>'+help;
 }
 function updatePrintPreview(){
   const sheet=$('#print-live-sheet');if(!sheet)return;
@@ -224,8 +237,13 @@ async function bindAlertsPanel(){
 }
 function bindPrintPanel(){
   updatePrintPreview();
+  mountPrintJournal($('#print-history'),async job=>{
+    const {order}=await api('/api/admin/print-orders/'+job.order_id);
+    if(order.status==='cancelled')throw Error('Este pedido foi cancelado. Confira com a equipe e dispense a pendência.');
+    return printTicket(order,job.what);
+  });
   $('#print-sector').onchange=e=>{try{localStorage.setItem('sca.print-sector.'+store.id,e.target.value.trim());toast('Setor de impressão atualizado neste aparelho.');}catch{toast('Não consegui salvar a preferência neste navegador.');}};
-  $('#autoprint').onchange=e=>{setPref('autoprint',e.target.checked?'1':'0');e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';if(e.target.checked)toast('Pedidos novos serão impressos enquanto o painel estiver aberto.');};
+  $('#autoprint').onchange=e=>{setPref('autoprint',e.target.checked?'1':'0');e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';if(e.target.checked){printSeen=null;watchOrders();toast('Pedidos novos serão impressos com o painel aberto. Confira as pendências anteriores no histórico.');}};
   $('#driverslip').onchange=e=>{setPref('driverslip',e.target.checked?'1':'0');e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';};
   $('#paper-width').onchange=e=>{setPref('paper',e.target.value);const input=$('#print-content-width');input.max=printProfiles[paperWidth()].max;input.value=printContentWidth();$('#print-font').value=printFont();toast(printProfiles[paperWidth()].label+' neste aparelho.');};
   $('#print-content-width').onchange=e=>{const value=Number(e.target.value),max=printProfiles[paperWidth()].max;if(!Number.isFinite(value)||value<32||value>max){e.target.value=printContentWidth();toast('Informe uma área útil entre 32 e '+max+' mm.');return;}setPref('print-width.'+paperWidth(),String(value));toast('Área útil salva neste navegador.');};
@@ -307,7 +325,7 @@ function bindPlanPanel(){
 }
 async function switchTab(next,quiet=false){
   clearTimeout(timer);$('#dashboard-content')._inboxCleanup?.();$('#new-manual-order')?.remove();tab=next;$('#dashboard-content').dataset.management=next;const v=++generation;$('#dashboard-content').classList.toggle('marketing-surface',next==='marketing');
-  const titles={fiscal:['Fiscal da sua loja','Seu espaço para notas e documentos, com cada etapa no lugar.'],network:['Minha rede','Um link público para reunir as unidades.'],deliverymap:['Mapa de entregas','Pedidos prontos, saídas em lote e posições recentes.'],inbox:['Atendimento WhatsApp','Conversas, respostas e responsáveis pelo atendimento.'],pos:['PDV / Balcão','Venda rápida com catálogo, escolhas e sacola.'],cash:['Caixa por turno','Conferência, recebimentos parciais e estornos.'],dining:['Mesas e comandas','Contas abertas, pedidos e atendimento do salão.'],promotions:['Promoções e horários','Preços e disponibilidade programados por canal.'],purchasing:['Contas e fornecedores','Vencimentos, baixas e produção de preparos.'],reports:['Gerar relatório','Escolha o período e baixe os números da loja.'],marketing:['Mais motivos para voltar','Relacionamento, recompra e oportunidades de venda.'],ingredients:['Da receita ao resultado','Ingredientes, consumo e custo de cada produto.'],kitchen:['Fila de produção','Produtos e observações para preparar os pedidos.'],finance:['Seu lucro, com clareza','Custos, taxas e resultado estimado da loja.'],stock:['Estoque sob controle','Reposição, perdas e histórico de movimentações.'],customers:['Conheça seus clientes','Compras e histórico de quem pede na sua loja.'],integrations:['Conecte seus parceiros','Chaves de API e acompanhamento das entregas.'],printing:['Imprimir notinha','Impressora térmica, largura do papel, via do motoboy e teste de impressão.'],support:['Fale com o suporte','Dúvidas, problemas e sugestões direto com a equipe SeuComércioAqui.'],overview:['Seu dia em um olhar','Os pedidos e números que importam agora.'],orders:['Cada pedido, no seu tempo','Do primeiro clique à última entrega.'],products:['Seu cardápio, sua assinatura','Organize seus produtos e deixe tudo com a sua cara.'],drivers:['Entrega bem cuidada','Sua equipe e os pedidos a caminho.'],sales:['Os números do seu negócio','Acompanhe vendas, recebimentos e despesas.'],settings:['A sua loja, do seu jeito','Identidade, contato e operação em um só lugar.']};
+  const titles={receivables:['Recebíveis online','Pagamentos, taxas e previsão de liberação na conta Mercado Pago.'],diagnostics:['Diagnóstico da loja','Filas, pagamentos e pontos para conferir na operação.'],fiscal:['Fiscal da sua loja','Seu espaço para notas e documentos, com cada etapa no lugar.'],network:['Minha rede','Um link público para reunir as unidades.'],deliverymap:['Mapa de entregas','Pedidos prontos, saídas em lote e posições recentes.'],inbox:['Atendimento WhatsApp','Conversas, respostas e responsáveis pelo atendimento.'],pos:['PDV / Balcão','Venda rápida com catálogo, escolhas e sacola.'],cash:['Caixa por turno','Conferência, recebimentos parciais e estornos.'],dining:['Mesas e comandas','Contas abertas, pedidos e atendimento do salão.'],promotions:['Promoções e horários','Preços e disponibilidade programados por canal.'],purchasing:['Contas e fornecedores','Vencimentos, baixas e produção de preparos.'],reports:['Gerar relatório','Escolha o período e baixe os números da loja.'],marketing:['Mais motivos para voltar','Relacionamento, recompra e oportunidades de venda.'],ingredients:['Da receita ao resultado','Ingredientes, consumo e custo de cada produto.'],kitchen:['Fila de produção','Produtos e observações para preparar os pedidos.'],finance:['Seu lucro, com clareza','Custos, taxas e resultado estimado da loja.'],stock:['Estoque sob controle','Reposição, perdas e histórico de movimentações.'],customers:['Conheça seus clientes','Compras e histórico de quem pede na sua loja.'],integrations:['Conecte seus parceiros','Chaves de API e acompanhamento das entregas.'],printing:['Imprimir notinha','Impressora térmica, largura do papel, via do motoboy e teste de impressão.'],support:['Fale com o suporte','Dúvidas, problemas e sugestões direto com a equipe SeuComércioAqui.'],overview:['Seu dia em um olhar','Os pedidos e números que importam agora.'],orders:['Cada pedido, no seu tempo','Do primeiro clique à última entrega.'],products:['Seu cardápio, sua assinatura','Organize seus produtos e deixe tudo com a sua cara.'],drivers:['Entrega bem cuidada','Sua equipe e os pedidos a caminho.'],sales:['Os números do seu negócio','Acompanhe vendas, recebimentos e despesas.'],settings:['A sua loja, do seu jeito','Identidade, contato e operação em um só lugar.']};
   $('#page-title').textContent=titles[tab][0];$('#page-subtitle').textContent=titles[tab][1];$$('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
   if(!quiet)$('#dashboard-content').innerHTML='<div class="loading small-loading">Carregando…</div>';
   try{
@@ -322,7 +340,9 @@ async function switchTab(next,quiet=false){
       const [result,team]=await Promise.all([api('/api/admin/orders'),api('/api/admin/drivers')]);if(v!==generation)return;orders=result.orders;drivers=team.drivers;driversPage();
     }else if(tab==='sales'){
       const summary=await api('/api/admin/summary?days='+period);if(v!==generation)return;salesPage(summary);
-    }else if(['finance','stock','customers','integrations'].includes(tab)){await managementView(tab,$('#dashboard-content'));}
+    }else if(tab==='receivables'){await receivablesPage($('#dashboard-content'));}
+    else if(tab==='diagnostics'){await operationsHealthPage($('#dashboard-content'),switchTab);}
+    else if(['finance','stock','customers','integrations'].includes(tab)){await managementView(tab,$('#dashboard-content'));}
     else if(tab==='network'){await networkSettings($('#dashboard-content'));}
     else if(tab==='deliverymap'){await deliveryMapPage($('#dashboard-content'));}
     else if(tab==='inbox'){await inboxPage($('#dashboard-content'));}
@@ -344,8 +364,9 @@ function chart(data){
 }
 function overview(today,week){
   const active=orders.filter(o=>!['completed','cancelled'].includes(o.status));
-  $('#dashboard-content').innerHTML='<div class="metrics three">'+metric('Vendas concluídas hoje',money(today.revenue),'chart')+metric('Pedidos hoje',today.orders,'bag')+metric('Em andamento',active.length,'clock')+'</div><section class="panel order-panel"><div class="section-heading"><div><h2>Pedidos em andamento</h2><p class="muted">Um próximo passo para cada pedido.</p></div><button id="all-orders" class="text-link">Ver todos '+icon('arrow')+'</button></div>'+orderBoard(active)+'</section><div class="overview-bottom"><section class="panel"><div class="section-heading"><div><span class="muted">Vendas concluídas • últimos 7 dias</span><h2>'+money(week.revenue)+'</h2></div>'+icon('chart')+'</div>'+chart(week.chart)+'</section><section class="share-panel"><span class="feature-icon">'+icon('link')+'</span><h2>Seu cardápio está no ar.</h2><p>Compartilhe o link e receba pedidos diretamente pela sua loja.</p><button id="share-store" class="btn">'+icon('copy')+' Copiar link da loja</button></section></div>'+(!products.length&&!store.open?'<p class="muted">Primeiros passos: cadastre seus produtos, configure pagamentos e abra a loja quando estiver tudo pronto.</p>':'');
+  $('#dashboard-content').innerHTML=(['owner','manager'].includes(role)?'<section id="merchant-setup"></section>':'')+'<div class="metrics three">'+metric('Vendas concluídas hoje',money(today.revenue),'chart')+metric('Pedidos hoje',today.orders,'bag')+metric('Em andamento',active.length,'clock')+'</div><section class="panel order-panel"><div class="section-heading"><div><h2>Pedidos em andamento</h2><p class="muted">Um próximo passo para cada pedido.</p></div><button id="all-orders" class="text-link">Ver todos '+icon('arrow')+'</button></div>'+orderBoard(active)+'</section><div class="overview-bottom"><section class="panel"><div class="section-heading"><div><span class="muted">Vendas concluídas • últimos 7 dias</span><h2>'+money(week.revenue)+'</h2></div>'+icon('chart')+'</div>'+chart(week.chart)+'</section><section class="share-panel"><span class="feature-icon">'+icon('link')+'</span><h2>Seu cardápio está no ar.</h2><p>Compartilhe o link e receba pedidos diretamente pela sua loja.</p><button id="share-store" class="btn">'+icon('copy')+' Copiar link da loja</button></section></div>'+(!products.length&&!store.open?'<p class="muted">Primeiros passos: cadastre seus produtos, configure pagamentos e abra a loja quando estiver tudo pronto.</p>':'');
   $('#dashboard-content').insertAdjacentHTML('beforeend','<section id="overview-details"></section>');overviewDetails($('#overview-details')).catch(e=>toast(e.message));
+  if(['owner','manager'].includes(role))setupPanel($('#merchant-setup'),switchTab).catch(e=>toast(e.message));
   $('#all-orders').onclick=()=>switchTab('orders');$('#share-store').onclick=()=>copy(location.origin+'/loja/'+store.slug);bindOrderButtons();
 }
 const laneState=()=>{try{return JSON.parse(localStorage.getItem('sca.lanes')||'{}');}catch{return {};}};

@@ -10,7 +10,7 @@ async function start(){
     if(path[0]==='pedido')return await (await import('./menu.js')).renderTracking(path[1]||'');
     if(path[0]==='admin'||path[0]==='plataforma')return await (await import('./management.js')).renderOwnerSite();
     if(path[0]==='painel')return auth.user?await (await import('./dashboard.js')).renderDashboard():location.replace('/entrar');
-    if(path[0]==='entrar')return loginPage();
+    if(path[0]==='entrar')return new URLSearchParams(location.search).has('recuperar')?(await import('./recovery.js')).recoveryPage():loginPage();
     if(path[0]==='termos'||path[0]==='privacidade')return legalPage(path[0]);
     return (await import('./landing.js')).renderLanding();
   }catch(error){
@@ -32,7 +32,7 @@ function loginPage(){
     (register?'<label>Seu nome<input name="name" autocomplete="name" minlength="2" maxlength="100" required></label><label>Nome do comércio<input name="store_name" maxlength="100" minlength="2" required></label><label>Nome da sua loja no link<input name="slug" aria-label="Nome da sua loja no link" aria-describedby="slug-help slug-link-help" pattern="[a-z0-9]+" minlength="3" maxlength="60" placeholder="nomedasualoja" autocapitalize="none" autocomplete="off" spellcheck="false" title="Use de 3 a 60 letras ou números, tudo junto, sem espaços e sem acentos." required><small id="slug-help" style="font-size:12px;line-height:1.5">Escreva tudo junto, sem espaços e sem acentos. Exemplo: <b>nomedasualoja</b>.</small><small id="slug-link-help" style="overflow-wrap:anywhere;font-size:12px;line-height:1.5">Seus clientes verão este link para acessar o cardápio:<br><strong id="slug-preview"></strong></small></label>':'')+
     '<label>E-mail<input name="email" type="email" autocomplete="email" maxlength="254" required></label><label>Senha<input name="password" aria-label="Senha" type="password" autocomplete="'+(register?'new-password':'current-password')+'" minlength="'+(register?'10':'1')+'" maxlength="128" required>'+(register?'<small>Use ao menos 10 caracteres.</small>':'')+'</label>'+(register?'<label class="check-row terms"><span><input type="checkbox" name="accept_terms" required> Li e aceito os <a href="/termos" target="_blank">Termos de uso</a> e a <a href="/privacidade" target="_blank">Política de privacidade</a></span></label>':'')+'<p class="form-error" role="alert" hidden></p><button type="submit" class="btn full">'+(register?'Criar minha loja':'Entrar no painel')+icon('arrow')+'</button></form>'+
     (auth.registration?'<p class="auth-switch">'+(register?'Já tem uma conta? <a href="/entrar">Entrar</a>':'Ainda não tem uma loja? <a href="/entrar?cadastro=1">Criar conta</a>')+'</p>':'')+
-    (!register?'<details class="help"><summary>Esqueci minha senha</summary><p>A recuperação é feita pelo administrador da instalação. Entre em contato com quem hospeda a plataforma para redefinir sua senha.</p></details>':'')+'</div></main></div>';
+    (!register?'<p class="help"><a href="/entrar?recuperar=1">Esqueci minha senha</a></p>':'')+'</div></main></div>';
   if(register){
     const slug=$('[name=slug]');
     const compactName=value=>value.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,60);
@@ -46,4 +46,8 @@ function loginPage(){
     auth.user=result.user;location.href='/painel';
   });
 }
+window.addEventListener('hashchange',()=>{
+  if(location.pathname==='/entrar'&&new URLSearchParams(location.search).has('recuperar')&&location.hash)
+    import('./recovery.js').then(module=>module.recoveryPage());
+});
 start();
