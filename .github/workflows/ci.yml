@@ -28,8 +28,11 @@ jobs:
           python -m playwright install --with-deps chromium
       - name: Verificar sintaxe Python e JavaScript
         run: |
-          python -m compileall -q payments.py billing.py online_payments.py app.py seed.py inventory.py marketing.py upsell.py migrations.py operations.py merchandising.py purchasing.py cashback.py campaign_queue.py customer_segments.py credit.py delivery_map.py shipping.py inbox.py inbox_service.py inbox_context.py inbox_media.py chat_orders.py catalog_ai.py gunicorn.conf.py production.py store_network.py marketing_worker.py tests
+          python -m compileall -q payments.py billing.py online_payments.py account_recovery.py reliability.py app.py seed.py inventory.py marketing.py upsell.py migrations.py operations.py merchandising.py purchasing.py cashback.py campaign_queue.py customer_segments.py credit.py delivery_map.py shipping.py inbox.py inbox_service.py inbox_context.py inbox_media.py chat_orders.py catalog_ai.py gunicorn.conf.py production.py store_network.py marketing_worker.py tests
           node --check static/fiscal.js
+          node --check static/recovery.js
+          node --check static/reliability.js
+          node --check static/print-journal.js
           node --check static/printing.js
           node --check static/search.js
           node --check static/quick-navigation.js
@@ -90,7 +93,7 @@ jobs:
       - name: Verificar sintaxe e API no Windows
         run: |
           python -m compileall -q app.py seed.py tests scripts
-          python -m pytest tests/test_api.py tests/test_business.py tests/test_billing_dates.py tests/test_billing_security.py tests/test_online_payments.py tests/test_payment_contract.py tests/test_payment_routes.py tests/test_growth.py tests/test_upsell.py tests/test_operations.py tests/test_credit_delivery.py tests/test_wallet_campaigns.py tests/test_inbox.py tests/test_inbox_service.py tests/test_inbox_media.py tests/test_inbox_context.py tests/test_chat_orders.py tests/test_network_production.py -v
+          python -m pytest tests/test_api.py tests/test_business.py tests/test_billing_dates.py tests/test_billing_security.py tests/test_reliability.py tests/test_postgres_backup.py tests/test_online_payments.py tests/test_payment_contract.py tests/test_payment_routes.py tests/test_growth.py tests/test_upsell.py tests/test_operations.py tests/test_credit_delivery.py tests/test_wallet_campaigns.py tests/test_inbox.py tests/test_inbox_service.py tests/test_inbox_media.py tests/test_inbox_context.py tests/test_chat_orders.py tests/test_network_production.py -v
 
   postgres-api:
     runs-on: ubuntu-latest
@@ -110,6 +113,7 @@ jobs:
           --health-retries 10
     env:
       TEST_DATABASE_URL: postgresql://postgres:ci-only-database-password@localhost:5432/commerce_test
+      PG_BACKUP_DOCKER_IMAGE: postgres:17
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -119,7 +123,7 @@ jobs:
       - name: Instalar dependências
         run: python -m pip install -r requirements-dev.txt
       - name: Testar PostgreSQL, estoque concorrente e isolamento
-        run: python -m pytest tests/test_api.py tests/test_business.py tests/test_billing_dates.py tests/test_billing_security.py tests/test_online_payments.py tests/test_payment_contract.py tests/test_payment_routes.py tests/test_growth.py tests/test_upsell.py tests/test_storage.py tests/test_postgres_access.py tests/test_operations.py tests/test_credit_delivery.py tests/test_wallet_campaigns.py tests/test_inbox.py tests/test_inbox_service.py tests/test_inbox_media.py tests/test_inbox_context.py tests/test_chat_orders.py tests/test_network_production.py -v
+        run: python -m pytest tests/test_api.py tests/test_business.py tests/test_billing_dates.py tests/test_billing_security.py tests/test_reliability.py tests/test_postgres_backup.py tests/test_online_payments.py tests/test_payment_contract.py tests/test_payment_routes.py tests/test_growth.py tests/test_upsell.py tests/test_storage.py tests/test_postgres_access.py tests/test_operations.py tests/test_credit_delivery.py tests/test_wallet_campaigns.py tests/test_inbox.py tests/test_inbox_service.py tests/test_inbox_media.py tests/test_inbox_context.py tests/test_chat_orders.py tests/test_network_production.py -v
 
   storage-security:
     runs-on: ubuntu-latest

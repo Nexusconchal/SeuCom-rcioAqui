@@ -29,6 +29,8 @@ from customer_segments import register_customer_segments
 from cashback import register_cashback
 from inbox import register_inbox
 from online_payments import register_online_payments
+from account_recovery import register_recovery, mail_ready
+from reliability import register_reliability
 from inbox_context import register_inbox_context
 from inbox_service import install_dispatcher
 from credit import register_credit
@@ -58,7 +60,7 @@ ROLE_LABELS = {"owner": "Dono", "manager": "Gerente", "cashier": "Caixa", "kitch
 # O dono pode tudo. Os demais só acessam o que a função precisa (o servidor confere em cada chamada).
 ROLE_BASE = {"admin_store", "merchant_notices", "change_password", "admin_orders", "admin_products", "drivers", "set_open",
              "push_key", "push_subscribe", "push_unsubscribe", "push_test", "order_map_qr",
-             "support_thread", "support_unread", "support_send"}
+             "support_thread", "support_unread", "support_send", "print_order"}
 ROLE_ALLOWED = {
     "kitchen": ROLE_BASE | {"update_order", "kitchen_item_update"},
     "cashier": ROLE_BASE | {"motoja_send", "update_order", "manual_order", "customers", "customer_orders", "get_summary", "add_expense",
@@ -137,6 +139,9 @@ def create_app(test_config=None):
         MOTOJA_HOSTS={h.strip() for h in os.getenv("MOTOJA_HOSTS", "motoboy-conchal.onrender.com").split(",") if h.strip()},
         EVOLUTION_API_URL=os.getenv("EVOLUTION_API_URL", ""), EVOLUTION_API_KEY=os.getenv("EVOLUTION_API_KEY", ""), BILLING_EXEMPT_EMAILS=os.getenv("BILLING_EXEMPT_EMAILS", ""),
         INBOX_DISPATCH_MODE=os.getenv('INBOX_DISPATCH_MODE','embedded'), OPENROUTER_API_KEY=os.getenv('OPENROUTER_API_KEY',''),
+        SMTP_HOST=os.getenv('SMTP_HOST',''), SMTP_PORT=os.getenv('SMTP_PORT','587'),
+        SMTP_USER=os.getenv('SMTP_USER',''), SMTP_PASSWORD=os.getenv('SMTP_PASSWORD',''), SMTP_FROM=os.getenv('SMTP_FROM',''),
+        RECOVERY_EMAIL_PROVIDER=os.getenv('RECOVERY_EMAIL_PROVIDER','resend'), RESEND_API_KEY=os.getenv('RESEND_API_KEY',''), MAIL_FROM=os.getenv('MAIL_FROM',''),
         VAPID_PRIVATE_KEY=os.getenv("VAPID_PRIVATE_KEY", "").replace("\\n", "\n"), PUSH_CONTACT=os.getenv("PUSH_CONTACT", "suporte@seucomercioaqui.com.br"),
         UPLOAD_DIR=os.getenv("UPLOAD_DIR", str(BASE / "instance" / "uploads")),
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=production,
@@ -612,7 +617,7 @@ def create_app(test_config=None):
         user = one("SELECT id,name,email,auth_version,platform_admin FROM users WHERE id=?", (session.get("uid", -1),))
         authenticated = bool(user and user["auth_version"] == session.get("version"))
         return jsonify(csrf=session["csrf"], user={"id": user["id"], "name": user["name"], "email": user["email"], "platform_admin": bool(user["platform_admin"])} if authenticated else None,
-                       registration=app.config["ALLOW_REGISTRATION"])
+                       registration=app.config["ALLOW_REGISTRATION"], recovery_available=mail_ready(app))
 
     def establish(user):
         db().execute("UPDATE users SET last_login_at=? WHERE id=?", (now(), user["id"]))
@@ -1674,6 +1679,8 @@ def create_app(test_config=None):
 
     shared = dict(db=db, one=one, rows=rows, owner=owner, owned=owned, data=data, text=text, integer=integer, limited=limited,
                       boolean=boolean, transaction=transaction, now=now)
+    register_recovery(app, shared)
+    register_reliability(app, dict(shared, order_dict=order_dict))
     register_operations(app, shared)
     register_merchandising(app, shared)
     register_purchasing(app, shared)

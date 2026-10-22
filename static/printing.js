@@ -12,10 +12,13 @@ export function printDocument(html,settings){
     area.style.setProperty('--ticket-font',snapshot.font+'px');
     area.innerHTML=html;document.body.classList.add('printing-ticket');
     let finished=false;
-    const done=()=>{if(finished)return;finished=true;document.body.classList.remove('printing-ticket');area.innerHTML='';window.removeEventListener('afterprint',done);setTimeout(resolve,300);};
-    window.addEventListener('afterprint',done);
+    let timeout;
+    const done=(result={})=>{if(finished)return;finished=true;clearTimeout(timeout);document.body.classList.remove('printing-ticket');area.innerHTML='';window.removeEventListener('afterprint',closed);setTimeout(()=>resolve(result),300);};
+    const closed=()=>done({dialogClosed:true});
+    window.addEventListener('afterprint',closed);
+    timeout=setTimeout(()=>{done({error:true});toast('A impressão ficou sem confirmação do navegador. Confira o papel e o histórico antes de repetir.');},120000);
     const images=[...area.querySelectorAll('img')].filter(img=>!img.complete).map(img=>new Promise(r=>{img.onload=img.onerror=r;}));
-    Promise.race([Promise.all(images),new Promise(r=>setTimeout(r,3000))]).then(()=>setTimeout(()=>{try{if(typeof window.print!=='function')throw Error('Impressão indisponível');window.print();}catch{done();toast('Não consegui abrir a impressão. Tente pelo Chrome ou Edge no Windows.');}},50));
+    Promise.race([Promise.all(images),new Promise(r=>setTimeout(r,3000))]).then(()=>setTimeout(()=>{try{if(typeof window.print!=='function')throw Error('Impressão indisponível');window.print();}catch{done({error:true});toast('Não consegui abrir a impressão. Tente pelo Chrome ou Edge no Windows.');}},50));
   }));
   return queue;
 }

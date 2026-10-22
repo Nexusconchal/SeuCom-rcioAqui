@@ -161,6 +161,16 @@ def install_dispatcher(app):
             except Exception:
                 # Do not log provider payloads, contacts or credentials.
                 app.logger.error('Falha ao processar a fila de atendimento.')
+                from database import connect
+                conn = None
+                try:
+                    conn = connect(app.config)
+                    write_value(conn, 'inbox.dispatcher', json.dumps({'at': stamp(), 'error': True}))
+                except Exception:
+                    pass  # A database outage must not kill the delivery loop.
+                finally:
+                    if conn is not None:
+                        conn.close()
             stopped.wait(3)
 
     @app.before_request

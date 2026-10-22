@@ -40,7 +40,8 @@ export async function api(url,options={}){
   if(options.body && !(options.body instanceof FormData))headers['Content-Type']='application/json';
   if(options.method && !['GET','HEAD'].includes(options.method))headers['X-CSRF-Token']=auth.csrf;
   let response;
-  try{response=await fetch(url,{...options,headers,credentials:'same-origin'});}catch{throw new Error('Sem conexão. Confira sua internet e tente novamente.');}
+  try{response=await fetch(url,{...options,headers,credentials:'same-origin'});}catch{window.dispatchEvent(new CustomEvent('sca:connection',{detail:navigator.onLine?'server':'offline'}));throw new Error('Sem conexão. Confira sua internet e tente novamente.');}
+  window.dispatchEvent(new CustomEvent('sca:connection',{detail:response.status>=500?'server':'ok'}));
   const data=await response.json().catch(()=>({error:'Resposta inválida do servidor.'}));
   if(!response.ok){const error=new Error(data.error||'Não foi possível concluir.');error.status=response.status;throw error;}
   if(data.csrf)auth.csrf=data.csrf;

@@ -139,6 +139,16 @@ def register_online_payments(app, helpers):
 
     def reconcile(attempt,info,pid):
         status,refunded,fee=verify(info,attempt,pid)
+        # Optional provider settlement fields must never prevent payment confirmation.
+        details=info.get('transaction_details')
+        net_amount=None
+        if isinstance(details,dict) and details.get('net_received_amount') is not None:
+            try:net_amount=cents(details['net_received_amount'])
+            except PaymentError:pass
+        if net_amount is not None and net_amount>attempt['amount']:net_amount=None
+        release_at=stamp(info.get('money_release_date'))
+        release_status=info.get('money_release_status','')
+        if release_status not in ('released','pending','blocked'):release_status=''
         auto=False;sid,oid=attempt['store_id'],attempt['order_id']
         with h.transaction() as conn:
             order=conn.execute('SELECT * FROM orders WHERE id=? AND store_id=?',(oid,sid)).fetchone()
@@ -157,6 +167,8 @@ def register_online_payments(app, helpers):
                 VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(store_id,provider_id) DO UPDATE SET
                 refunded=excluded.refunded,fee=excluded.fee,status=excluded.status,approved_at=excluded.approved_at,updated_at=excluded.updated_at''',
                 (sid,oid,attempt['id'],str(pid),attempt['kind'],attempt['amount'],refunded,fee,status,approved_at,now()))
+            conn.execute('''UPDATE order_payment_transactions SET net_amount=?,release_at=?,release_status=?
+                WHERE store_id=? AND provider_id=?''',(net_amount,release_at,release_status,sid,str(pid)))
             conn.execute('UPDATE order_payment_attempts SET status=?,updated_at=? WHERE id=?',(status,now(),attempt['id']))
             rows=conn.execute('SELECT * FROM order_payment_transactions WHERE store_id=? AND order_id=?',(sid,oid)).fetchall()
             net=sum(p['amount']-p['refunded'] for p in rows if p['status']=='approved')
