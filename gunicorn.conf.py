@@ -1,5 +1,8 @@
 """Allow the inbox delivery loop to finish its current provider request on shutdown."""
 
+# Do not log raw URLs/referrers: tracking and webhook paths contain credentials.
+access_log_format = '%(h)s %(t)s "%(m)s %({sca.log_route}e)s %(H)s" %(s)s %(b)s %(L)s'
+
 
 def worker_exit(server, worker):
     app = getattr(worker, 'wsgi', None)

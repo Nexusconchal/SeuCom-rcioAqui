@@ -2,9 +2,14 @@
 import json
 import re
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener
 
 from flask import abort
+from payments import NoRedirect
+
+
+def urlopen(request,timeout):
+    return build_opener(NoRedirect).open(request,timeout=timeout)
 
 
 def put_image(config, store_id, filename, content):
@@ -18,7 +23,10 @@ def put_image(config, store_id, filename, content):
         "Authorization": "Bearer " + token, "Content-Type": "image/webp", "X-Object-Path": path})
     try:
         with urlopen(request, timeout=30) as response:
-            result = json.load(response)
+            raw=response.read(65537)
+            if len(raw)>65536:raise ValueError('Resposta de armazenamento acima do limite.')
+            result=json.loads(raw)
+            if not isinstance(result,dict):raise ValueError('Resposta de armazenamento inválida.')
         expected = config["STORAGE_PUBLIC_URL"].rstrip("/") + "/" + path
         if result.get("url") != expected:
             raise ValueError("Resposta de armazenamento inválida.")

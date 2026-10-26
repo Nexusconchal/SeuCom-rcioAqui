@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.request
 
 from cryptography.fernet import Fernet, InvalidToken
+from payments import NoRedirect
 
 MOTOJA_URL = re.compile(r"https://([a-z0-9.-]+)/api/integrations/orders/(\d{10,13})/seucomercio")
 
@@ -39,12 +40,16 @@ def http(method, url, headers=None, body=None, timeout=8):
     request = urllib.request.Request(url, method=method, headers={"content-type": "application/json", **(headers or {})},
                                      data=json.dumps(body).encode() if body is not None else None)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
-            return response.status, (json.loads(raw) if raw else {})
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=timeout) as response:
+            raw = response.read(1024*1024+1)
+            if len(raw)>1024*1024:return 0,{}
+            value=json.loads(raw) if raw else {}
+            return response.status, value if isinstance(value,dict) else {}
     except urllib.error.HTTPError as error:
         try:
-            return error.code, json.loads(error.read() or b"{}")
+            raw=error.read(65537)
+            value=json.loads(raw or b'{}') if len(raw)<=65536 else {}
+            return error.code,value if isinstance(value,dict) else {}
         except ValueError:
             return error.code, {}
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
