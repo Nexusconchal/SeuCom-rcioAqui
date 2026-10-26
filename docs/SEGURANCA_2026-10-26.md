@@ -21,6 +21,8 @@ Proteção adicional: `object-src 'none'` na CSP. A migração cria somente `rev
 
 A conexão da aplicação com PostgreSQL passa a exigir `sslmode=require` por padrão em produção; `verify-ca`/`verify-full` podem ser configurados com a cadeia de confiança adequada. Modos de conexão em texto claro são rejeitados em produção. A observação de `pg_stat_ssl` mostrou uma conexão do pooler Supavisor com o banco, e não identifica diretamente o trecho Render → pooler; por isso não foi usada para afirmar que o tráfego externo anterior estava em texto claro. Testes conferem que a exigência TLS alcança tanto conexões de operação quanto inicialização/migração.
 
+A sessão não é renovada automaticamente por cada leitura. A revogação é conferida nas páginas públicas e APIs; arquivos estáticos não reemitem o cookie. Isso impede prolongar uma cópia revogada por acessos a páginas/arquivos até o vencimento do registro de revogação.
+
 ## Configuração verificada por leitura
 
 - Antes da alteração: 55 tabelas privadas, 55 com RLS, zero com privilégios de leitura/escrita para `anon` ou `authenticated`. A aplicação usa autenticação própria e aplica o isolamento no backend; RLS sem políticas públicas é intencional nessa arquitetura.

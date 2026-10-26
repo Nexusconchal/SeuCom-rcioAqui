@@ -44,6 +44,15 @@ def test_logout_invalidates_a_copied_cookie_without_logging_out_other_devices(sh
     assert send(second, 'POST', '/api/auth/login', {'email':'owner@example.com','password':'uma-senha-segura'}).status_code == 200
     assert stolen.get('/api/admin/store').status_code == 200
     assert send(c, 'POST', '/api/auth/logout', {}).status_code == 200
+    # Public HTML must also discard a revoked session. Static resources cannot
+    # keep refreshing the copied cookie until the revocation record expires.
+    public_copy=c.application.test_client()
+    public_copy.set_cookie('session',cookie)
+    assert public_copy.get('/painel').status_code==200
+    assert public_copy.get('/api/session').json['user'] is None
+    static_copy=c.application.test_client()
+    static_copy.set_cookie('session',cookie)
+    assert 'Set-Cookie' not in static_copy.get('/static/logo.svg').headers
     assert stolen.get('/api/admin/store').status_code == 401
     assert stolen.get('/api/session').json['user'] is None
     assert second.get('/api/admin/store').status_code == 200

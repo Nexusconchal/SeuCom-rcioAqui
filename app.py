@@ -146,6 +146,7 @@ def create_app(test_config=None):
         VAPID_PRIVATE_KEY=os.getenv("VAPID_PRIVATE_KEY", "").replace("\\n", "\n"), PUSH_CONTACT=os.getenv("PUSH_CONTACT", "suporte@seucomercioaqui.com.br"),
         UPLOAD_DIR=os.getenv("UPLOAD_DIR", str(BASE / "instance" / "uploads")),
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=production,
+        SESSION_REFRESH_EACH_REQUEST=False,
         PERMANENT_SESSION_LIFETIME=timedelta(hours=12), MAX_CONTENT_LENGTH=8 * 1024 * 1024,
         MAX_FORM_PARTS=20, ALLOW_REGISTRATION=os.getenv("ALLOW_REGISTRATION", "1") == "1",
         PUBLIC_URL=(os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/"), RATE_LIMIT_ENABLED=True,
@@ -485,7 +486,7 @@ def create_app(test_config=None):
 
     @app.before_request
     def protect():
-        if request.path.startswith('/api/') and session.get('uid'):
+        if request.endpoint != 'static' and session.get('uid'):
             fingerprint = hashlib.sha256(session.get('csrf','').encode()).hexdigest()
             if one('SELECT id FROM revoked_sessions WHERE token_hash=? AND expires_at>?', (fingerprint,now())):
                 session.clear()
