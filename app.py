@@ -132,6 +132,7 @@ def create_app(test_config=None):
     app.config.update(
         SECRET_KEY=key or secrets.token_hex(32), DATABASE_PATH=os.getenv("DATABASE_PATH", str(BASE / "instance" / "seucomercio.sqlite3")),
         DATABASE_URL=os.getenv("DATABASE_URL", ""), DATABASE_SCHEMA=os.getenv("DATABASE_SCHEMA", "seucomercio"),
+        DATABASE_SSLMODE=os.getenv('DATABASE_SSLMODE','require' if production else ''),
         STORAGE_UPLOAD_URL=os.getenv("STORAGE_UPLOAD_URL", ""), STORAGE_UPLOAD_TOKEN=os.getenv("STORAGE_UPLOAD_TOKEN", ""),
         STORAGE_PUBLIC_URL=os.getenv("STORAGE_PUBLIC_URL", ""), TRIAL_DAYS=int(os.getenv("TRIAL_DAYS", "1")),
         MP_PLATFORM_ACCESS_TOKEN=os.getenv("MP_PLATFORM_ACCESS_TOKEN", ""), PLAN_PRICE=int(os.getenv("PLAN_PRICE_CENTS", "5999")),
@@ -153,6 +154,8 @@ def create_app(test_config=None):
     )
     if test_config:
         app.config.update(test_config)
+    if production and not app.testing and app.config['DATABASE_URL'] and app.config['DATABASE_SSLMODE'] not in ('require','verify-ca','verify-full'):
+        raise RuntimeError('Produção exige TLS na conexão PostgreSQL.')
     hosts = os.getenv("TRUSTED_HOSTS", "")
     if hosts:
         app.config["TRUSTED_HOSTS"] = [h.strip() for h in hosts.split(",") if h.strip()]

@@ -168,3 +168,27 @@ def test_password_change_attempts_are_limited_per_account(shop):
     for _ in range(10):
         assert send(c,'PUT','/api/auth/password',{'current_password':'wrong','new_password':'a-new-test-password'}).status_code==400
     assert send(c,'PUT','/api/auth/password',{'current_password':'wrong','new_password':'a-new-test-password'}).status_code==429
+
+
+def test_runtime_and_schema_connections_require_configured_tls(monkeypatch):
+    from database import Postgres, initialize
+    class ConnectionObserved(Exception):
+        pass
+    calls=[]
+    def observe(*args,**kwargs):
+        calls.append(kwargs)
+        assert kwargs.get('sslmode')=='require'
+        raise ConnectionObserved
+    monkeypatch.setattr('database.psycopg.connect',observe)
+    config={'DATABASE_URL':'postgresql://synthetic.example.test/db?sslmode=disable','DATABASE_SCHEMA':'synthetic','DATABASE_SSLMODE':'require'}
+    for connect in (Postgres,initialize):
+        with pytest.raises(ConnectionObserved):connect(config)
+    assert len(calls)==2
+
+
+def test_production_rejects_plaintext_database_setting(monkeypatch,tmp_path):
+    from app import create_app
+    monkeypatch.setenv('APP_ENV','production')
+    monkeypatch.setenv('SECRET_KEY','synthetic-production-test-secret-with-more-than-32-characters')
+    with pytest.raises(RuntimeError,match='TLS'):
+        create_app({'DATABASE_URL':'postgresql://synthetic.example.test/db','DATABASE_SSLMODE':'disable','UPLOAD_DIR':str(tmp_path)})

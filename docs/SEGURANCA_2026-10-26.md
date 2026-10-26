@@ -19,6 +19,8 @@ Esta é uma revisão técnica com reprodução controlada, testes automatizados 
 
 Proteção adicional: `object-src 'none'` na CSP. A migração cria somente `revoked_sessions` e seu índice; não modifica dados comerciais. Na inicialização PostgreSQL, a nova tabela recebe RLS e revogação de acesso público como as demais tabelas privadas.
 
+A conexão da aplicação com PostgreSQL passa a exigir `sslmode=require` por padrão em produção; `verify-ca`/`verify-full` podem ser configurados com a cadeia de confiança adequada. Modos de conexão em texto claro são rejeitados em produção. A observação de `pg_stat_ssl` mostrou uma conexão do pooler Supavisor com o banco, e não identifica diretamente o trecho Render → pooler; por isso não foi usada para afirmar que o tráfego externo anterior estava em texto claro. Testes conferem que a exigência TLS alcança tanto conexões de operação quanto inicialização/migração.
+
 ## Configuração verificada por leitura
 
 - Antes da alteração: 55 tabelas privadas, 55 com RLS, zero com privilégios de leitura/escrita para `anon` ou `authenticated`. A aplicação usa autenticação própria e aplica o isolamento no backend; RLS sem políticas públicas é intencional nessa arquitetura.
@@ -34,6 +36,7 @@ Proteção adicional: `object-src 'none'` na CSP. A migração cria somente `rev
 - Bandit: 44 arquivos Python de aplicação/scripts analisados, 7.980 linhas na primeira execução finalizada; zero alertas de gravidade alta. Os 29 avisos médios/baixos foram revisados: composição de SQL usa nomes/expressões constantes e placeholders para valores; subprocesso de backup não usa shell; ferramentas de smoke/carga são operacionais, sem endpoint HTTP que execute seus argumentos. Não foram classificados automaticamente como SQL injection confirmado. O CI passa a bloquear novos alertas de alta gravidade; alertas de outros níveis continuam exigindo revisão.
 - Busca por padrões de segredos: 164 arquivos de texto rastreados, sem ocorrência nos formatos inspecionados. É uma busca limitada por padrões, não uma garantia sobre todo formato de credencial ou histórico Git.
 - A suíte existente cobre adulteração de preço, moeda, recebedor e referência de pagamentos, retorno falso de checkout, replay/idempotência, estornos, concorrência de estoque, acesso entre lojas, CSRF, tokens de recuperação, mídia e upload.
+- Inventário: 227 rotas HTTP, 44 arquivos Python de aplicação/scripts, 29 JavaScript e 3 TypeScript. O CI foi fixado em Ubuntu 24.04 após o runner `ubuntu-latest` mudar para uma imagem incompatível com o Playwright fixado; a falha ocorreu na instalação do navegador, antes de executar a suíte.
 
 ## Limites e próximos controles
 
