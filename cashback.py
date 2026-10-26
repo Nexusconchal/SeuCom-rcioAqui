@@ -52,9 +52,9 @@ def register_cashback(app,helpers):
 
     def authenticated(conn,sid,token):
         if not isinstance(token,str) or not re.fullmatch(r'[A-Za-z0-9_-]{40,80}',token):
-            abort(401,description='Confirme seu telefone para usar o cashback.')
+            abort(401,description='Confirme seu WhatsApp para consultar ou usar recompensas.')
         session=conn.execute('SELECT * FROM wallet_sessions WHERE store_id=? AND token_hash=? AND expires_at>?',(sid,digest(token),h.now())).fetchone()
-        if not session:abort(401,description='A confirmação do cashback expirou. Solicite um novo código.')
+        if not session:abort(401,description='A confirmação do WhatsApp expirou. Solicite um novo código.')
         return session['phone']
 
     @app.post('/api/store/<slug>/wallet/code')
@@ -62,8 +62,8 @@ def register_cashback(app,helpers):
         s=store(slug);value=h.data();phone=validate_phone(value.get('phone'))
         h.limited('wallet-code',6,900)
         h.limited('wallet-code:'+str(s['id'])+':'+digest(phone),3,900,per_ip=False)
-        if not s['cashback_enabled'] or not s['wa_instance'] or not provider().ready:
-            abort(409,description='O cashback desta loja ainda não está disponível.')
+        if not (s['cashback_enabled'] or s['loyalty_enabled']) or not s['wa_instance'] or not provider().ready:
+            abort(409,description='A confirmação de recompensas pelo WhatsApp ainda não está disponível. Fale com a loja.')
         token,code=secrets.token_urlsafe(32),str(secrets.randbelow(1000000)).zfill(6)
         code_hash=hmac.new(app.config['SECRET_KEY'].encode(),(token+':'+code).encode(),'sha256').hexdigest()
         with h.transaction() as conn:
@@ -72,7 +72,7 @@ def register_cashback(app,helpers):
             conn.execute('UPDATE wallet_challenges SET used_at=? WHERE store_id=? AND phone=? AND used_at IS NULL',(h.now(),s['id'],phone))
             cid=conn.execute('INSERT INTO wallet_challenges(store_id,phone,token_hash,code_hash,expires_at) VALUES(?,?,?,?,?)',(s['id'],phone,digest(token),code_hash,(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat(timespec='seconds'))).lastrowid
         try:
-            status,_=provider().send_text(s['wa_instance'],phone,f'Seu código de cashback na {s["name"]}: {code}. Válido por 5 minutos. Não compartilhe este código.')
+            status,_=provider().send_text(s['wa_instance'],phone,f'Seu código de recompensas na {s["name"]}: {code}. Válido por 5 minutos. Não compartilhe este código.')
         except Exception:status=0
         if status not in (200,201):
             h.db().execute('UPDATE wallet_challenges SET used_at=? WHERE id=?',(h.now(),cid))
@@ -142,4 +142,4 @@ def register_cashback(app,helpers):
         if move:
             conn.execute("INSERT INTO cashback_movements(store_id,phone,order_id,delta,kind,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(order_id,kind) DO NOTHING",(sid,move['phone'],oid,-move['delta'],'reversal',h.now()))
 
-    app.extensions.update(wallet_discount=discount,wallet_reserve=reserve,wallet_restore=restore)
+    app.extensions.update(wallet_discount=discount,wallet_reserve=reserve,wallet_restore=restore,wallet_phone=authenticated)

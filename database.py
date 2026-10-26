@@ -13,6 +13,13 @@ BASE = Path(__file__).resolve().parent
 SCHEMA_NAME = re.compile(r"[a-z][a-z0-9_]{0,62}\Z")
 
 
+def tls_options(config):
+    mode=config.get('DATABASE_SSLMODE','')
+    if mode and mode not in ('require','verify-ca','verify-full'):
+        raise ValueError('DATABASE_SSLMODE inválido. Use TLS ou deixe vazio somente no desenvolvimento.')
+    return {'sslmode':mode} if mode else {}
+
+
 class Row(dict):
     def __init__(self, values):
         # PostgreSQL SUM(bigint) returns numeric. Keep integer-centavo/count
@@ -49,7 +56,7 @@ class Postgres:
         if not SCHEMA_NAME.fullmatch(schema):
             raise ValueError("DATABASE_SCHEMA inválido.")
         self.connection = psycopg.connect(config["DATABASE_URL"], autocommit=True,
-            connect_timeout=10, prepare_threshold=None, row_factory=dict_row)
+            connect_timeout=10, prepare_threshold=None, row_factory=dict_row,**tls_options(config))
         self.connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
         self.connection.execute("SET statement_timeout='20s'")
         self.connection.execute("SET lock_timeout='15s'")
@@ -89,7 +96,7 @@ def initialize(config):
         schema = config["DATABASE_SCHEMA"]
         if not SCHEMA_NAME.fullmatch(schema):
             raise ValueError("DATABASE_SCHEMA inválido.")
-        with psycopg.connect(config["DATABASE_URL"], autocommit=True, connect_timeout=10) as conn:
+        with psycopg.connect(config["DATABASE_URL"], autocommit=True, connect_timeout=10,**tls_options(config)) as conn:
             with conn.transaction():
                 conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (schema,))
                 exists = conn.execute("SELECT 1 FROM pg_namespace WHERE nspname=%s", (schema,)).fetchone()

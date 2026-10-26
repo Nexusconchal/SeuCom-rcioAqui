@@ -41,7 +41,7 @@ def test_cashback_otp_checkout_driver_location_and_inbox_ui(connected_live):
         shopper.goto(live+'/loja/bistro-da-vila');shopper.get_by_role('button',name='Ver Burger da casa',exact=True).click()
         shopper.get_by_role('button',name='Adicionar •').click();shopper.get_by_role('button',name='Ver minha sacola').click();shopper.get_by_role('button',name='Continuar pedido').click()
         shopper.get_by_label('Seu nome',exact=True).fill('Cliente Cashback');shopper.get_by_label('WhatsApp com DDD').fill('11999999999');shopper.get_by_label('Endereço completo').fill('Rua Teste, 100, Centro')
-        shopper.get_by_role('button',name='Consultar e usar cashback',exact=True).click()
+        shopper.get_by_role('button',name='Confirmar WhatsApp e consultar recompensas',exact=True).click()
         expect(shopper.get_by_label('Código de 6 dígitos')).to_be_visible()
         code=next(re.search(r': (\d{6})\.',text).group(1) for _,_,text in reversed(fake.calls) if re.search(r': (\d{6})\.',text))
         shopper.get_by_label('Código de 6 dígitos').fill(code);shopper.get_by_role('button',name='Confirmar código',exact=True).click()

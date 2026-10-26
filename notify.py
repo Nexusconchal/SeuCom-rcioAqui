@@ -6,13 +6,50 @@ criptografadas no banco com uma chave derivada de SECRET_KEY.
 import base64
 import hashlib
 import json
+import re
 import threading
+from urllib.parse import urlsplit
+
+import requests
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from database import connect
+
+
+def valid_push_endpoint(value):
+    """Only browser push services may receive server-originated push requests."""
+    if not isinstance(value,str) or len(value)>600 or re.search(r'[\s\\\x00-\x1f\x7f]',value):
+        return False
+    try:
+        url=urlsplit(value)
+        host=url.hostname or ''
+        allowed=host in {'fcm.googleapis.com','updates.push.services.mozilla.com','web.push.apple.com'} or bool(re.fullmatch(r'[a-z0-9-]+\.notify\.windows\.com',host))
+        return bool(allowed and url.scheme=='https' and not url.username and not url.password
+                    and url.port in (None,443) and url.path.startswith('/') and not url.fragment)
+    except ValueError:
+        return False
+
+
+def valid_push_keys(public,auth):
+    try:
+        if not re.fullmatch(r'[A-Za-z0-9_-]{87}',public) or not re.fullmatch(r'[A-Za-z0-9_-]{22}',auth):
+            return False
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(),base64.urlsafe_b64decode(public+'='))
+        return len(base64.urlsafe_b64decode(auth+'=='))==16
+    except (ValueError,TypeError):
+        return False
+
+
+class PushSession(requests.Session):
+    def request(self,method,url,*args,**kwargs):
+        if not valid_push_endpoint(url):
+            raise ValueError('Destino de aviso não permitido.')
+        # Never carry a VAPID signature to an unapproved redirect destination.
+        kwargs['allow_redirects']=False
+        return super().request(method,url,*args,**kwargs)
 
 
 def _fernet(secret):
@@ -58,11 +95,15 @@ def deliver(config, subscriptions, message):
     signer = Vapid.from_pem(pem.encode())
     gone = []
     for sub in subscriptions:
+        if not valid_push_endpoint(sub['endpoint']) or not valid_push_keys(sub['p256dh'],sub['auth']):
+            gone.append(sub['endpoint'])
+            continue
         try:
-            webpush({"endpoint": sub["endpoint"], "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}},
-                     data=json.dumps(message), vapid_private_key=signer,
-                     vapid_claims={"sub": "mailto:" + config.get("PUSH_CONTACT", "suporte@seucomercioaqui.com.br")},
-                     ttl=600, timeout=8)
+            with PushSession() as sender:
+                webpush({"endpoint": sub["endpoint"], "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}},
+                         data=json.dumps(message), vapid_private_key=signer,
+                         vapid_claims={"sub": "mailto:" + config.get("PUSH_CONTACT", "suporte@seucomercioaqui.com.br")},
+                         ttl=600, timeout=8,requests_session=sender)
         except WebPushException as error:
             if error.response is not None and error.response.status_code in (404, 410):
                 gone.append(sub["endpoint"])

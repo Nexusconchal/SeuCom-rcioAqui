@@ -275,6 +275,9 @@ def test_team_roles_are_enforced_by_the_server(app, shop):
     assert send(kitchen, "PATCH", f"/api/admin/orders/{order['id']}", {"status": "preparing", "paid": True}).status_code == 200
     assert not client.get("/api/admin/orders").json["orders"][0]["paid"]
     assert send(kitchen, "PATCH", f"/api/admin/orders/{order['id']}", {"status": "cancelled"}).status_code == 403
+    assert send(kitchen, "PATCH", f"/api/admin/orders/{order['id']}", {"status": "ready"}).status_code == 200
+    assert send(kitchen, "PATCH", f"/api/admin/orders/{order['id']}", {"status": "delivering"}).status_code == 403
+    assert send(kitchen, "PATCH", f"/api/admin/orders/{order['id']}", {"status": "completed"}).status_code == 403
     for url in ("/api/admin/summary?days=1", "/api/admin/finance", "/api/admin/team", "/api/admin/report?days=7"):
         assert kitchen.get(url).status_code == 403
     assert send(kitchen, "PUT", "/api/admin/store", client.get("/api/admin/store").json["store"]).status_code == 403
@@ -316,10 +319,10 @@ def test_push_subscription_and_new_order_alert(app, shop):
     assert worker.status_code == 200 and worker.headers["Service-Worker-Allowed"] == "/"
     key = client.get("/api/admin/push/key").json["public_key"]
     assert len(key) == 87 and client.get("/api/admin/push/key").json["public_key"] == key
-    sub = {"endpoint": "https://push.example.com/aparelho-1", "keys": {"p256dh": "B" * 87, "auth": "a" * 22}}
+    sub = {"endpoint": "https://fcm.googleapis.com/aparelho-1", "keys": {"p256dh": key, "auth": "a" * 22}}
     assert send(client, "POST", "/api/admin/push/subscribe", {**sub, "endpoint": "http://inseguro.example.com/x"}).status_code == 400
     assert send(client, "POST", "/api/admin/push/subscribe", sub).status_code == 201
-    assert send(client, "POST", "/api/admin/push/subscribe", {**sub, "endpoint": "https://push.example.com/morto"}).status_code == 201
+    assert send(client, "POST", "/api/admin/push/subscribe", {**sub, "endpoint": "https://fcm.googleapis.com/morto"}).status_code == 201
     make_order(client, pid)
     count, message = sent[-1]
     assert count == 2 and message["title"].startswith("Novo pedido #") and "Cliente Teste" in message["body"]
@@ -440,11 +443,19 @@ def test_terms_trial_loyalty_and_first_order_coupon(app, shop):
     for _ in range(2):
         order = make_order(client, pid, phone=phone)
         advance(client, order["id"], "preparing", "ready", "delivering", "completed")
-    q = quote(phone="(11) 97777-6666").json
+        assert send(client,'PATCH',f"/api/admin/orders/{order['id']}",{'paid':True}).status_code==200
+    assert quote(phone=phone).json['loyalty'] is None
+    from tests.test_wallet_campaigns import provider
+    import re
+    fake=provider(client)
+    challenge=send(client,'POST','/api/store/minha-loja/wallet/code',{'phone':phone}).json['challenge']
+    code=re.search(r': (\d{6})\.',fake.calls[-1][2]).group(1)
+    wallet=send(client,'POST','/api/store/minha-loja/wallet/verify',{'challenge':challenge,'code':code}).json
+    q = quote(phone="(11) 97777-6666",wallet_token=wallet['token']).json
     assert q["loyalty_discount"] == 700 and q["loyalty"]["available"]
-    created = send(client, "POST", "/api/store/minha-loja/orders", payload(pid, phone=phone), uuid.uuid4().hex)
+    created = send(client, "POST", "/api/store/minha-loja/orders", payload(pid, phone=phone,wallet_token=wallet['token']), uuid.uuid4().hex)
     assert created.json["total"] == q["total"]
-    again = quote(phone=phone).json
+    again = quote(phone=phone,wallet_token=wallet['token']).json
     assert again["loyalty_discount"] == 0 and again["loyalty"]["remaining"] == 2
     assert client.get("/api/track/" + created.json["token"]).json["order"]["loyalty_discount"] == 700
 

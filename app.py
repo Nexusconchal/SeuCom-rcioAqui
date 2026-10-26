@@ -39,7 +39,7 @@ from shipping import register_shipping, postal_fee
 from store_network import register_store_network
 from production import register_production
 from storage import put_image
-from notify import notify_store, vapid_keys
+from notify import notify_store, vapid_keys, valid_push_endpoint, valid_push_keys
 from payments import MercadoPago, PaymentError, seal, unseal
 from order_flow import MOTOJA_LABEL, register_order_flow
 from support import register_support
@@ -132,6 +132,7 @@ def create_app(test_config=None):
     app.config.update(
         SECRET_KEY=key or secrets.token_hex(32), DATABASE_PATH=os.getenv("DATABASE_PATH", str(BASE / "instance" / "seucomercio.sqlite3")),
         DATABASE_URL=os.getenv("DATABASE_URL", ""), DATABASE_SCHEMA=os.getenv("DATABASE_SCHEMA", "seucomercio"),
+        DATABASE_SSLMODE=os.getenv('DATABASE_SSLMODE','require' if production else ''),
         STORAGE_UPLOAD_URL=os.getenv("STORAGE_UPLOAD_URL", ""), STORAGE_UPLOAD_TOKEN=os.getenv("STORAGE_UPLOAD_TOKEN", ""),
         STORAGE_PUBLIC_URL=os.getenv("STORAGE_PUBLIC_URL", ""), TRIAL_DAYS=int(os.getenv("TRIAL_DAYS", "1")),
         MP_PLATFORM_ACCESS_TOKEN=os.getenv("MP_PLATFORM_ACCESS_TOKEN", ""), PLAN_PRICE=int(os.getenv("PLAN_PRICE_CENTS", "5999")),
@@ -145,6 +146,7 @@ def create_app(test_config=None):
         VAPID_PRIVATE_KEY=os.getenv("VAPID_PRIVATE_KEY", "").replace("\\n", "\n"), PUSH_CONTACT=os.getenv("PUSH_CONTACT", "suporte@seucomercioaqui.com.br"),
         UPLOAD_DIR=os.getenv("UPLOAD_DIR", str(BASE / "instance" / "uploads")),
         SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=production,
+        SESSION_REFRESH_EACH_REQUEST=False,
         PERMANENT_SESSION_LIFETIME=timedelta(hours=12), MAX_CONTENT_LENGTH=8 * 1024 * 1024,
         MAX_FORM_PARTS=20, ALLOW_REGISTRATION=os.getenv("ALLOW_REGISTRATION", "1") == "1",
         PUBLIC_URL=(os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL", "")).rstrip("/"), RATE_LIMIT_ENABLED=True,
@@ -153,6 +155,8 @@ def create_app(test_config=None):
     )
     if test_config:
         app.config.update(test_config)
+    if production and not app.testing and app.config['DATABASE_URL'] and app.config['DATABASE_SSLMODE'] not in ('require','verify-ca','verify-full'):
+        raise RuntimeError('Produção exige TLS na conexão PostgreSQL.')
     hosts = os.getenv("TRUSTED_HOSTS", "")
     if hosts:
         app.config["TRUSTED_HOSTS"] = [h.strip() for h in hosts.split(",") if h.strip()]
@@ -300,6 +304,15 @@ def create_app(test_config=None):
             for key in ("owner_id", "created_at", "commission_bps", "monthly_fee", "payment_fees", "default_delivery_cost", "enabled",
                         "blocked_reason", "promo_fee", "promo_until", "promo_label"):
                 value.pop(key, None)
+            # Public responses are an allowlist: future billing/integration
+            # columns must never become public merely by being added to stores.
+            public_fields = {
+                'id','name','slug','description','phone','address','logo','banner','color','open',
+                'delivery_fee','minimum_order','delivery_minutes','pix_key','payments','hours','auto_hours',
+                'delivery_zones','postal_zones','allow_scheduling','loyalty_enabled','loyalty_goal',
+                'loyalty_reward','timezone','cashback_enabled','cashback_bps','open_now','status_text','mp_connected',
+            }
+            value = {k:v for k,v in value.items() if k in public_fields}
         return value
 
     def delivery_fee(store, mode, value, subtotal=0):
@@ -473,6 +486,10 @@ def create_app(test_config=None):
 
     @app.before_request
     def protect():
+        if request.endpoint != 'static' and session.get('uid'):
+            fingerprint = hashlib.sha256(session.get('csrf','').encode()).hexdigest()
+            if one('SELECT id FROM revoked_sessions WHERE token_hash=? AND expires_at>?', (fingerprint,now())):
+                session.clear()
         if request.path.startswith("/api/v1/"):
             app.extensions["partner_auth"]()
             return
@@ -488,13 +505,16 @@ def create_app(test_config=None):
 
     @app.after_request
     def headers(response):
+        # Gunicorn logs route templates, never bearer links, phone numbers,
+        # webhook credentials or query strings from the actual request URL.
+        request.environ['sca.log_route'] = request.url_rule.rule if request.url_rule else '/unmatched'
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(self), payment=(), usb=()"
         response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self' https://viacep.com.br; font-src 'self'; frame-src https://www.openstreetmap.org; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self' https://viacep.com.br; font-src 'self'; frame-src https://www.openstreetmap.org; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
         if production:
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
         if request.path.startswith("/api/") or request.path.startswith("/pedido/"):
@@ -669,12 +689,19 @@ def create_app(test_config=None):
 
     @app.post("/api/auth/logout")
     def logout():
+        if session.get('uid') and session.get('csrf'):
+            with transaction() as conn:
+                conn.execute('DELETE FROM revoked_sessions WHERE expires_at<?',(now(),))
+                conn.execute('INSERT INTO revoked_sessions(token_hash,expires_at) VALUES(?,?) ON CONFLICT(token_hash) DO NOTHING',
+                    (hashlib.sha256(session['csrf'].encode()).hexdigest(),
+                     (datetime.now(timezone.utc)+app.permanent_session_lifetime+timedelta(minutes=5)).isoformat(timespec='seconds')))
         session.clear()
         return jsonify(ok=True)
 
     @app.put("/api/auth/password")
     @owner
     def change_password():
+        limited('password-change:'+str(g.user['id']),10,900,per_ip=False)
         value = data()
         old, new = text(value, "current_password", 1, 128), text(value, "new_password", 10, 128)
         user = one("SELECT * FROM users WHERE id=?", (g.user["id"],))
@@ -709,7 +736,7 @@ def create_app(test_config=None):
         key = phone_key(phone)
         if len(key) < 10:
             return []
-        found = conn.execute(f"SELECT id,phone,status,loyalty_discount FROM orders WHERE store_id=? AND {PHONE_SQL} LIKE ?",
+        found = conn.execute(f"SELECT id,phone,status,paid,loyalty_discount FROM orders WHERE store_id=? AND {PHONE_SQL} LIKE ?",
                              (sid, "%" + key[-9:])).fetchall()
         return [o for o in found if phone_key(o["phone"]) == key]
 
@@ -717,12 +744,25 @@ def create_app(test_config=None):
         if not store["loyalty_enabled"] or not phone:
             return None
         history = customer_orders_by_phone(conn, store["id"], phone)
-        completed = sum(o["status"] == "completed" for o in history)
+        completed = sum(o["status"] == "completed" and o['paid'] for o in history)
         used = sum(o["status"] != "cancelled" and o["loyalty_discount"] > 0 for o in history)
         goal = max(1, store["loyalty_goal"])
         available = completed // goal > used
         return {"goal": goal, "reward": store["loyalty_reward"], "completed": completed, "available": available,
                 "remaining": 0 if available else goal - completed % goal}
+
+    def checkout_loyalty(conn, store, phone, value):
+        if not store['loyalty_enabled'] or not phone:
+            return None
+        # A typed phone number is not proof of identity. In-person orders are
+        # authorized by the operator; public checkout uses the existing OTP.
+        if not getattr(g,'manual_order',False):
+            if not value.get('wallet_token'):
+                return None
+            verified = app.extensions['wallet_phone'](conn,store['id'],value['wallet_token'])
+            if verified != phone_key(phone):
+                abort(403,description='A recompensa pertence ao WhatsApp confirmado.')
+        return loyalty_status(conn,store,phone)
 
     def coupon_discount(conn, sid, code, subtotal, phone=""):
         if not code:
@@ -804,7 +844,7 @@ def create_app(test_config=None):
             abort(400, description=f"Pedido mínimo de R$ {store['minimum_order']/100:.2f} em produtos.")
         phone = text(value, "phone", 0, 20)
         discount, _ = coupon_discount(db(), store["id"], text(value, "coupon", 0, 30).upper(), subtotal, phone)
-        loyalty = loyalty_status(db(), store, phone)
+        loyalty = checkout_loyalty(db(), store, phone, value)
         reward = min(loyalty["reward"], subtotal - discount) if loyalty and loyalty["available"] else 0
         cashback = app.extensions['wallet_discount'](db(), store, value, subtotal-discount-reward)
         fee, zone = delivery_fee(store, mode, value, subtotal-discount-reward-cashback)
@@ -873,7 +913,7 @@ def create_app(test_config=None):
                         abort(409, description=f"Estoque insuficiente: {product['name']}.")
                     conn.execute("UPDATE products SET stock=stock-? WHERE id=?", (quantity, pid))
             discount, coupon_id = coupon_discount(conn, store["id"], coupon_code, subtotal, phone)
-            loyalty = loyalty_status(conn, store, phone)
+            loyalty = checkout_loyalty(conn, store, phone, value)
             reward = min(loyalty["reward"], subtotal - discount) if loyalty and loyalty["available"] else 0
             discount += reward
             cashback = app.extensions['wallet_discount'](conn, store, value, subtotal-discount)
@@ -967,7 +1007,9 @@ def create_app(test_config=None):
                     pass
                 order = one("SELECT * FROM orders WHERE id=?", (order["id"],))
         public = order_dict(order, False)
-        public["loyalty"] = loyalty_status(db(), store, order["phone"])
+        # A newly created tracking link does not prove ownership of the typed
+        # phone. Do not expose that person's historical purchases/rewards.
+        public["loyalty"] = None
         public["loyalty_discount"] = order["loyalty_discount"]
         if order["payment"] == "pix_online":
             public["pix"] = {"code": app.extensions["online_state"](order)["code"], "expires": order["pix_expires"],
@@ -1156,12 +1198,15 @@ def create_app(test_config=None):
     @app.post("/api/admin/push/subscribe")
     @owner
     def push_subscribe():
+        limited('push-subscribe:'+str(g.user['id']),30,3600,per_ip=False)
         value = data()
         endpoint = text(value, "endpoint", 20, 600)
         keys = value.get("keys")
-        if not endpoint.startswith("https://") or not isinstance(keys, dict):
+        if not valid_push_endpoint(endpoint) or not isinstance(keys, dict):
             abort(400, description="Assinatura de aviso inválida.")
         p256dh, auth_key = text(keys, "p256dh", 20, 200), text(keys, "auth", 10, 100)
+        if not valid_push_keys(p256dh, auth_key):
+            abort(400,description='Chaves do aviso inválidas. Ative os avisos novamente neste aparelho.')
         with transaction() as conn:
             conn.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (endpoint,))
             if conn.execute("SELECT COUNT(*) FROM push_subscriptions WHERE user_id=?", (g.user["id"],)).fetchone()[0] >= 10:
@@ -1499,8 +1544,8 @@ def create_app(test_config=None):
         if g.role == "kitchen":
             # Cozinha só avança o preparo: não mexe em pagamento, entregador nem cancela.
             value = {"status": value.get("status")} if "status" in value else {}
-            if value.get("status") == "cancelled":
-                abort(403, description="O acesso de Cozinha não pode cancelar pedidos.")
+            if 'status' in value and value['status'] not in ('preparing','ready'):
+                abort(403, description="O acesso de Cozinha permite apenas avançar o preparo.")
         with transaction() as conn:
             order = owned("orders", oid)
             status = value.get("status", order["status"])

@@ -103,6 +103,10 @@ CREATE TABLE IF NOT EXISTS store_members (
  role TEXT NOT NULL CHECK(role IN ('manager','cashier','kitchen')), active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS platform_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS revoked_sessions (
+ id INTEGER PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_revoked_expiry ON revoked_sessions(expires_at);
 CREATE TABLE IF NOT EXISTS push_subscriptions (
  id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), user_id INTEGER NOT NULL REFERENCES users(id),
  endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at TEXT NOT NULL
@@ -219,7 +223,7 @@ def postgres_ddl():
                 statements.append(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition};')
     statements.extend(s+';' for s in TABLES.split(';') if s.strip() and not s.strip().startswith('CREATE TABLE'))
     for table in ('cash_sessions', 'cash_adjustments', 'order_receipts', 'dining_tables', 'dining_accounts', 'dining_orders',
-                  'catalog_rules', 'option_recipes', 'suppliers', 'obligations', 'obligation_settlements', 'production_recipes', 'production_batches', 'marketing_jobs', 'customer_segments', 'wallet_challenges', 'wallet_sessions', 'cashback_movements', 'inbox_threads', 'inbox_messages', 'credit_accounts', 'store_networks', 'network_stores', 'network_invites', 'order_payment_attempts', 'order_payment_transactions', 'account_tokens'):
+                  'catalog_rules', 'option_recipes', 'suppliers', 'obligations', 'obligation_settlements', 'production_recipes', 'production_batches', 'marketing_jobs', 'customer_segments', 'wallet_challenges', 'wallet_sessions', 'cashback_movements', 'inbox_threads', 'inbox_messages', 'credit_accounts', 'store_networks', 'network_stores', 'network_invites', 'order_payment_attempts', 'order_payment_transactions', 'account_tokens', 'revoked_sessions'):
         statements.append(f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; REVOKE ALL ON {table} FROM PUBLIC,anon,authenticated;')
     for table in ('api_keys', 'delivery_links', 'integration_events', 'stock_movements', 'platform_ledger', 'audit_log', 'platform_notices', 'store_members', 'platform_settings', 'push_subscriptions', 'support_messages', 'ingredients', 'recipes', 'ingredient_movements', 'customer_opt_ins', 'shopping_sessions', 'marketing_campaigns'):
         statements.extend([f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;', f'REVOKE ALL ON {table} FROM PUBLIC,anon,authenticated;'])
