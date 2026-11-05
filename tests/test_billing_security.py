@@ -43,6 +43,7 @@ def test_plan_pix_rejects_foreign_or_mismatched_payment(shop,field,value):
 
 def test_plan_pix_snapshot_survives_price_change_and_uses_real_approval_day(shop):
     c,_=shop;fake=provider(c)
+    sql(c,"UPDATE stores SET trial_until=''")  # fora do mês grátis: o mês pago conta do dia do pagamento
     send(c,'POST','/api/admin/billing/pix',{})
     c.application.config['PLAN_PRICE']=7999
     stamp=(datetime.now(timezone.utc)-timedelta(days=2)).isoformat()

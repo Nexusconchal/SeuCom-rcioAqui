@@ -549,8 +549,8 @@ def test_subscription_trial_free_month_and_monthly_charge(app, shop):
     assert send(client, "POST", "/api/admin/billing/subscribe", {"payer_email": "dona@example.com"}).status_code == 503
     app.config["MP_PLATFORM_ACCESS_TOKEN"] = "APP_USR-plataforma"
     info = client.get("/api/admin/billing").json
-    assert info["state"] == "trial" and info["price"] == 5999 and info["free_months"] == 1
-    # Acabou o dia grátis: a loja para de receber pedidos.
+    assert info["state"] == "trial" and info["price"] == 5999 and info["free_months"] == 0 and info["first_charge"]
+    # Acabou o mês grátis: a loja para de receber pedidos.
     expire_trial(app)
     assert client.get("/api/admin/billing").json["state"] == "expired"
     assert client.get("/api/store/minha-loja").json["store"]["open_now"] is False
@@ -558,8 +558,9 @@ def test_subscription_trial_free_month_and_monthly_charge(app, shop):
     started = send(client, "POST", "/api/admin/billing/subscribe", {"payer_email": "dona@example.com"})
     assert started.status_code == 200 and "preapproval_id=pre0001" in started.json["init_point"]
     recurring = mp.preapprovals["pre0001"]["payload"]["auto_recurring"]
-    assert recurring["transaction_amount"] == 59.99 and recurring["free_trial"] == {"frequency": 1, "frequency_type": "months"}
-    # Cartão cadastrado: assinatura autorizada (1º mês grátis) e a loja volta a vender.
+    # Assinou depois do mês grátis: sem mês extra, cobra na hora.
+    assert recurring["transaction_amount"] == 59.99 and "free_trial" not in recurring
+    # Cartão cadastrado: assinatura autorizada e a loja volta a vender enquanto o Mercado Pago faz a cobrança.
     mp.preapprovals["pre0001"]["status"] = "authorized"
     secret = client.get("/api/platform/billing")
     app.test_cli_runner().invoke(args=["grant-platform-admin", "--email", "owner@example.com"])

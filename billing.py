@@ -1,8 +1,9 @@
 """Assinatura mensal das lojas, cobrada no cartão pelo Mercado Pago (conta da plataforma).
 
-Regras: teste grátis curto ao criar a conta; ao assinar, o primeiro mês sai por R$ 0
-(uma vez por loja) e depois o Mercado Pago cobra o valor do plano todo mês. A loja
-recebe pedidos enquanto estiver isenta, em teste ou paga até uma data.
+Regras: 1 mês grátis contado da criação da conta, assinando ou não. Assinar não dá mês
+extra: a primeira cobrança no cartão cai no fim desse mês grátis (quem assina no dia 25 tem
+só mais 5 dias de graça; depois do mês grátis, cobra na hora). A loja recebe pedidos
+enquanto estiver isenta, no mês grátis ou paga até uma data.
 Uma autorização de cartão não substitui o recebimento. Contas isentas são definidas por hash do e-mail (nada de e-mail no código),
 pela variável BILLING_EXEMPT_EMAILS ou pelo dono da plataforma na Central.
 """
@@ -55,6 +56,19 @@ def trial_active(value, moment=None):
     return datetime.fromisoformat(value) > moment
 
 
+def free_month_end(created_at):
+    """Fim do mês grátis: um mês depois da criação da conta."""
+    return add_month(datetime.fromisoformat(created_at)).isoformat(timespec="seconds")
+
+
+def free_days_left(trial_until, moment=None):
+    """Dias inteiros (arredondados para cima) até o fim do mês grátis; 0 se já acabou."""
+    if not trial_until or len(trial_until) == 10:
+        return 0
+    left = datetime.fromisoformat(trial_until) - (moment or datetime.now(timezone.utc))
+    return max(0, -(-int(left.total_seconds()) // 86400))
+
+
 def billing_state(store, moment=None):
     """Situação da assinatura a partir só dos dados da loja."""
     if _get(store, "billing_exempt", 1):
@@ -64,6 +78,10 @@ def billing_state(store, moment=None):
     today = moment.astimezone(ZONE).date().isoformat()
     if status == "authorized":
         if _get(store, 'paid_until', '') >= today or trial_active(_get(store, 'trial_until', ''), moment):
+            return "active"
+        # Cartão autorizado e o mês grátis acabou agora: 3 dias para o Mercado Pago fazer a 1ª cobrança.
+        trial = _get(store, 'trial_until', '')
+        if trial and len(trial) > 10 and trial_active(trial, moment - timedelta(days=3)):
             return "active"
     if _get(store, "paid_until", "") >= today:
         return "paid"
@@ -167,7 +185,8 @@ def register_billing(app, helpers):
 
     def info(store):
         state = billing_state(store)
-        return {"state": state, "ok": state in OK_STATES, "price": price(), "free_months": config["PLAN_FREE_MONTHS"] if not store["sub_used_trial"] else 0,
+        return {"state": state, "ok": state in OK_STATES, "price": price(), "free_months": 0,
+                "first_charge": store["trial_until"] if free_days_left(store["trial_until"]) else "",
                 "trial_until": store["trial_until"] if trial_active(store["trial_until"]) else "", "sub_status": store["sub_status"],
                 "payer_email": store["sub_payer_email"], "next_payment": store["sub_next_payment"], "paid_until": store["paid_until"],
                 "configured": bool(config.get("MP_PLATFORM_ACCESS_TOKEN")), "manage_url": "https://www.mercadopago.com.br/subscriptions",
@@ -183,9 +202,13 @@ def register_billing(app, helpers):
             stamp = h.now()
             conn.execute("""INSERT INTO platform_ledger(store_id,kind,description,amount,created_at,idempotency_key,payload_hash,paid_at,is_subscription)
                 VALUES(?,?,?,?,?,?,?,?,1)""", (store_id, "receipt", description, amount, stamp, key, "mercadopago", billing_timestamp(paid_at)))
-            current = conn.execute("SELECT paid_until FROM stores WHERE id=?", (store_id,)).fetchone()[0]
+            row = conn.execute("SELECT paid_until,trial_until FROM stores WHERE id=?", (store_id,)).fetchone()
+            current, trial = row["paid_until"], row["trial_until"]
             if stack and current and current >= paid_on.isoformat():
                 paid_on=date.fromisoformat(current)
+            # Pagou ainda no mês grátis: o mês pago começa quando o grátis acaba.
+            if stack and trial and len(trial) > 10 and trial_active(trial):
+                paid_on=max(paid_on,datetime.fromisoformat(trial).astimezone(ZONE).date())
             conn.execute("UPDATE stores SET paid_until=?,subscribed_at=CASE WHEN subscribed_at='' THEN ? ELSE subscribed_at END WHERE id=?",
                          (extend_paid_until(current, paid_on), stamp, store_id))
         return True
@@ -277,8 +300,10 @@ def register_billing(app, helpers):
             abort(400, description="Informe o e-mail da sua conta do Mercado Pago.")
         h.limited("billing-subscribe", 10, 3600)
         recurring = {"frequency": 1, "frequency_type": "months", "transaction_amount": round(price() / 100, 2), "currency_id": "BRL"}
-        if config["PLAN_FREE_MONTHS"] > 0 and not store["sub_used_trial"]:
-            recurring["free_trial"] = {"frequency": config["PLAN_FREE_MONTHS"], "frequency_type": "months"}
+        # Sem mês extra: o cartão só é cobrado quando acabar o mês grátis da conta (ou na hora, se já acabou).
+        free_days = free_days_left(store["trial_until"])
+        if free_days:
+            recurring["free_trial"] = {"frequency": free_days, "frequency_type": "days"}
         payload = {"reason": "SeuComércioAqui - Plano mensal", "external_reference": f"store-{store['id']}",
                    "payer_email": payer, "back_url": h.public_base() + "/painel?assinatura=1",
                    "auto_recurring": recurring, "status": "pending"}
@@ -311,10 +336,10 @@ def register_billing(app, helpers):
             abort(502,description='O Mercado Pago não devolveu um endereço seguro para a assinatura. Peça conferência ao suporte.')
         with h.transaction() as conn:
             remember('billing.subscription.'+str(created['id']),{'store_id':store['id'],'reference':payload['external_reference'],
-                     'amount':price(),'collector':account,'free_months':config['PLAN_FREE_MONTHS'] if recurring.get('free_trial') else 0},conn)
+                     'amount':price(),'collector':account,'free_months':0,'free_days':free_days},conn)
             remember(intent_key,{**intent,'state':'done','id':str(created['id'])},conn)
             conn.execute("UPDATE stores SET sub_id=?,sub_status='pending',sub_payer_email=?,sub_used_trial=?,sub_checked_at=? WHERE id=?",
-                         (str(created['id']),payer,int(bool(recurring.get('free_trial')) or store['sub_used_trial']),h.now(),store['id']))
+                         (str(created['id']),payer,1,h.now(),store['id']))
         h.audit("billing.subscribe", payer, store["id"])
         return jsonify(init_point=created["init_point"])
 
@@ -533,8 +558,8 @@ def register_billing(app, helpers):
         stores = h.rows("SELECT * FROM stores")
         states = [billing_state(s) for s in stores]
         paying = sum(st in ("active", "paid") for st in states)
-        return jsonify(configured=bool(config.get("MP_PLATFORM_ACCESS_TOKEN")), price=price(), free_months=config["PLAN_FREE_MONTHS"],
-                       trial_days=config["TRIAL_DAYS"], webhook_url=h.public_base() + "/webhooks/mercadopago-assinaturas/" + webhook_secret(),
+        return jsonify(configured=bool(config.get("MP_PLATFORM_ACCESS_TOKEN")), price=price(), free_months=0,
+                       trial_days=30, webhook_url=h.public_base() + "/webhooks/mercadopago-assinaturas/" + webhook_secret(),
                        paying=paying, trial=states.count("trial"), exempt=states.count("exempt"),
                        blocked=sum(st not in OK_STATES for st in states), monthly_recurring=paying * price())
 
@@ -558,6 +583,23 @@ def apply_exemptions(conn, config):
     for row in conn.execute("SELECT s.id,u.email FROM stores s JOIN users u ON u.id=s.owner_id WHERE s.billing_exempt=0").fetchall():
         if hashlib.sha256(row[1].strip().lower().encode()).hexdigest() in hashes:
             conn.execute("UPDATE stores SET billing_exempt=1 WHERE id=?", (row[0],))
+
+
+def free_month_migration(conn):
+    """Uma vez: toda loja sem pagamento ganha o mês grátis contado da criação da conta."""
+    if conn.execute("SELECT value FROM platform_settings WHERE key='billing_free_month_v2'").fetchone():
+        return
+    today = datetime.now(ZONE).date().isoformat()
+    rows = conn.execute("SELECT id,created_at,trial_until FROM stores WHERE billing_exempt=0 AND sub_status!='authorized' AND (paid_until='' OR paid_until<?)",
+                        (today,)).fetchall()
+    for row in rows:
+        if not row["created_at"]:
+            continue
+        until = free_month_end(row["created_at"])
+        if until > (row["trial_until"] or ""):
+            conn.execute("UPDATE stores SET trial_until=? WHERE id=?", (until, row["id"]))
+    conn.execute("INSERT INTO platform_settings(key,value) VALUES('billing_free_month_v2',?)",
+                 (json.dumps({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "stores": len(rows)}),))
 
 
 def first_billing_migration(conn, config):

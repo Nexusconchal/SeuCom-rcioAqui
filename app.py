@@ -43,7 +43,7 @@ from notify import notify_store, vapid_keys, valid_push_endpoint, valid_push_key
 from payments import MercadoPago, PaymentError, seal, unseal
 from order_flow import MOTOJA_LABEL, register_order_flow
 from support import register_support
-from billing import apply_exemptions, billing_ok, billing_state, first_billing_migration, register_billing
+from billing import add_month, apply_exemptions, billing_ok, billing_state, first_billing_migration, free_month_migration, register_billing
 from flask import Flask, abort, g, has_request_context, jsonify, redirect, request, send_from_directory, session
 from markupsafe import escape
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -172,6 +172,7 @@ def create_app(test_config=None):
         try:
             first_billing_migration(startup, app.config)
             apply_exemptions(startup, app.config)
+            free_month_migration(startup)
         except Exception:  # nunca impedir o site de subir por causa da rotina de cobrança
             app.logger.exception("Falha ao preparar as assinaturas na inicialização")
         finally:
@@ -662,7 +663,8 @@ def create_app(test_config=None):
         if value.get("accept_terms") is not True:
             abort(400, description="Para criar a loja, aceite os Termos de uso e a Política de privacidade.")
         hashed = generate_password_hash(password)
-        trial = (datetime.now(timezone.utc) + timedelta(days=app.config["TRIAL_DAYS"])).isoformat(timespec="seconds") if app.config["TRIAL_DAYS"] > 0 else ""
+        # 1 mês grátis a partir de hoje, assinando ou não (ver billing.py).
+        trial = add_month(datetime.now(timezone.utc)).isoformat(timespec="seconds")
         with transaction() as conn:
             uid = conn.execute("INSERT INTO users(name,email,password_hash,created_at,terms_accepted_at) VALUES(?,?,?,?,?)",
                                (name, email, hashed, now(), now())).lastrowid
