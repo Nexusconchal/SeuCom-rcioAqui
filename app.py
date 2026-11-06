@@ -228,6 +228,10 @@ def create_app(test_config=None):
             return ""
         if re.fullmatch(r"/media/[a-f0-9]{32}\.webp", value):
             return value
+        if re.fullmatch(r"/static/banco-imagens/[a-z0-9]+(?:-[a-z0-9]+)*\.webp", value):
+            if not (Path(app.static_folder) / value.removeprefix("/static/")).is_file():
+                abort(400, description="Imagem do banco não encontrada.")
+            return value
         parsed = urlparse(value)
         if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
             abort(400, description="Use uma imagem HTTPS ou envie uma foto.")
