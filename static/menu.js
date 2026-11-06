@@ -3,6 +3,7 @@ import { confirmWallet } from './wallet.js';
 import { productMatches } from './search.js';
 import { $, $$, icon, brand, money, esc, image, api, modal, closeModal, bindForm, empty, toast, pay, date, useTimeZone, attachFallbacks, copy, cents, optionPrice, fromPrice, hasChoices, optionLabels, validIds, optionFields, readOptions, bindOptionLimits } from './ui.js';
 import { startShopping, shoppingEvent, shoppingToken, finishShopping } from './shopping.js';
+import { isBankImage } from './image-bank.js';
 let shoppingReady=false,activeRecovery='';
 let catalog, cart=[], selected='all', search='', orderKey='', activeSlug='';
 const cartKey=()=> 'sca.cart.'+catalog.store.id;
@@ -77,7 +78,7 @@ function updateBar(){
 }
 function productDialog(product,offer=null){
   let quantity=1;
-  const d=modal(product.name,'<div class="product-detail"><img src="'+esc(image(product.image))+'" alt="'+esc(product.name)+'"><p>'+esc(product.description)+'</p><strong class="detail-price">'+(hasChoices(product)?'A partir de ':'')+money(fromPrice(product))+'</strong></div><form id="add-form">'+optionFields(product)+
+  const d=modal(product.name,'<div class="product-detail"><img src="'+esc(image(product.image))+'" alt="'+esc(product.name)+'">'+(isBankImage(product.image)?'<small class="photo-note">Imagem ilustrativa • <a href="/static/banco-imagens/creditos.html" target="_blank" rel="noopener">créditos da foto</a></small>':'')+'<p>'+esc(product.description)+'</p><strong class="detail-price">'+(hasChoices(product)?'A partir de ':'')+money(fromPrice(product))+'</strong></div><form id="add-form">'+optionFields(product)+
   (!canOrder()?'<div class="notice closed-notice">'+icon('clock')+' '+esc(catalog.store.status_text)+'. Você pode olhar o cardápio, mas os pedidos só podem ser feitos com a loja aberta.</div>':'')+'<label>Alguma observação?<textarea name="notes" maxlength="200" placeholder="Ex.: sem cebola"></textarea></label><div class="quantity-submit"><div class="quantity"><button type="button" id="qty-less" class="icon-btn" aria-label="Diminuir quantidade">'+icon('minus')+'</button><output id="quantity">1</output><button type="button" id="qty-more" class="icon-btn" aria-label="Aumentar quantidade">'+icon('plus')+'</button></div><button class="btn" type="submit" '+(!canOrder()||product.stock===0?'disabled':'')+'>'+(product.stock===0?'Esgotado':!canOrder()?'Loja fechada':'Adicionar • <span id="add-price">'+money(fromPrice(product))+'</span>')+'</button></div><p class="form-error" role="alert" hidden></p></form>');
   const calculate=()=>{const {ids}=readOptions(d,product);$('#quantity').textContent=quantity;if($('#add-price'))$('#add-price').textContent=money((ids.length||!hasChoices(product)?optionPrice(product,ids):fromPrice(product))*quantity);const err=$('#add-form .form-error');err.hidden=true;};
   $('#qty-less').onclick=()=>{quantity=Math.max(1,quantity-1);calculate();};

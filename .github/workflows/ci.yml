@@ -41,6 +41,7 @@ jobs:
           node --check static/app.js
           node --check static/landing.js
           node --check static/online-payments.js
+          node --check static/image-bank.js
           node --check static/menu.js
           node --check static/dashboard.js
           node --check static/management.js
