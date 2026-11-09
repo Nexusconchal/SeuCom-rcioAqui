@@ -1417,6 +1417,13 @@ def create_app(test_config=None):
             conn.execute("DELETE FROM categories WHERE id=?", (cid,))
         return jsonify(ok=True)
 
+    def recipe_share(group, name):
+        # Grupos antigos foram gravados com 0/1; o painel devolve esse valor ao editar.
+        value = group.get("recipe_share", False)
+        if not isinstance(value, (bool, int)) or value not in (0, 1):
+            abort(400, description=f"No grupo {name}, a divisão da receita é inválida.")
+        return bool(value)
+
     def product_fields(value):
         category = value.get("category_id")
         if category is not None:
@@ -1472,7 +1479,7 @@ def create_app(test_config=None):
                 clean.append({"id": oid, "name": text(option, "name", 1, 80), "price": integer(option, "price"),
                               "max_quantity": integer(option, 'max_quantity', default=1, minimum=1, maximum=30),
                               "unit_cost": None if option.get("unit_cost") is None else integer(option, "unit_cost")})
-            clean_groups.append({"id": gid, "name": gname, "min": low, "max": min(high, sum(o["max_quantity"] for o in clean)), "pricing": pricing, "recipe_share":boolean(group,'recipe_share'), "options": clean})
+            clean_groups.append({"id": gid, "name": gname, "min": low, "max": min(high, sum(o["max_quantity"] for o in clean)), "pricing": pricing, "recipe_share":recipe_share(group, gname), "options": clean})
         required = any(g["min"] > 0 for g in clean_groups)
         return (category, text(value, "name", 2, 120), text(value, "description", 0, 500),
                 integer(value, "price", minimum=0 if required else 1), image_url(value.get("image", "")), boolean(value, "active", True),

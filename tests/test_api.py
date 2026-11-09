@@ -277,3 +277,18 @@ def test_paused_assigned_driver_does_not_block_order_progress(shop):
     assert second.status_code == 201
     other = client.get("/api/admin/orders").json["orders"][0]["id"]
     assert send(client, "PATCH", f"/api/admin/orders/{other}", {"driver_id": driver}).status_code == 400
+
+
+def test_product_with_choice_groups_can_be_saved_again_unchanged(shop):
+    client, _ = shop
+    group = {"id": "mix", "name": "Mistura", "min": 1, "max": 2, "options": [
+        {"id": "carne", "name": "Carne", "price": 0}, {"id": "frango", "name": "Frango", "price": 0}]}
+    created = send(client, "POST", "/api/admin/products",
+                   {"name": "Marmita P", "price": 2000, "option_groups": [group], "active": True})
+    assert created.status_code == 201
+    product = next(p for p in client.get("/api/admin/products").json["products"] if p["id"] == created.json["id"])
+    assert product["option_groups"][0]["recipe_share"] is False
+    product["option_groups"][0]["recipe_share"] = 0  # como ficaram gravados os grupos antigos
+    assert send(client, "PUT", f"/api/admin/products/{product['id']}", product).status_code == 200
+    product["option_groups"][0]["recipe_share"] = "sim"
+    assert send(client, "PUT", f"/api/admin/products/{product['id']}", product).status_code == 400
