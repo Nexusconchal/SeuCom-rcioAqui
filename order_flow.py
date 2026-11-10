@@ -38,16 +38,49 @@ def payment_note(order):
     return f"Cliente paga {total} por Pix para a loja."
 
 
-def customer_message(order, store, status, link):
+PAYMENT_LABEL = {"cash": "Dinheiro", "card": "Cartão na entrega/retirada", "pix": "Pix para a loja",
+                 "pix_online": "Pix online", "card_online": "Cartão online", "credit": "Fiado autorizado"}
+
+
+def receipt_details(order, store, items):
+    """Resumo do pedido para o WhatsApp: itens, entrega ou retirada e pagamento."""
+    lines = []
+    for item in items or []:
+        extras = ", ".join(x.get("name", "") for x in json.loads(item["extras"] or "[]") if x.get("name"))
+        name = item["name"] + (f" ({extras})" if extras else "")
+        lines.append(f"{item['quantity']}x {name} - {money(item['unit_price'] * item['quantity'])}")
+        if item["notes"]:
+            lines.append(f"   Obs.: {item['notes']}")
+    if order["delivery_fee"]:
+        lines.append(f"Entrega: {money(order['delivery_fee'])}")
+    if order["discount"]:
+        lines.append(f"Desconto: -{money(order['discount'])}")
+    lines.append(f"*Total: {money(order['total'])}*")
+    text = "▶️ *Detalhes*\n" + "\n".join(lines)
+    minutes = f" Tempo estimado: {store['delivery_minutes']}." if store["delivery_minutes"] else ""
+    if order["mode"] == "delivery":
+        text += f"\n\n▶️ *Entrega*\nEntregar em: {order['address']}.{minutes}"
+    elif order["mode"] == "pickup":
+        text += f"\n\n▶️ *Retirada*\nRetirar em: {store['address'] or store['name']}.{minutes}"
+    paid = " - já foi pago" if order["paid"] else ""
+    change = f" (troco para {money(order['change_for'])})" if order["payment"] == "cash" and order["change_for"] else ""
+    text += f"\n\n▶️ *Pagamento*\n{PAYMENT_LABEL.get(order['payment'], order['payment'])}{change}{paid}"
+    if order["notes"]:
+        text += f"\n\n▶️ *Observação*\n{order['notes']}"
+    return text
+
+
+def customer_message(order, store, status, link, items=None):
     first = (order["customer"] or "").split(" ")[0]
     number, name = order["number"], store["name"]
     if status == "new":
         when = ""
         if order["scheduled_for"]:
             when = " agendado para " + datetime.fromisoformat(order["scheduled_for"]).astimezone(timezone(timedelta(hours=-3))).strftime("%d/%m às %H:%M")
-        return f"Olá, {first}! Recebemos seu pedido #{number}{when} na {name}. Total: {money(order['total'])}.\nAcompanhe aqui: {link}"
+        return (f"*{first}*, recebemos o seu pedido *#{number}*{when} na {name} ✅\n\n"
+                f"{receipt_details(order, store, items)}\n\nAcompanhe aqui: {link}")
     if status == "preparing":
-        return f"Seu pedido #{number} foi aceito pela {name} e já está sendo preparado."
+        return f"Pedido #{number} confirmado! ✅ Já estamos preparando o seu pedido."
     if status == "ready" and order["mode"] == "pickup":
         return f"Seu pedido #{number} está pronto para retirada na {name}."
     if status == "delivering":
@@ -55,7 +88,8 @@ def customer_message(order, store, status, link):
         driver = f" O motoboy {info['motoboy']} está a caminho." if info.get("motoboy") else ""
         return f"Seu pedido #{number} saiu para entrega!{driver}\nAcompanhe: {link}"
     if status == "completed":
-        return f"Pedido #{number} concluído. Obrigado por pedir na {name}! Conte como foi: {link}"
+        return (f"Oi *{first}*,\n\nComo foi a sua experiência? Queremos saber a sua opinião 🧡\n\n"
+                f"Deixe sua opinião no link abaixo:\n▶️ {link}\n\nObrigado e até mais!")
     if status == "cancelled":
         return f"Seu pedido #{number} na {name} foi cancelado. Se tiver dúvida, responda esta mensagem."
     return ""
@@ -89,7 +123,8 @@ def register_order_flow(app, helpers):
             sent = set(filter(None, (order["wa_sent"] or "").split(",")))
             if status in sent or not order['phone'] or order["phone"] == "00000000000":
                 return False
-            text = customer_message(order, store, status, f"{h.public_base_static()}/pedido/{order['tracking_token']}")
+            items = conn.execute("SELECT name,quantity,unit_price,extras,notes FROM order_items WHERE order_id=? ORDER BY id", (order_id,)).fetchall() if status == "new" else None
+            text = customer_message(order, store, status, f"{h.public_base_static()}/pedido/{order['tracking_token']}", items)
             if not text:
                 return False
             code, _ = evolution().send_text(store["wa_instance"], order["phone"], text)

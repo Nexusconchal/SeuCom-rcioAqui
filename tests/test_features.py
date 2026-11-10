@@ -719,10 +719,10 @@ def test_whatsapp_automatic_messages(app, shop):
     assert client.get("/api/admin/whatsapp/status").json["connected"] is True
     assert send(client, "PATCH", "/api/admin/whatsapp", {"enabled": True}).json["whatsapp"]["enabled"] is True
     order = make_order(client, pid, phone="(11) 98888-1111")
-    assert evo.messages[-1][0] == "(11) 98888-1111" and "Recebemos seu pedido" in evo.messages[-1][1] and "/pedido/" in evo.messages[-1][1]
+    assert evo.messages[-1][0] == "(11) 98888-1111" and "recebemos o seu pedido" in evo.messages[-1][1] and "/pedido/" in evo.messages[-1][1]
     advance(client, order["id"], "preparing", "ready", "delivering", "completed")
     texts = [t for _, t in evo.messages]
-    assert any("sendo preparado" in t for t in texts) and any("saiu para entrega" in t for t in texts) and any("concluído" in t for t in texts)
+    assert any("Já estamos preparando" in t for t in texts) and any("saiu para entrega" in t for t in texts) and any("Como foi a sua experiência" in t for t in texts)
     assert not any("pronto para retirada" in t for t in texts)  # entrega não manda o aviso de retirada
     count = len(evo.messages)
     send(client, "PATCH", "/api/admin/whatsapp", {"enabled": False})
