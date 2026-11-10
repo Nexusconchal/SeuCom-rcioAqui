@@ -19,7 +19,8 @@ A mensalidade usa a conta Mercado Pago da plataforma (`MP_PLATFORM_ACCESS_TOKEN`
 - O webhook e o botão de conferência consultam o Mercado Pago. O conteúdo recebido no webhook não é usado como prova de pagamento.
 - A confirmação exige o ID, a referência, BRL, o valor original, a conta recebedora e o método Pix corretos. Alterar o preço global depois de gerar o código não altera o valor esperado daquele código.
 - Uma confirmação tardia de um código antigo pode ser conciliada pelo ID salvo, sem apagar um código novo ainda pendente. A mesma confirmação gera um único lançamento, inclusive com requisições concorrentes.
-- Um segundo mês efetivamente pago por Pix estende o período já pago, usando a regra atual de mês civil com três dias de tolerância.
+- Pix (no painel) ou pagamento por fora lançado como recebimento na Central do Dono libera a loja até a véspera do mesmo dia do mês seguinte: pagou dia 09/11, vende até 08/12 e bloqueia no dia 09/12. Um segundo mês pago antes do fim começa no dia seguinte ao último dia já pago. A assinatura no cartão mantém três dias de tolerância para a cobrança recorrente cair.
+- Loja paga por Pix ou por fora vê um aviso no painel faltando 2 dias ("vence em 2 dias") e no último dia ("amanhã a loja é bloqueada"), com o botão para pagar.
 
 ## Datas e histórico
 

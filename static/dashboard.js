@@ -269,6 +269,11 @@ let billing=null;
 const firstCharge=b=>b.first_charge?new Date(b.first_charge).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'}):'';
 const planText=b=>money(b.price)+' por mês, cobrado no cartão pelo Mercado Pago'+(b.first_charge?' (a 1ª cobrança só em '+firstCharge(b)+', quando acaba seu mês grátis)':'');
 function billingBanner(b){
+  if(b&&b.state==='paid'&&b.days_left>0&&b.days_left<=2){
+    const block=new Date(b.paid_until+'T12:00:00');block.setDate(block.getDate()+1);const day=block.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'});
+    const pay=role==='owner'?'<button class="btn small" data-subscribe>Pagar a mensalidade</button>':'<p class="muted">Avise o dono da loja.</p>';
+    return '<div class="platform-notice alert billing-banner"><div><b>'+(b.days_left===1?'Último dia: amanhã ('+day+') a loja é bloqueada.':'Sua mensalidade vence em 2 dias: a loja bloqueia dia '+day+'.')+'</b><p>Pague '+money(b.price)+' para continuar recebendo pedidos sem parar.</p></div>'+pay+'</div>';
+  }
   if(!b||['exempt','active','paid'].includes(b.state))return '';
   const owner=role==='owner';
   const button=label=>owner?'<button class="btn small" data-subscribe>'+label+'</button>':'<p class="muted">Peça ao dono da loja para assinar.</p>';

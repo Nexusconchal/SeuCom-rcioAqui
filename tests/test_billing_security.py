@@ -51,7 +51,7 @@ def test_plan_pix_snapshot_survives_price_change_and_uses_real_approval_day(shop
     assert send(c,'POST','/api/admin/billing/pix/check',{}).json['paid']
     receipt=sql(c,'SELECT amount,paid_at FROM platform_ledger')[0]
     assert receipt['amount']==5999 and receipt['paid_at']==stamp[:19]+'+00:00'
-    assert sql(c,'SELECT paid_until FROM stores')[0]['paid_until']==(add_month(datetime.fromisoformat(stamp).astimezone(ZONE).date())+timedelta(days=3)).isoformat()
+    assert sql(c,'SELECT paid_until FROM stores')[0]['paid_until']==(add_month(datetime.fromisoformat(stamp).astimezone(ZONE).date())-timedelta(days=1)).isoformat()
 
 
 def test_late_old_pix_webhook_is_reconciled_once_and_preserves_new_pending_code(shop):
