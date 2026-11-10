@@ -68,4 +68,4 @@ def test_pix_paid_during_free_month_starts_after_it(app, shop):
     paid_until = conn.execute("SELECT paid_until FROM stores WHERE slug='minha-loja'").fetchone()[0]
     conn.close()
     from billing import ZONE
-    assert paid_until == (add_month(datetime.fromisoformat(trial).astimezone(ZONE).date()) + timedelta(days=3)).isoformat()
+    assert paid_until == (add_month(datetime.fromisoformat(trial).astimezone(ZONE).date()) - timedelta(days=1)).isoformat()

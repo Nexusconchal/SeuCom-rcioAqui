@@ -102,6 +102,26 @@ def extend_paid_until(current, paid_on):
     return max(current or "", until)
 
 
+def month_paid_until(current, paid_on):
+    """Pix ou pagamento por fora em `paid_on` libera até a véspera do mesmo dia do mês seguinte.
+
+    Pagou dia 09/11: vende até 08/12 e a loja bloqueia no dia 09/12. Se ainda havia dias
+    pagos, o novo mês começa no dia seguinte ao fim deles.
+    """
+    if current and current >= paid_on.isoformat():
+        paid_on = date.fromisoformat(current) + timedelta(days=1)
+    return max(current or "", (add_month(paid_on) - timedelta(days=1)).isoformat())
+
+
+def days_until_block(store, moment=None):
+    """Dias até a loja paga bloquear (2 = bloqueia depois de amanhã, 1 = amanhã). None se não se aplica."""
+    paid = _get(store, "paid_until", "")
+    if billing_state(store, moment) != "paid" or not paid:
+        return None
+    today = (moment or datetime.now(timezone.utc)).astimezone(ZONE).date()
+    return (date.fromisoformat(paid) + timedelta(days=1) - today).days
+
+
 def billing_timestamp(value):
     """Keep real provider instants; a date without a time/offset is not an instant."""
     if not isinstance(value, str) or 'T' not in value:
@@ -190,7 +210,7 @@ def register_billing(app, helpers):
                 "trial_until": store["trial_until"] if trial_active(store["trial_until"]) else "", "sub_status": store["sub_status"],
                 "payer_email": store["sub_payer_email"], "next_payment": store["sub_next_payment"], "paid_until": store["paid_until"],
                 "configured": bool(config.get("MP_PLATFORM_ACCESS_TOKEN")), "manage_url": "https://www.mercadopago.com.br/subscriptions",
-                "pix_pending": bool(store['sub_pix_id']), "pix_expires": store['sub_pix_expires'],
+                "pix_pending": bool(store['sub_pix_id']), "pix_expires": store['sub_pix_expires'], "days_left": days_until_block(store),
                 "payments":h.rows("SELECT amount,description,paid_at,created_at FROM platform_ledger WHERE store_id=? AND is_subscription=1 AND kind='receipt' AND voided_at IS NULL ORDER BY id DESC LIMIT 12",(store['id'],)) if getattr(g,"role",None)=="owner" else []}
 
     def record_payment(store_id, payment_id, amount, paid_on, description, paid_at='', stack=False):
@@ -204,13 +224,17 @@ def register_billing(app, helpers):
                 VALUES(?,?,?,?,?,?,?,?,1)""", (store_id, "receipt", description, amount, stamp, key, "mercadopago", billing_timestamp(paid_at)))
             row = conn.execute("SELECT paid_until,trial_until FROM stores WHERE id=?", (store_id,)).fetchone()
             current, trial = row["paid_until"], row["trial_until"]
-            if stack and current and current >= paid_on.isoformat():
-                paid_on=date.fromisoformat(current)
-            # Pagou ainda no mês grátis: o mês pago começa quando o grátis acaba.
-            if stack and trial and len(trial) > 10 and trial_active(trial):
-                paid_on=max(paid_on,datetime.fromisoformat(trial).astimezone(ZONE).date())
+            if stack:
+                # Pix avulso: o mês pago termina na véspera do mesmo dia do mês seguinte.
+                # Pagou ainda no mês grátis: o mês pago começa quando o grátis acaba.
+                if trial and len(trial) > 10 and trial_active(trial):
+                    paid_on=max(paid_on,datetime.fromisoformat(trial).astimezone(ZONE).date())
+                until=month_paid_until(current, paid_on)
+            else:
+                # Cartão recorrente: 3 dias de tolerância para a próxima cobrança cair.
+                until=extend_paid_until(current, paid_on)
             conn.execute("UPDATE stores SET paid_until=?,subscribed_at=CASE WHEN subscribed_at='' THEN ? ELSE subscribed_at END WHERE id=?",
-                         (extend_paid_until(current, paid_on), stamp, store_id))
+                         (until, stamp, store_id))
         return True
 
     def sync(store):

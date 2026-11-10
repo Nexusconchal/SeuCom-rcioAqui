@@ -15,7 +15,7 @@ from flask import abort, g, jsonify, request, session, has_request_context
 import reports
 from operations import receipt_state
 from merchandising import local_time
-from billing import OK_STATES, billing_state, extend_paid_until
+from billing import OK_STATES, billing_state, month_paid_until
 
 ZONE = ZoneInfo('America/Sao_Paulo')
 MONTHS = ('janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro')
@@ -576,7 +576,7 @@ def register_business(app, helpers):
                 paying=conn.execute('SELECT * FROM stores WHERE id=?',(sid,)).fetchone()
                 if amount>=effective_fee(paying,datetime.now(ZONE).date().isoformat()):
                     stamp=h.now()
-                    conn.execute('UPDATE stores SET paid_until=? WHERE id=?',(extend_paid_until(paying['paid_until'],datetime.now(ZONE).date()),sid))
+                    conn.execute('UPDATE stores SET paid_until=? WHERE id=?',(month_paid_until(paying['paid_until'],datetime.now(ZONE).date()),sid))
                     if not paying['billing_exempt'] and effective_fee(paying,datetime.now(ZONE).date().isoformat())>0:
                         conn.execute('UPDATE platform_ledger SET is_subscription=1 WHERE id=?',(lid,))
                         conn.execute("UPDATE stores SET subscribed_at=CASE WHEN subscribed_at='' THEN ? ELSE subscribed_at END WHERE id=?",(stamp,sid))
