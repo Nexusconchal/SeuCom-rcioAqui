@@ -39,6 +39,7 @@ export async function renderDashboard(){
 function updateStoreButton(){const b=$('#store-toggle');const paused=store.billing_state&&!['exempt','active','paid','trial'].includes(store.billing_state);b.className='badge '+(store.open_now?'green':store.open&&!paused?'amber':'gray');b.innerHTML='<i></i>'+(paused?'Loja pausada (assinatura)':!store.open?'Loja fechada':store.open_now?'Loja aberta':'Aberta • fora do horário');b.title=store.open?'Clique para fechar a loja agora':'Clique para abrir a loja';}
 const days=['Segunda','Terça','Quarta','Quinta','Sexta','Sábado','Domingo'];
 let seen=null,motojaSeen=null,watchTimer,audio,journalWarning=false,printSeen=null,watchBusy=false;
+let alarmTimer=null,alarmOrders=[];
 const soundOn=()=>{try{return localStorage.getItem('sca.sound')!=='0';}catch{return true;}};
 function unlockAudio(){try{audio=audio||new (window.AudioContext||window.webkitAudioContext)();audio.resume();}catch{}}
 function chime(){
@@ -46,6 +47,20 @@ function chime(){
   [0,.18,.36].forEach((delay,i)=>{const o=audio.createOscillator(),g=audio.createGain();o.type='sine';o.frequency.value=[880,1175,1568][i];
     g.gain.setValueAtTime(.0001,audio.currentTime+delay);g.gain.exponentialRampToValueAtTime(.35,audio.currentTime+delay+.02);g.gain.exponentialRampToValueAtTime(.0001,audio.currentTime+delay+.35);
     o.connect(g).connect(audio.destination);o.start(audio.currentTime+delay);o.stop(audio.currentTime+delay+.4);});
+}
+// Alarme de pedido novo: toca sem parar até alguém aceitar (pedido sai de "novo").
+function setAlarm(waiting){
+  alarmOrders=waiting;
+  let bar=$('#order-alarm');
+  if(!bar){bar=document.createElement('div');bar.id='order-alarm';bar.className='order-alarm';bar.setAttribute('role','alert');document.body.append(bar);}
+  if(!waiting.length){clearInterval(alarmTimer);alarmTimer=null;bar.hidden=true;return;}
+  const muted=soundOn()&&(!audio||audio.state!=='running');
+  bar.hidden=false;
+  bar.innerHTML='<div><b>'+(waiting.length>1?waiting.length+' pedidos esperando você aceitar':'Pedido #'+waiting[0].number+' esperando você aceitar')+'</b><span>'+esc(waiting[0].customer)+' • '+money(waiting[0].total)+(soundOn()?'':' • som desligado')+'</span></div>'+
+    (muted?'<button type="button" class="btn secondary small" data-alarm-sound>Ativar som</button>':'')+'<button type="button" class="btn small" data-alarm-open>Ver e aceitar</button>';
+  $('[data-alarm-open]',bar).onclick=()=>{unlockAudio();switchTab('orders');};
+  const sound=$('[data-alarm-sound]',bar);if(sound)sound.onclick=()=>{unlockAudio();setTimeout(()=>{chime();setAlarm(alarmOrders);},150);};
+  if(!alarmTimer){chime();alarmTimer=setInterval(()=>{if(alarmOrders.length)chime();},2500);}
 }
 function tone(notes,type='sine'){
   if(!soundOn()||!audio)return;
@@ -95,16 +110,17 @@ async function watchOrders(){
   clearTimeout(watchTimer);
   try{
     const active=(await api('/api/admin/orders?status=active')).orders,list=active.filter(o=>o.status==='new');
+    setAlarm(list.filter(o=>!onlineMethod(o)||o.paid||o.total===0));
     const moved=motojaWatch(active);
     if(moved&&['overview','orders','drivers'].includes(tab))switchTab(tab,true);
     if(seen){const fresh=list.filter(o=>!seen.has(o.id));if(fresh.length){
-      chime();const first=fresh[0];toast(fresh.length>1?fresh.length+' novos pedidos chegaram!':'Novo pedido #'+first.number+' • '+money(first.total));
+      if(!alarmTimer)chime();const first=fresh[0];toast(fresh.length>1?fresh.length+' novos pedidos chegaram!':'Novo pedido #'+first.number+' • '+money(first.total));
       if('Notification' in window&&Notification.permission==='granted'&&document.hidden){try{new Notification('Novo pedido #'+first.number,{body:first.customer+' • '+money(first.total),icon:'/static/icon-192.png',tag:'pedido-'+first.id});}catch{}}
       if(['overview','orders','kitchen'].includes(tab))switchTab(tab,true);
     }}
     if(autoPrint()){
       try{
-        const candidates=active.filter(o=>['new','preparing'].includes(o.status)&&(!onlineMethod(o)||o.paid||o.total===0));
+        const candidates=active.filter(o=>o.status==='preparing'&&(!onlineMethod(o)||o.paid||o.total===0));
         candidates.forEach(o=>{const sector=printSector();if(!sector||o.items.some(i=>(i.production_sector||'Cozinha')===sector))enqueuePrint(o,sector?'sector:'+sector:'all');});
         if(printSeen)candidates.filter(o=>!printSeen.has(o.id)).slice().reverse().forEach(autoPrintTicket);
         else if(pendingPrints().length)toast('Há pendências de impressão. Abra Imprimir notinha e confira antes de repetir.');
@@ -115,7 +131,7 @@ async function watchOrders(){
     supportCheck();
     seen=new Set(active.map(o=>o.id));document.title=(list.length?'('+list.length+') ':'')+'Painel • '+store.name;
   }catch(e){if(e.status===401){location.href='/entrar';return;}}finally{watchBusy=false;}
-  watchTimer=setTimeout(watchOrders,15000);
+  watchTimer=setTimeout(watchOrders,alarmOrders.length?4000:15000);
 }
 const autoPrint=()=>{try{return (localStorage.getItem('sca.autoprint.'+store.id)??localStorage.getItem('sca.autoprint'))==='1';}catch{return false;}};
 const b64=s=>{const p='='.repeat((4-s.length%4)%4);const raw=atob((s+p).replace(/-/g,'+').replace(/_/g,'/'));return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));};
@@ -203,7 +219,7 @@ function alertsPanel(){
 function printPanel(){
   const chromeCmd='"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --kiosk-printing '+location.origin+'/painel';
   const settings='<section class="panel print-settings-panel" id="print-panel"><div class="section-heading"><div><span class="eyebrow">DO SEU JEITO</span><h2>Impressora de notinha</h2><p class="muted">Preferências salvas neste navegador.</p></div><span class="feature-icon">'+icon('gear')+'</span></div>'+
-    '<div class="alert-row"><div><b>Imprimir automaticamente cada pedido novo</b><p class="muted">A notinha sai assim que o pedido chega, com o painel aberto. Veja abaixo como imprimir sem a janela de confirmação.</p></div><label class="switch"><input type="checkbox" id="autoprint" '+(autoPrint()?'checked':'')+'><span>'+(autoPrint()?'Ligado':'Desligado')+'</span></label></div>'+
+    '<div class="alert-row"><div><b>Imprimir automaticamente cada pedido novo</b><p class="muted">A notinha sai assim que o pedido é aceito (vai para preparo), com o painel aberto. Veja abaixo como imprimir sem a janela de confirmação.</p></div><label class="switch"><input type="checkbox" id="autoprint" '+(autoPrint()?'checked':'')+'><span>'+(autoPrint()?'Ligado':'Desligado')+'</span></label></div>'+
     '<div class="alert-row"><div><b>Setor neste aparelho</b><p class="muted">Deixe vazio para a notinha completa. Informe o mesmo setor do cadastro dos produtos para imprimir apenas a produção desse setor.</p></div><input id="print-sector" aria-label="Setor de impressão automática" maxlength="60" value="'+esc(printSector())+'" placeholder="Ex.: Cozinha ou Bar"></div>'+
     '<div class="alert-row"><div><b>Papel da impressora</b><p class="muted">Escolha o mesmo tamanho configurado no driver do Windows. Para outro tamanho, use Outra largura e ajuste a área útil abaixo.</p></div><select id="paper-width" aria-label="Largura do papel">'+Object.entries(printProfiles).map(([key,p])=>'<option value="'+key+'" '+(paperWidth()===key?'selected':'')+'>'+p.label+'</option>').join('')+'</select></div>'+
     '<div class="alert-row"><div><b>Área útil de impressão</b><p class="muted">Largura ocupada pelo texto em milímetros. Se cortar nas laterais, reduza este valor e imprima outro teste.</p></div><label class="print-number"><input type="number" id="print-content-width" aria-label="Área útil de impressão em milímetros" min="32" max="'+printProfiles[paperWidth()].max+'" step="0.5" value="'+printContentWidth()+'"><span>mm</span></label></div>'+
