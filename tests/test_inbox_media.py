@@ -86,6 +86,7 @@ def test_incoming_media_retains_only_selector_handoff_and_authenticates_download
     c,pid=shop;fake,tid=media_setup(c)
     send(c,'POST',f'/api/admin/inbox/{tid}/claim',{'claim':False})
     send(c,'PUT','/api/admin/inbox/bot',{'enabled':True})
+    sql(c,"UPDATE inbox_threads SET last_auto_at='2099-01-01T00:00:00+00:00'")  # já recebeu o cardápio: a foto chama a equipe
     value=event();value['data']['message']={'imageMessage':{'mimetype':'image/png','fileLength':200,'caption':'Foto do lanche','url':'https://127.0.0.1/private','mediaKey':'do-not-retain'}}
     assert c.post('/webhooks/inbox/1',json=value,headers={'X-Webhook-Token':fake.token}).status_code==200
     data=c.get(f'/api/admin/inbox/{tid}').json;assert data['thread']['state']=='human'

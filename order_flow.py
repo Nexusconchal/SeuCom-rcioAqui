@@ -357,7 +357,10 @@ def register_order_flow(app, helpers):
             return jsonify(connected=False)
         code, data = evolution().state(g.store["wa_instance"])
         state = (data.get("instance") or {}).get("state") or data.get("state") or ""
-        return jsonify(connected=state in ("open", "connected"))
+        connected = state in ("open", "connected")
+        # Conectou: o robô, o recebimento e os avisos de pedido ligam sozinhos (uma vez por conexão).
+        activated = bool(connected and app.extensions["whatsapp_autosetup"](g.store))
+        return jsonify(connected=connected, activated=activated)
 
     @app.patch("/api/admin/whatsapp")
     @h.owner

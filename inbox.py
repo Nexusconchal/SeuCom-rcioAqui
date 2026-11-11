@@ -16,7 +16,7 @@ from chat_orders import handle_chat, forget_cart
 from inbox_media import (MAX_MEDIA, STORE_MEDIA_BUDGET, incoming_media, validate_media,
                          public_media, read_media, decode_provider, cleanup_media)
 from inbox_service import (preferences, sending_since, write_value, validate_preferences,
-                           automatic_reply, template_values, render_message, delivery_health, normalize)
+                           automatic_reply, welcome_reply, template_values, render_message, delivery_health, normalize)
 
 DDL="""
 CREATE TABLE IF NOT EXISTS inbox_threads (
@@ -83,6 +83,40 @@ def register_inbox(app,helpers):
     h=SimpleNamespace(**helpers)
     def provider():return app.extensions.get('evolution') or Evolution(app.config.get('EVOLUTION_API_URL',''),app.config.get('EVOLUTION_API_KEY',''))
 
+    def auto_setup(store):
+        try:return activate(store)
+        except Exception:
+            # A conferência da conexão nunca pode falhar por causa da ativação automática.
+            app.logger.error('Falha ao ativar o atendimento automático.')
+            return False
+
+    def activate(store):
+        """QR Code lido: liga sozinho o recebimento, o envio, o robô e os avisos de pedido.
+
+        Roda uma vez por conexão. Depois disso, o que a loja desligar à mão fica desligado.
+        """
+        sid=store['id'];instance=store['wa_instance']
+        if not instance or not provider().ready:return False
+        done=h.one('SELECT value FROM platform_settings WHERE key=?',('inbox.auto.'+str(sid),))
+        if done and done['value']==instance:return False
+        hook=store['inbox_hook_hash']
+        if not hook:
+            base=app.config['PUBLIC_URL'] or request.host_url.rstrip('/')
+            if not app.config['TESTING'] and not base.startswith('https://'):return False
+            token=secrets.token_urlsafe(32)
+            code,_=provider().set_webhook(instance,base+'/webhooks/inbox/'+str(sid),token)
+            if code not in (200,201):return False
+            hook=hashlib.sha256(token.encode()).hexdigest()
+        with h.transaction() as conn:
+            conn.execute('UPDATE stores SET inbox_hook_hash=?,inbox_bot=1,wa_enabled=1 WHERE id=? AND wa_instance=?',(hook,sid,instance))
+            if not sending_since(conn,sid):
+                # Mensagens antigas na fila nunca saem sozinhas ao ativar.
+                conn.execute("UPDATE inbox_messages SET status=CASE WHEN automated=1 THEN 'cancelled' ELSE 'held' END WHERE store_id=? AND status='queued'",(sid,))
+                write_value(conn,'inbox.sending.'+str(sid),h.now())
+            write_value(conn,'inbox.auto.'+str(sid),instance)
+        return True
+    app.extensions['whatsapp_autosetup']=auto_setup
+
     @app.post('/api/admin/inbox/connect')
     @h.owner
     def inbox_connect():
@@ -114,7 +148,7 @@ def register_inbox(app,helpers):
         if not isinstance(key,dict):abort(400)
         jid=key.get('remoteJid','')
         if not isinstance(jid,str):abort(400)
-        if jid.endswith('@lid'):jid=key.get('remoteJidAlt','')
+        if jid.endswith('@lid'):jid=key.get('remoteJidAlt') or key.get('senderPn') or ''
         if not isinstance(jid,str):abort(400)
         if key.get('fromMe') or not re.fullmatch(r'55\d{10,11}@s.whatsapp.net',jid):return jsonify(ignored=True)
         phone=jid.split('@')[0][2:];eid=key.get('id')
@@ -136,22 +170,34 @@ def register_inbox(app,helpers):
         body=body[:4000];name=str(message.get('pushName') or phone)[:100];stamp=h.now()
         with h.transaction() as conn:
             if conn.execute('SELECT id FROM inbox_messages WHERE store_id=? AND external_id=?',(sid,'in:'+eid)).fetchone():return jsonify(ok=True,duplicate=True)
+            cutoff=(datetime.now(timezone.utc)-timedelta(hours=12)).isoformat(timespec='seconds')
+            before=conn.execute('SELECT state,assigned_to,updated_at FROM inbox_threads WHERE store_id=? AND phone=?',(sid,phone)).fetchone()
             conn.execute('''INSERT INTO inbox_threads(store_id,phone,name,updated_at) VALUES(?,?,?,?)
                 ON CONFLICT(store_id,phone) DO UPDATE SET name=excluded.name,updated_at=excluded.updated_at''',(sid,phone,name,stamp))
+            # Conversa que ficou esperando a equipe e ninguém assumiu: depois de 12 h o robô volta a atender.
+            if before and before['state']=='human' and not before['assigned_to'] and before['updated_at']<cutoff:
+                conn.execute("UPDATE inbox_threads SET state='open' WHERE store_id=? AND phone=?",(sid,phone))
             thread=conn.execute('SELECT * FROM inbox_threads WHERE store_id=? AND phone=?',(sid,phone)).fetchone()
             conn.execute("UPDATE inbox_threads SET unread=unread+1,state=CASE WHEN state='closed' THEN 'open' ELSE state END WHERE id=?",(thread['id'],))
             conn.execute("INSERT INTO inbox_messages(store_id,thread_id,direction,body,external_id,status,created_at,media) VALUES(?,?,'in',?,?,'received',?,?)",(sid,thread['id'],body,'in:'+eid,stamp,json.dumps(media) if media else ''))
             normalized=normalize(body);reply=''
-            human=bool(media) or bool(re.search(r'\b(atendente|humano)\b',normalized)) or body.startswith('[Mensagem de mídia:')
+            attachment=bool(media) or body.startswith('[Mensagem de mídia:')
+            bot_on=bool(s['inbox_bot']) and not thread['assigned_to'] and thread['state'] in ('open','closed')
+            welcome_due=bot_on and (thread['last_auto_at'] or '')<cutoff
+            # Foto ou áudio chama a equipe, menos no primeiro contato: aí o cliente recebe o cardápio antes.
+            human=bool(re.search(r'\b(atendente|humano)\b',normalized)) or (attachment and not welcome_due)
             if human:
                 forget_cart(conn,sid,thread['id'])
                 conn.execute("UPDATE inbox_threads SET state='human' WHERE id=?",(thread['id'],))
                 conn.execute("UPDATE inbox_messages SET status='cancelled' WHERE thread_id=? AND automated=1 AND status='queued'",(thread['id'],))
-            elif s['inbox_bot'] and not thread['assigned_to'] and thread['state'] in ('open','closed'):
+            elif bot_on:
                 base=app.config['PUBLIC_URL'] or request.host_url.rstrip('/')
-                guided=handle_chat(conn,app,s,thread,body,eid) if sending_since(conn,sid) else None
+                guided=handle_chat(conn,app,s,thread,body,eid) if sending_since(conn,sid) and not attachment else None
                 reply=guided if guided is not None else automatic_reply(preferences(conn,sid),s,body,name,base)
                 if guided is not None:conn.execute("UPDATE inbox_messages SET status='cancelled' WHERE thread_id=? AND automated=1 AND status='queued'",(thread['id'],))
+                if not reply and guided is None and welcome_due:
+                    # Primeira mensagem do cliente (ou depois de horas): manda o cardápio, seja qual for o texto.
+                    reply=welcome_reply(preferences(conn,sid),s,name,base)
                 if not reply:conn.execute("UPDATE inbox_threads SET state='human' WHERE id=?",(thread['id'],))
                 if guided is None and thread['last_auto_at'] and thread['last_auto_at']>=(datetime.now(timezone.utc)-timedelta(seconds=3)).isoformat(timespec='seconds'):reply=''
                 if reply:
@@ -184,7 +230,8 @@ def register_inbox(app,helpers):
         code,value=provider().state(g.store['wa_instance'])
         instance=value.get('instance') if isinstance(value,dict) else None
         state=instance.get('state') if isinstance(instance,dict) else value.get('state') if isinstance(value,dict) else None
-        return jsonify(connected=code==200 and state in ('open','connected'),state=state if state in ('open','connected','close','connecting') else 'unknown')
+        connected=code==200 and state in ('open','connected')
+        return jsonify(connected=connected,activated=bool(connected and auto_setup(g.store)),state=state if state in ('open','connected','close','connecting') else 'unknown')
 
     @app.put('/api/admin/inbox/settings')
     @h.owner

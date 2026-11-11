@@ -456,6 +456,8 @@ def create_app(test_config=None):
         cached=getattr(g,'receipt_balances',{})
         value['received_amount']=cached.get(order['id']) if order['id'] in cached else receipt_state(db(),order['store_id'],[order])[0][order['id']]
         value['remaining_amount']=max(0,order['total']-value['received_amount'])
+        counts=getattr(g,'customer_counts',None)
+        if counts is not None:value['customer_orders']=counts.get(order['phone'],0)
         value["items"] = rows("SELECT id,name,product_id,quantity,unit_price,unit_cost,extras,notes,production_sector,kitchen_state,suggested_by,suggested_by_name FROM order_items WHERE order_id=?", (order["id"],))
         for item in value["items"]:
             item["extras"] = json.loads(item["extras"])
@@ -1548,6 +1550,8 @@ def create_app(test_config=None):
             app.extensions["motoja_refresh"](g.store["id"])
         found=rows(sql + ' ORDER BY id DESC LIMIT 500',params)
         g.receipt_balances=receipt_state(db(),g.store['id'],found)[0]
+        # Quantos pedidos cada cliente já fez na loja: sai na notinha ("3 pedidos").
+        g.customer_counts={r['phone']:r['total'] for r in rows("SELECT phone,COUNT(*) AS total FROM orders WHERE store_id=? AND status!='cancelled' AND phone NOT IN ('','00000000000') GROUP BY phone",(g.store['id'],))}
         return jsonify(orders=[order_dict(o) for o in found])
 
     @app.patch("/api/admin/orders/<int:oid>")

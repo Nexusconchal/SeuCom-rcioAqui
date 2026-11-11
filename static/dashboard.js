@@ -174,12 +174,12 @@ function ticketHTML(o){
   const printed=new Date().toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}).replace(',','');
   return '<div class="ticket t-receipt"><p class="t-center t-head">'+kind+'<br>'+esc(store.name.toLocaleUpperCase('pt-BR'))+'</p>'+
     (o.scheduled_for?'<p class="t-box t-center">AGENDADO: '+new Date(o.scheduled_for).toLocaleString('pt-BR',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</p>':'')+
-    '<p class="t-order">Pedido Nº: '+o.number+' - '+when+'<br>'+esc(o.customer)+' '+esc(ticketPhone(o.phone))+'</p>'+
+    '<p class="t-order">Pedido Nº: '+o.number+' - '+when+'<br>'+esc(o.customer)+' '+esc(ticketPhone(o.phone))+(o.customer_orders?'<br>'+o.customer_orders+(o.customer_orders===1?' pedido':' pedidos'):'')+'</p>'+
     (o.mode==='delivery'?'<p class="t-box">ENTREGA'+(o.zone?' • '+esc(o.zone):'')+'<br>'+esc(o.address)+'</p>':'')+
     '<div class="t-cols"><span>PRODUTO</span><span>VENDA</span></div>'+
     o.items.map(i=>'<div class="t-product"><div class="t-line"><b>'+esc(i.name)+'</b><b>'+money(i.unit_price*i.quantity)+'</b></div><div>'+i.quantity+'x UN '+money(i.unit_price)+'</div>'+ticketChoices(i.extras)+(i.notes?'<div class="t-opt">OBS: '+esc(i.notes)+'</div>':'')+'</div>').join('')+
     (o.notes?'<p class="t-box">OBS. DO PEDIDO: '+esc(o.notes)+'</p>':'')+
-    '<div class="t-sums">'+line('Produtos',money(o.subtotal))+(o.delivery_fee?line('Entrega',money(o.delivery_fee)):'')+(o.discount?line('Desconto','- '+money(o.discount)):'')+'</div>'+
+    (o.delivery_fee||o.discount?'<div class="t-sums">'+line('Produtos',money(o.subtotal))+(o.delivery_fee?line('Entrega',money(o.delivery_fee)):'')+(o.discount?line('Desconto','- '+money(o.discount)):'')+'</div>':'')+
     line('Valor total',money(o.total),' t-total')+line('Valor pago',money(received))+line('Cobrar do cliente',money(remaining),' t-due')+
     '<p class="t-center t-pay">'+(pay[o.payment]||esc(o.payment))+(o.paid?' - JÁ PAGO':'')+(o.change_for&&!o.paid?'<br>Troco para '+money(o.change_for)+' (levar '+money(Math.max(0,o.change_for-remaining))+')':'')+'</p>'+
     '<p class="t-center t-foot">'+printed+'<br>SeuComércioAqui • documento não fiscal</p></div>';

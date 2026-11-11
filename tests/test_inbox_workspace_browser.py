@@ -24,9 +24,9 @@ def test_workspace_customer_order_media_search_and_reconnection(inbox_live,tmp_p
         page.goto(live+'/entrar');page.get_by_label('E-mail',exact=True).fill('demo@example.com')
         page.get_by_label('Senha',exact=True).fill('senha-de-teste-segura');page.get_by_role('button',name='Entrar no painel').click()
         page.get_by_role('button',name='Atendimento WhatsApp',exact=True).click()
-        page.get_by_role('button',name='Ativar conversas',exact=True).click()
-        page.get_by_role('button',name='Autorizar envio',exact=True).click()
-        page.get_by_role('button',name='Autorizar novos envios',exact=True).click()
+        # WhatsApp conectado: recebimento, envio e robô ligam sozinhos.
+        expect(page.get_by_role('button',name='Pausar envio',exact=True)).to_be_visible()
+        expect(page.locator('#inbox-bot')).to_be_checked()
         page.get_by_role('button',name='Ver conexão / QR',exact=True).click()
         page.get_by_role('button',name='Gerar QR Code',exact=True).click()
         expect(page.locator('#modal')).not_to_be_visible(timeout=10000)
@@ -66,7 +66,8 @@ def test_workspace_customer_order_media_search_and_reconnection(inbox_live,tmp_p
         page.get_by_label('Legenda opcional',exact=True).fill('Assim vai seu pedido')
         page.get_by_role('button',name='Confirmar envio do arquivo',exact=True).click()
         expect(page.locator('#modal')).not_to_be_visible()
-        assert delivery_tick(app)['sent']==1 and len(outgoing)==1
+        media_sent=[m for m in outgoing if 'mediatype' in m or 'audio' in m]
+        assert delivery_tick(app)['sent']==1 and len([m for m in outgoing if 'mediatype' in m or 'audio' in m])==len(media_sent)+1
         expect(page.locator('.inbox-history')).to_contain_text('Assim vai seu pedido',timeout=12000)
         audio_path=tmp_path/'confirmacao.wav'
         with wave.open(str(audio_path),'wb') as wav:
@@ -76,7 +77,7 @@ def test_workspace_customer_order_media_search_and_reconnection(inbox_live,tmp_p
         expect(page.get_by_label('Legenda opcional',exact=True)).to_be_disabled()
         page.get_by_role('button',name='Confirmar envio do arquivo',exact=True).click()
         expect(page.locator('#modal')).not_to_be_visible()
-        assert delivery_tick(app)['sent']==1 and len(outgoing)==2
+        assert delivery_tick(app)['sent']==1 and len([m for m in outgoing if 'mediatype' in m or 'audio' in m])==len(media_sent)+2
         expect(page.get_by_role('button',name='Ouvir áudio')).to_have_count(1,timeout=12000)
         page.get_by_role('button',name='Ouvir áudio').click();expect(page.locator('audio')).to_be_visible()
         page.get_by_role('button',name='Fechar',exact=True).click()

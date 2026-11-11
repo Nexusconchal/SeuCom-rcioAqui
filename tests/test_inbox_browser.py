@@ -97,11 +97,9 @@ def test_live_inbox_configuration_polling_drafts_quick_replies_and_http_delivery
         page.goto(live+'/entrar');page.get_by_label('E-mail',exact=True).fill('demo@example.com')
         page.get_by_label('Senha',exact=True).fill('senha-de-teste-segura');page.get_by_role('button',name='Entrar no painel').click()
         page.get_by_role('button',name='Atendimento WhatsApp',exact=True).click()
-        page.get_by_role('button',name='Ativar conversas',exact=True).click()
-        expect(page.get_by_role('button',name='Autorizar envio',exact=True)).to_be_enabled()
-        page.get_by_role('button',name='Autorizar envio',exact=True).click()
-        page.get_by_role('button',name='Autorizar novos envios',exact=True).click()
-        page.locator('#inbox-bot').check()
+        # WhatsApp conectado: recebimento, envio e robô ligam sozinhos.
+        expect(page.get_by_role('button',name='Pausar envio',exact=True)).to_be_visible()
+        expect(page.locator('#inbox-bot')).to_be_checked()
         # Real HTTP callback into the application, using the token registered at the local stub.
         result=page.request.post(callback['url'],headers=callback['headers'],data=event('Oi, quero o cardápio'))
         assert result.status==200

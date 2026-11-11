@@ -123,6 +123,12 @@ def automatic_reply(settings, store, body, name, base):
     return ''
 
 
+def welcome_reply(settings, store, name, base):
+    """Boas-vindas com o link do cardápio, para a primeira mensagem que não casou com nenhuma palavra-chave."""
+    rule = next((r for r in settings['rules'] if r['id'] == 'menu' and r['enabled']), None)
+    return render_message(rule['message'], template_values(store, name, base)) if rule else ''
+
+
 def delivery_health(app, conn):
     value = read_json(conn, 'inbox.dispatcher', {})
     recent = False

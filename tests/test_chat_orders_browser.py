@@ -31,10 +31,9 @@ def test_guided_order_and_free_catalog_lookup_in_browser(inbox_live):
         page.goto(live+'/entrar');page.get_by_label('E-mail',exact=True).fill('demo@example.com')
         page.get_by_label('Senha',exact=True).fill('senha-de-teste-segura');page.get_by_role('button',name='Entrar no painel').click()
         page.get_by_role('button',name='Atendimento WhatsApp',exact=True).click()
-        page.get_by_role('button',name='Ativar conversas',exact=True).click()
-        page.get_by_role('button',name='Autorizar envio',exact=True).click()
-        page.get_by_role('button',name='Autorizar novos envios',exact=True).click()
-        page.locator('#inbox-bot').check()
+        # WhatsApp conectado: recebimento, envio e robô ligam sozinhos.
+        expect(page.get_by_role('button',name='Pausar envio',exact=True)).to_be_visible()
+        expect(page.locator('#inbox-bot')).to_be_checked()
         page.get_by_role('button',name='Respostas e atalhos',exact=True).click()
         page.get_by_label('Pedido guiado pelo WhatsApp',exact=True).check()
         page.get_by_label('Usar IA gratuita na consulta de produtos',exact=True).check()
