@@ -178,6 +178,30 @@ function checkoutDialog(){
   const rememberNow=()=>{try{if(form.remember.checked)localStorage.setItem('sca.customer',JSON.stringify({customer:form.customer.value.trim(),phone:form.phone.value.trim(),address:form.address.value.trim(),cep:form.cep.value.trim(),zone:zoneField?.value||''}));else localStorage.removeItem('sca.customer');}catch{}};
   ['customer','phone','address','cep'].forEach(k=>form[k].addEventListener('input',rememberNow));
   [zoneField,form.remember].forEach(el=>el?.addEventListener('change',rememberNow));
+  // Cadastro guardado na loja: ao digitar o telefone, nome e endereço dos pedidos anteriores voltam, mesmo em outro aparelho.
+  let lookupTimer,lookedUp='';
+  const lookupCustomer=()=>{
+    clearTimeout(lookupTimer);
+    const digits=form.phone.value.replace(/\D/g,'').replace(/^55(?=\d{10,11}$)/,'');
+    if(![10,11].includes(digits.length)||digits===lookedUp||!form.remember.checked||!card.hidden)return;
+    lookupTimer=setTimeout(async()=>{
+      lookedUp=digits;
+      try{
+        const r=await api('/api/store/'+encodeURIComponent(activeSlug)+'/customer',{method:'POST',body:JSON.stringify({phone:digits})});
+        if(!r.found||!form.isConnected||form.phone.value.replace(/\D/g,'').replace(/^55(?=\d{10,11}$)/,'')!==digits)return;
+        if(!form.customer.value.trim())form.customer.value=r.customer;
+        if(!form.address.value.trim()&&r.address){
+          form.address.value=r.address;
+          if(!form.cep.value.trim()&&r.cep)form.cep.value=r.cep.replace(/^(\d{5})(\d{3})$/,'$1-$2');
+          if(zoneField&&!zoneField.value&&[...zoneField.options].some(o=>o.value===r.zone))zoneField.value=r.zone;
+        }
+        rememberNow();
+        if(complete()){card.hidden=false;form.classList.add('saved-collapsed');drawSaved();toast('Achamos seus dados. Toque em Editar se quiser mudar.');}
+        refreshQuote();
+      }catch{}
+    },600);
+  };
+  form.phone.addEventListener('input',lookupCustomer);
   $$('[name=when]',form).forEach(r=>r.onchange=()=>{$('#schedule-fields').classList.toggle('hidden',r.value!=='later'||!r.checked);refreshQuote();});
   if(form.schedule_day){form.schedule_day.onchange=refreshQuote;form.schedule_time.onchange=refreshQuote;}
   form.phone.addEventListener('change',refreshQuote);
@@ -214,7 +238,7 @@ function checkoutDialog(){
     if(!quote){await refreshQuote();if(!quote)throw new Error('Confira os itens e o cupom antes de confirmar.');}
     if($('[name=when]:checked',form)?.value==='later'&&!scheduledFor())throw new Error('Escolha o dia e o horário do agendamento.');
     const {cep,schedule_day,schedule_time,when,remember,...fields}=Object.fromEntries(formData);
-    const body={...fields,cep:formData.get('cep')||'',...(mode()==='delivery'&&destination?destination:{}),wallet_token:walletToken,cashback_use:$('#wallet-use',d)?.checked?walletAmount:0,marketing_consent:formData.has('marketing_consent'),shopping_token:shoppingToken(),recovery_token:activeRecovery,zone:mode()==='delivery'?formData.get('zone')||'':'',scheduled_for:scheduledFor(),items:itemPayload(),mode:mode(),expected_total:quote.total,change_for:formData.get('change_for')?cents(formData.get('change_for')):null};
+    const body={...fields,remember:formData.has('remember'),cep:formData.get('cep')||'',...(mode()==='delivery'&&destination?destination:{}),wallet_token:walletToken,cashback_use:$('#wallet-use',d)?.checked?walletAmount:0,marketing_consent:formData.has('marketing_consent'),shopping_token:shoppingToken(),recovery_token:activeRecovery,zone:mode()==='delivery'?formData.get('zone')||'':'',scheduled_for:scheduledFor(),items:itemPayload(),mode:mode(),expected_total:quote.total,change_for:formData.get('change_for')?cents(formData.get('change_for')):null};
     // A new payload gets a fresh key. Network retries of the same payload reuse it.
     const serialized=JSON.stringify(body);if(orderKey.payload!==serialized)orderKey={payload:serialized,key:crypto.randomUUID()};
     let result;

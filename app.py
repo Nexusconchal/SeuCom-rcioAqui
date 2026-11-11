@@ -860,6 +860,25 @@ def create_app(test_config=None):
         return jsonify(subtotal=subtotal, discount=discount + reward + cashback, loyalty_discount=reward, loyalty=loyalty,
                        cashback_discount=cashback, delivery_fee=fee, zone=zone, total=subtotal-discount-reward-cashback+fee)
 
+    @app.post("/api/store/<slug>/customer")
+    def saved_customer(slug):
+        """Cadastro do cliente nesta loja, pelo telefone: nome e último endereço de entrega dos pedidos dele."""
+        limited("customer-lookup", 12)
+        store = one("SELECT id FROM stores WHERE slug=?", (slug,))
+        if not store:
+            abort(404, description="Loja não encontrada.")
+        key = phone_key(str(data().get("phone") or "")[:20])
+        if len(key) not in (10, 11):
+            return jsonify(found=False)
+        history = [o for o in rows(f"""SELECT customer,phone,mode,address,zone,postal_code,keep_customer FROM orders
+            WHERE store_id=? AND status!='cancelled' AND {PHONE_SQL} LIKE ? ORDER BY id DESC LIMIT 50""", (store["id"], "%" + key[-9:]))
+                   if phone_key(o["phone"]) == key]
+        if not history or not history[0]["keep_customer"]:
+            return jsonify(found=False)
+        last = next((o for o in history if o["mode"] == "delivery" and o["address"] and o["keep_customer"]), None)
+        return jsonify(found=True, customer=history[0]["customer"], address=last["address"] if last else "",
+                       zone=last["zone"] if last else "", cep=last["postal_code"] if last else "")
+
     @app.post("/api/store/<slug>/orders")
     def create_order(slug):
         limited("order", 30)
@@ -942,6 +961,8 @@ def create_app(test_config=None):
                 subtotal, discount, fee, total, coupon_id, key, digest, token, stamp, stamp)).lastrowid
             if total==0 and payment in ('pix_online','card_online'):
                 conn.execute('UPDATE orders SET paid=1 WHERE id=?',(oid,))
+            if value.get('remember') is False:
+                conn.execute('UPDATE orders SET keep_customer=0 WHERE id=?',(oid,))
             reserve_ingredients(conn, store['id'], quantities, oid, number, stamp, prepared)
             app.extensions['attach_dining'](conn, store, oid, value)
             app.extensions['wallet_reserve'](conn, store, oid, value, cashback, subtotal-discount)

@@ -55,5 +55,15 @@ def test_mobile_checkout_keeps_size_and_remembers_customer(live):
         page.get_by_role("button", name="Confirmar pedido").click()
         page.wait_for_url("**/pedido/**")
         expect(page.get_by_role("heading", name="Seu pedido chegou!")).to_be_visible()
+        # Outro aparelho, sem nada salvo: o telefone traz o cadastro guardado na loja.
+        other = browser.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True).new_page()
+        other.on("pageerror", lambda error: errors.append(str(error)))
+        open_checkout(other, live)
+        expect(other.locator("#saved-customer")).to_be_hidden()
+        other.get_by_label("WhatsApp com DDD").fill("(11) 99999-9999")
+        expect(other.locator("#saved-customer")).to_contain_text("Cliente Navegador")
+        expect(other.locator("#saved-customer")).to_contain_text("Avenida Nova, 500, Jardim")
+        other.get_by_role("button", name="Editar", exact=True).click()
+        assert other.get_by_label("Seu nome", exact=True).input_value() == "Cliente Navegador"
         assert errors == []
         browser.close()

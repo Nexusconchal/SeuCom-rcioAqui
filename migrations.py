@@ -175,6 +175,8 @@ ADDITIONS['stores'].update({'postal_zones':"TEXT NOT NULL DEFAULT '[]'"})
 ADDITIONS['orders']['payer_email'] = "TEXT NOT NULL DEFAULT ''"
 ADDITIONS['orders'].update({'postal_code':"TEXT NOT NULL DEFAULT ''"})
 ADDITIONS['orders'].update({'route_position':'INTEGER NOT NULL DEFAULT 0'})
+# 0 = o cliente desmarcou "Lembrar meus dados": o cadastro dele não volta pela busca por telefone.
+ADDITIONS['orders'].update({'keep_customer':'INTEGER NOT NULL DEFAULT 1'})
 ADDITIONS['products'].update({'production_sector':"TEXT NOT NULL DEFAULT 'Cozinha'"})
 ADDITIONS['order_items'].update({'production_sector':"TEXT NOT NULL DEFAULT 'Cozinha'",'kitchen_state':"TEXT NOT NULL DEFAULT 'new'"})
 ADDITIONS['products']['suggestion_ids'] = "TEXT NOT NULL DEFAULT '[]'"
