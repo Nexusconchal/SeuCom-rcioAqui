@@ -95,6 +95,14 @@ def customer_message(order, store, status, link, items=None):
     return ""
 
 
+def whatsapp_error(code):
+    if code == 0:
+        return "O servidor do WhatsApp não respondeu. Espere 1 minuto e clique em Gerar QR Code de novo."
+    if code in (401, 403):
+        return "O servidor do WhatsApp recusou a conexão. Avise o suporte do SeuComércioAqui."
+    return "Não consegui iniciar a conexão do WhatsApp agora. Tente de novo em instantes."
+
+
 def register_order_flow(app, helpers):
     h = SimpleNamespace(**helpers)
     config = app.config
@@ -322,14 +330,23 @@ def register_order_flow(app, helpers):
         if not evolution().ready:
             abort(503, description="O WhatsApp automático ainda não foi configurado pela plataforma.")
         h.limited("wa-connect", 10)
-        instance = g.store["wa_instance"] or f"sca-{g.store['id']}-{secrets.token_hex(3)}"
-        code, data = evolution().create(instance)
-        if code not in (200, 201) and code != 409 and "exist" not in json.dumps(data).lower():
-            abort(502, description="Não consegui iniciar a conexão do WhatsApp agora.")
+        instance = g.store["wa_instance"]
+        code, data = 0, {}
+        if instance:
+            # Conexão já criada antes: pede um QR novo para ela, sem tentar criar de novo.
+            code, data = evolution().connect(instance)
+        if not instance or code == 404:
+            instance = instance or f"sca-{g.store['id']}-{secrets.token_hex(3)}"
+            code, data = evolution().create(instance)
+            text = json.dumps(data).lower()
+            # A Evolution responde 403 "already in use" quando o nome já existe.
+            if code not in (200, 201) and code != 409 and not any(w in text for w in ("exist", "in use", "already")):
+                abort(503 if code == 0 else 502, description=whatsapp_error(code))
+            if not qr_image(data):
+                code, data = evolution().connect(instance)
+        if code == 0 or code >= 500 or code in (401, 403):
+            abort(503 if code == 0 else 502, description=whatsapp_error(code))
         image = qr_image(data)
-        if not image:
-            _, data = evolution().connect(instance)
-            image = qr_image(data)
         h.db().execute("UPDATE stores SET wa_instance=? WHERE id=?", (instance, g.store["id"]))
         return jsonify(qr=image, pairing_code=data.get("pairingCode") or (data.get("qrcode") or {}).get("pairingCode") or "")
 
