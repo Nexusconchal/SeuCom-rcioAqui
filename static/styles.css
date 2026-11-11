@@ -27,3 +27,7 @@ dialog.image-bank{width:860px;display:flex;flex-direction:column}dialog.image-ba
 @keyframes order-alarm-pulse{50%{box-shadow:0 12px 40px #b4231800,0 0 0 6px #b4231833}}
 @media(prefers-reduced-motion:reduce){.order-alarm{animation:none}}
 .copy-groups{margin:0 0 4px;align-items:flex-start}.copy-groups>span{align-items:flex-start;line-height:1.4}.copy-groups input{margin-top:2px}.copy-groups-help{font-size:11px;margin:0 0 18px}
+/* Celular: campo com letra menor que 16px faz o iPhone dar zoom na tela ao digitar. */
+@media (max-width:820px),(pointer:coarse){input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{font-size:16px!important}}
+.saved-customer{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid #bdd773;background:#f0f6e4;border-radius:12px;padding:12px 14px;margin-bottom:17px}.saved-customer[hidden]{display:none}.saved-customer>div{display:flex;flex-direction:column;gap:2px;min-width:0}.saved-customer small{font-size:11px;color:var(--muted)}.saved-customer b{font-size:14px;overflow-wrap:anywhere}.saved-customer span{font-size:13px;overflow-wrap:anywhere}.saved-customer .btn{flex:none}
+.saved-collapsed #contact-fields,.saved-collapsed #zone-label,.saved-collapsed #cep-label,.saved-collapsed #address-label,.saved-collapsed #use-destination,.saved-collapsed #destination-status{display:none}
