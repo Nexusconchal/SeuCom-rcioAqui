@@ -156,14 +156,33 @@ async function disablePush(){
   const reg=await navigator.serviceWorker.getRegistration('/');const sub=reg&&await reg.pushManager.getSubscription();
   if(sub){await api('/api/admin/push/unsubscribe',{method:'POST',body:JSON.stringify({endpoint:sub.endpoint})}).catch(()=>{});await sub.unsubscribe();}
 }
+// Notinha da loja no formato de cupom de delivery: escolhas agrupadas e quanto cobrar do cliente.
+function ticketChoices(extras){
+  const groups=[],loose=[];
+  extras.forEach(x=>{const name=String(x.name||''),cut=name.indexOf(': ');
+    if(cut>0){const title=name.slice(0,cut).replace(/\s*\([^)]*\)\s*$/,''),option=name.slice(cut+2);let g=groups.find(y=>y.title===title);if(!g)groups.push(g={title,options:[]});const same=g.options.find(y=>y.name===option);same?same.n++:g.options.push({name:option,n:1});}
+    else{const same=loose.find(y=>y.name===name);same?same.n++:loose.push({name,n:1});}});
+  return groups.map(g=>'<div class="t-group">'+esc(g.title)+'</div>'+g.options.map(x=>'<div class="t-opt">'+x.n+' x '+esc(x.name)+'</div>').join('')).join('')+
+    loose.map(x=>'<div class="t-opt">+ '+(x.n>1?x.n+' x ':'')+esc(x.name)+'</div>').join('');
+}
+const ticketPhone=v=>{const d=String(v||'').replace(/\D/g,'').replace(/^55(?=\d{10,11}$)/,'');return d.length===11?'('+d.slice(0,2)+') '+d.slice(2,7)+'-'+d.slice(7):d.length===10?'('+d.slice(0,2)+') '+d.slice(2,6)+'-'+d.slice(6):String(v||'');};
 function ticketHTML(o){
-  const line=(a,b)=>'<div class="t-line"><span>'+a+'</span><span>'+b+'</span></div>';
-  return '<div class="ticket"><h1>'+esc(store.name)+'</h1><p class="t-center">PEDIDO <b class="t-big">#'+o.number+'</b><br>'+date(o.created_at)+(o.source==='counter'?' • balcão':'')+'</p>'+
-    (o.scheduled_for?'<p class="t-box">AGENDADO: '+new Date(o.scheduled_for).toLocaleString('pt-BR',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</p>':'')+
-    '<p><b>'+esc(o.customer)+'</b><br>'+esc(o.phone)+'</p><p class="t-box">'+(o.mode==='delivery'?'ENTREGA'+(o.zone?' • '+esc(o.zone):'')+'<br>'+esc(o.address):'RETIRADA NO BALCÃO')+'</p><hr>'+
-    o.items.map(i=>'<div class="t-item"><b>'+i.quantity+'x '+esc(i.name)+'</b><span>'+money(i.unit_price*i.quantity)+'</span></div>'+i.extras.map(x=>'<div class="t-sub">+ '+esc(x.name)+'</div>').join('')+(i.notes?'<div class="t-sub">OBS: '+esc(i.notes)+'</div>':'')).join('')+
-    (o.notes?'<hr><p><b>Observações:</b> '+esc(o.notes)+'</p>':'')+'<hr>'+line('Produtos',money(o.subtotal))+(o.delivery_fee?line('Entrega',money(o.delivery_fee)):'')+(o.discount?line('Desconto','- '+money(o.discount)):'')+'<div class="t-line t-total"><span>TOTAL</span><span>'+money(o.total)+'</span></div>'+
-    line('Pagamento',pay[o.payment]+(o.paid?' (PAGO)':''))+(o.change_for?line('Troco para',money(o.change_for)):'')+'<p class="t-center t-foot">Pedido • documento não fiscal<br>SeuComércioAqui</p></div>';
+  const line=(a,b,cls='')=>'<div class="t-line'+cls+'"><span>'+a+'</span><span>'+b+'</span></div>';
+  const remaining=o.paid||o.payment==='credit'?0:(o.remaining_amount??o.total),received=o.paid?o.total:Math.max(0,o.total-remaining);
+  const kind=o.source==='counter'&&o.mode!=='delivery'?'BALCÃO':o.mode==='delivery'?'DELIVERY - ENTREGA':'DELIVERY - RETIRADA BALCÃO';
+  const when=new Date(o.created_at).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).replace(',','');
+  const printed=new Date().toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}).replace(',','');
+  return '<div class="ticket t-receipt"><p class="t-center t-head">'+kind+'<br>'+esc(store.name.toLocaleUpperCase('pt-BR'))+'</p>'+
+    (o.scheduled_for?'<p class="t-box t-center">AGENDADO: '+new Date(o.scheduled_for).toLocaleString('pt-BR',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</p>':'')+
+    '<p class="t-order">Pedido Nº: '+o.number+' - '+when+'<br>'+esc(o.customer)+' '+esc(ticketPhone(o.phone))+'</p>'+
+    (o.mode==='delivery'?'<p class="t-box">ENTREGA'+(o.zone?' • '+esc(o.zone):'')+'<br>'+esc(o.address)+'</p>':'')+
+    '<div class="t-cols"><span>PRODUTO</span><span>VENDA</span></div>'+
+    o.items.map(i=>'<div class="t-product"><div class="t-line"><b>'+esc(i.name)+'</b><b>'+money(i.unit_price*i.quantity)+'</b></div><div>'+i.quantity+'x UN '+money(i.unit_price)+'</div>'+ticketChoices(i.extras)+(i.notes?'<div class="t-opt">OBS: '+esc(i.notes)+'</div>':'')+'</div>').join('')+
+    (o.notes?'<p class="t-box">OBS. DO PEDIDO: '+esc(o.notes)+'</p>':'')+
+    '<div class="t-sums">'+line('Produtos',money(o.subtotal))+(o.delivery_fee?line('Entrega',money(o.delivery_fee)):'')+(o.discount?line('Desconto','- '+money(o.discount)):'')+'</div>'+
+    line('Valor total',money(o.total),' t-total')+line('Valor pago',money(received))+line('Cobrar do cliente',money(remaining),' t-due')+
+    '<p class="t-center t-pay">'+(pay[o.payment]||esc(o.payment))+(o.paid?' - JÁ PAGO':'')+(o.change_for&&!o.paid?'<br>Troco para '+money(o.change_for)+' (levar '+money(Math.max(0,o.change_for-remaining))+')':'')+'</p>'+
+    '<p class="t-center t-foot">'+printed+'<br>SeuComércioAqui • documento não fiscal</p></div>';
 }
 // Via do motoboy: só o que ele precisa na rua, em letra grande, com QR code que abre o endereço no mapa.
 function driverSlipHTML(o){
