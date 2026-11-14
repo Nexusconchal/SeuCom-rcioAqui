@@ -11,6 +11,16 @@ O painel usa `window.print()` e a impressão de páginas do Chrome/Edge. A escol
 
 Não há garantia de compatibilidade física com todas as impressoras. ECF fiscal, impressoras sem driver de páginas, dispositivos apenas RAW/serial, etiquetas e impressoras embutidas em terminais de pagamento exigem avaliação/conector específico. Esta função imprime pedido/documento não fiscal, sem emitir NFC-e/NF-e.
 
+## Agente de impressão (recomendado)
+
+Em **Imprimir notinha → Agente de impressão**, o lojista escolhe uma ou duas impressoras (começo do nome), o papel (80 mm = 42 colunas, 58 mm = 32) e se quer a via da cozinha, e clica em **Baixar agente de impressão**. O painel cria uma chave de integração só com a permissão `print:jobs` (e revoga as chaves de agente anteriores) e gera `Instalar-agente-impressao.bat`. O instalador, sem administrador:
+
+1. acha cada impressora pelo nome ou pede para escolher pelo número;
+2. imprime um **teste** na hora (falha aqui interrompe a instalação);
+3. grava `%LOCALAPPDATA%\SeuComercioAqui\agente-impressao.ps1`, coloca um atalho na pasta Inicializar e liga o agente escondido.
+
+O agente consulta `GET /api/v1/print/jobs?cols=N` a cada poucos segundos, imprime com `System.Drawing.Printing.PrintDocument` direto na impressora pelo nome (sem navegador, sem janela) e confirma com `POST /api/v1/print/jobs/<id>/done`. O servidor só entrega pedidos aceitos (preparo em diante) das últimas 6 horas, sem pagamento online pendente, já com as duas notinhas em texto; o primeiro contato marca o que já existia, para não imprimir pedidos antigos. O controle do que já saiu fica em `platform_settings` (`print.agent.<loja>`), sem tabela nova. Enquanto o agente faz contato (90 s), o painel não imprime pelo navegador, para não sair em dobro. O log fica em `agente-impressao.log` ao lado do script.
+
 ## Configurador do Windows (impressora certa, sem perguntar)
 
 Em **Imprimir notinha → Impressão automática no Windows**, o lojista informa o começo do nome da impressora de notinha (padrão `MP-`) e baixa `Configurar-impressora-notinha.bat`. O arquivo roda um PowerShell embutido, sem permissão de administrador:

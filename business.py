@@ -25,7 +25,7 @@ STATUS = {'new': 'Novo', 'preparing': 'Em preparo', 'ready': 'Pronto', 'deliveri
 
 def month_label(label):
     return MONTHS[int(label[5:]) - 1].capitalize() + ' de ' + label[:4]
-SCOPES = {'orders:read', 'deliveries:write'}
+SCOPES = {'orders:read', 'deliveries:write', 'print:jobs'}
 
 
 def start_of_period(days):

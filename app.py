@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import click
 from database import connect, initialize
 from business import register_business
+from print_agent import register_print_agent
 from inventory import register_inventory, recipe_map, recipe_info, ingredient_demand, reserve_ingredients, restore_ingredients, selected_quantities, option_availability
 from marketing import register_marketing
 from upsell import register_upsell, public_suggestions, attribution
@@ -1793,6 +1794,7 @@ def create_app(test_config=None):
     def public_base_static():
         return app.config["PUBLIC_URL"] or (request.host_url.rstrip("/") if has_request_context() else "")
 
+    register_print_agent(app, dict(db=db, owner=owner, transaction=transaction, now=now))
     register_order_flow(app, dict(db=db, one=one, owner=owner, owned=owned, data=data, text=text, boolean=boolean, transaction=transaction,
                                   limited=limited, now=now, public_base_static=public_base_static))
     register_support(app, dict(db=db, one=one, rows=rows, owner=owner, data=data, text=text, limited=limited, now=now))
