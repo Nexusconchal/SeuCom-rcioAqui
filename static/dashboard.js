@@ -123,7 +123,7 @@ async function watchOrders(){
     if(autoPrint()){
       try{
         const candidates=active.filter(o=>o.status==='preparing'&&(!onlineMethod(o)||o.paid||o.total===0));
-        candidates.forEach(o=>{const sector=printSector();if(!sector||o.items.some(i=>(i.production_sector||'Cozinha')===sector))enqueuePrint(o,sector?'sector:'+sector:'all');});
+        candidates.forEach(o=>{const what=autoPrintWhat(o);if(what)enqueuePrint(o,what);});
         if(printSeen)candidates.filter(o=>!printSeen.has(o.id)).slice().reverse().forEach(autoPrintTicket);
         else if(pendingPrints().length)toast('Há pendências de impressão. Abra Imprimir notinha e confira antes de repetir.');
         printSeen=new Set(candidates.map(o=>o.id));
@@ -137,8 +137,10 @@ async function watchOrders(){
 }
 function applyKioskPrinting(){
   try{const q=new URLSearchParams(location.search);if(q.get('impressao')==='automatica')localStorage.setItem('sca.kiosk-autoprint','1');
+    const via=q.get('via')||localStorage.getItem('sca.kiosk-via');
+    if(['tudo','balcao','cozinha'].includes(via)){localStorage.setItem('sca.kiosk-via',via);localStorage.setItem('sca.print-role',{tudo:'all',balcao:'counter',cozinha:'kitchen'}[via]);if(q.has('via')&&via==='cozinha')localStorage.setItem('sca.sound','0');}
     if(localStorage.getItem('sca.kiosk-autoprint')==='1'&&store){localStorage.setItem('sca.autoprint.'+store.id,'1');}
-    if(q.has('impressao')){q.delete('impressao');history.replaceState(null,'',location.pathname+(q.toString()?'?'+q:''));}}catch{}
+    if(q.has('impressao')||q.has('via')){q.delete('impressao');q.delete('via');history.replaceState(null,'',location.pathname+(q.toString()?'?'+q:''));}}catch{}
 }
 const autoPrint=()=>{try{return (localStorage.getItem('sca.autoprint.'+store.id)??localStorage.getItem('sca.autoprint'))==='1';}catch{return false;}};
 const b64=s=>{const p='='.repeat((4-s.length%4)%4);const raw=atob((s+p).replace(/-/g,'+').replace(/_/g,'/'));return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));};
@@ -224,14 +226,21 @@ function kitchenSlipHTML(o,sector){
    '<div class="t-dots"></div>'+items.map(i=>'<div class="t-kitem">'+i.quantity+' x '+esc(i.name.toLocaleUpperCase('pt-BR'))+'</div>'+ticketChoices(i.extras)+(i.notes?'<p class="t-box">OBS: '+esc(i.notes)+'</p>':'')).join('')+
    (o.notes?'<p class="t-box">OBS. DO PEDIDO: '+esc(o.notes)+'</p>':'')+'<div class="t-dots"></div></div>';
 }
+const printRole=()=>{const v=pref('print-role','all');return ['all','counter','kitchen'].includes(v)?v:'all';};
+// Qual via esta janela imprime sozinha: setor de produção, só cozinha, só balcão ou tudo. null = não imprime este pedido.
+function autoPrintWhat(o){
+  const sector=printSector();if(sector)return o.items.some(i=>(i.production_sector||'Cozinha')===sector)?'sector:'+sector:null;
+  return {kitchen:'kitchen',counter:'counter'}[printRole()]||'all';
+}
 const printSector=()=>{try{return localStorage.getItem('sca.print-sector.'+store.id)||'';}catch{return '';}};
-function autoPrintTicket(o){const sector=printSector();if(!sector)return printTicket(o,'all',false,true);if(o.items.some(i=>(i.production_sector||'Cozinha')===sector))printTicket(o,'sector:'+sector,false,true);}
+function autoPrintTicket(o){const what=autoPrintWhat(o);if(what)printTicket(o,what,false,true);}
 function printJobHTML(o,what='all'){
   const sector=typeof what==='string'&&what.startsWith('sector:')?what.slice(7):null;
   const slip=sector===null&&o.mode==='delivery'&&(what==='driver'||driverCopy());
   if(sector!==null)return kitchenSlipHTML(o,sector);
   if(what==='driver')return driverSlipHTML(o);
-  const kitchen=kitchenCopy()?kitchenSlipHTML(o,null):'';
+  if(what==='kitchen')return kitchenSlipHTML(o,null);
+  const kitchen=what!=='counter'&&kitchenCopy()?kitchenSlipHTML(o,null):'';
   return ticketHTML(o)+(kitchen?'<div class="t-cut"></div>'+kitchen:'')+(slip?'<div class="t-cut"></div>'+driverSlipHTML(o):'');
 }
 function calibrationHTML(){return '<div class="t-calibration"><b>TESTE DE IMPRESSÃO</b><p>Acentos: pão, ação, açúcar, café.<br>Valores: R$ 12,34 • 2 × produto.</p><div class="t-ruler">20 mm</div><p>Confira a linha com uma régua. Se cortar texto, reduza a área útil; se a linha mudar de tamanho, confira a escala de 100% no navegador.</p></div>';}
@@ -253,53 +262,72 @@ function alertsPanel(){
     '<div class="alert-row"><div><b>Impressora de notinha</b><p class="muted">A impressão agora tem uma página só dela no menu.</p></div><button type="button" class="btn secondary" data-goto="printing">'+icon('print')+' Imprimir notinha</button></div></section>';
 }
 // Configurador do Windows: escolhe a impressora pelo nome e grava como destino do Chrome de impressão (perfil separado).
-function printerInstaller(pattern,startup){
+function printerInstaller(pattern,startup,kitchenPattern=''){
   const ps=s=>String(s).replace(/'/g,"''");
   const url=location.origin+'/painel?impressao=automatica';
   const code=[
     "$ErrorActionPreference='Stop'",
-    "$Pattern='"+ps(pattern)+"'","$Url='"+ps(url)+"'","$Startup="+(startup?'$true':'$false'),
+    "$Pattern='"+ps(pattern)+"'","$KitchenPattern='"+ps(kitchenPattern)+"'","$Two="+(kitchenPattern?'$true':'$false'),
+    "$Url='"+ps(url)+"'","$Startup="+(startup?'$true':'$false'),
     "Write-Host ''","Write-Host 'SeuComercioAqui - configurar impressao automatica da notinha' -ForegroundColor Green","Write-Host ''",
     "$printers=@(Get-Printer | Select-Object -ExpandProperty Name | Sort-Object)",
     "if($printers.Count -eq 0){Write-Host 'Nenhuma impressora instalada. Instale o driver da impressora de notinha e rode de novo.' -ForegroundColor Red; exit 1}",
-    "$match=@($printers | Where-Object { $_ -like ($Pattern+'*') })",
-    "if($match.Count -eq 0){$match=@($printers | Where-Object { $_ -like ('*'+$Pattern+'*') })}",
-    "if($match.Count -eq 1){$printer=$match[0]} else {",
-    "  if($match.Count -gt 1){Write-Host ('Achei mais de uma impressora com '+$Pattern+'.') -ForegroundColor Yellow} else {Write-Host ('Nao achei impressora que comece com '+$Pattern+'.') -ForegroundColor Yellow}",
-    "  Write-Host 'Escolha a impressora de NOTINHA (nao a de folha A4):'",
-    "  for($i=0;$i -lt $printers.Count;$i++){Write-Host ('  '+($i+1)+' - '+$printers[$i])}",
-    "  do{$n=Read-Host 'Digite o numero e aperte Enter'}until($n -match '^[0-9]+$' -and [int]$n -ge 1 -and [int]$n -le $printers.Count)",
-    "  $printer=$printers[[int]$n-1]",
+    "function Pick($pat,$label,$skip){",
+    "  $list=@($printers | Where-Object { $_ -ne $skip })",
+    "  if($list.Count -eq 0){Write-Host 'Nao sobrou outra impressora para escolher.' -ForegroundColor Red; exit 1}",
+    "  $match=@($list | Where-Object { $pat -and $_ -like ($pat+'*') })",
+    "  if($match.Count -eq 0){$match=@($list | Where-Object { $pat -and $_ -like ('*'+$pat+'*') })}",
+    "  if($match.Count -eq 1){Write-Host ('Impressora '+$label+': '+$match[0]) -ForegroundColor Green; return $match[0]}",
+    "  if($match.Count -gt 1){Write-Host ('Achei mais de uma impressora com '+$pat+'.') -ForegroundColor Yellow} else {Write-Host ('Nao achei impressora que comece com '+$pat+'.') -ForegroundColor Yellow}",
+    "  Write-Host ('Escolha a impressora '+$label+':')",
+    "  for($i=0;$i -lt $list.Count;$i++){Write-Host ('  '+($i+1)+' - '+$list[$i])}",
+    "  do{$n=Read-Host 'Digite o numero e aperte Enter'}until($n -match '^[0-9]+$' -and [int]$n -ge 1 -and [int]$n -le $list.Count)",
+    "  $chosen=$list[[int]$n-1]; Write-Host ('Impressora '+$label+': '+$chosen) -ForegroundColor Green; return $chosen",
     "}",
-    "Write-Host ('Impressora de notinha: '+$printer) -ForegroundColor Green",
     "$roots=@($env:ProgramFiles,${env:ProgramFiles(x86)},$env:LOCALAPPDATA) | Where-Object { $_ }",
     "$browsers=@(foreach($r in $roots){(Join-Path $r 'Google\\Chrome\\Application\\chrome.exe')}; foreach($r in $roots){(Join-Path $r 'Microsoft\\Edge\\Application\\msedge.exe')})",
     "$browser=$browsers | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1",
     "if(-not $browser){Write-Host 'Nao achei o Google Chrome nem o Microsoft Edge. Instale o Chrome e rode de novo.' -ForegroundColor Red; exit 1}",
-    "$dir=Join-Path $env:LOCALAPPDATA 'SeuComercioAqui\\ImpressaoAutomatica'",
-    "$def=Join-Path $dir 'Default'",
-    "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -like ('*'+$dir+'*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
-    "Start-Sleep -Seconds 1",
-    "New-Item -ItemType Directory -Force -Path $def | Out-Null",
-    "$file=Join-Path $def 'Preferences'",
-    "$prefs=$null; if(Test-Path $file){try{$prefs=Get-Content -Raw -LiteralPath $file | ConvertFrom-Json}catch{$prefs=$null}}",
-    "if(-not $prefs){$prefs=New-Object PSObject}",
-    "$dest=[ordered]@{id=$printer;origin='local';account='';capabilities='';displayName=$printer;extensionId='';extensionName=''}",
-    "$state=[ordered]@{version=2;recentDestinations=@($dest);isHeaderFooterEnabled=$false;marginsType=0;scaling='100';scalingType=0;isCssBackgroundEnabled=$true}",
-    "$appState=ConvertTo-Json -InputObject $state -Compress -Depth 6",
-    "if(-not $prefs.PSObject.Properties['printing']){$prefs | Add-Member -NotePropertyName printing -NotePropertyValue (New-Object PSObject)}",
-    "$prefs.printing | Add-Member -NotePropertyName print_preview_sticky_settings -NotePropertyValue ([pscustomobject]@{appState=$appState}) -Force",
-    "if(-not $prefs.PSObject.Properties['browser']){$prefs | Add-Member -NotePropertyName browser -NotePropertyValue (New-Object PSObject)}",
-    "$prefs.browser | Add-Member -NotePropertyName has_seen_welcome_page -NotePropertyValue $true -Force",
-    "[IO.File]::WriteAllText($file,(ConvertTo-Json -InputObject $prefs -Compress -Depth 60),(New-Object Text.UTF8Encoding $false))",
-    "$flags='--kiosk-printing --user-data-dir=\"'+$dir+'\" --no-first-run --no-default-browser-check \"'+$Url+'\"'",
     "$shell=New-Object -ComObject WScript.Shell",
     "$places=@([Environment]::GetFolderPath('Desktop')); if($Startup){$places+=[Environment]::GetFolderPath('Startup')}",
-    "foreach($place in $places){$link=$shell.CreateShortcut((Join-Path $place 'Painel de pedidos.lnk'));$link.TargetPath=$browser;$link.Arguments=$flags;$link.IconLocation=$browser+',0';$link.Description='Painel do SeuComercioAqui com impressao automatica';$link.Save()}",
-    "Write-Host ''","Write-Host 'Pronto! Criei o atalho Painel de pedidos na Area de Trabalho.' -ForegroundColor Green",
-    "Write-Host 'Agora vou abrir o painel: entre com seu e-mail e senha e clique em Imprimir notinha > Imprimir teste.'",
-    "Write-Host ('A notinha deve sair na '+$printer+' sem perguntar.')",
-    "Start-Process -FilePath $browser -ArgumentList $flags"
+    "function Setup($printer,$folder,$via,$name){",
+    "  $dir=Join-Path $env:LOCALAPPDATA ('SeuComercioAqui\\'+$folder)",
+    "  $def=Join-Path $dir 'Default'",
+    "  Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -like ('*'+$dir+'*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+    "  Start-Sleep -Seconds 1",
+    "  New-Item -ItemType Directory -Force -Path $def | Out-Null",
+    "  $file=Join-Path $def 'Preferences'",
+    "  $prefs=$null; if(Test-Path $file){try{$prefs=Get-Content -Raw -LiteralPath $file | ConvertFrom-Json}catch{$prefs=$null}}",
+    "  if(-not $prefs){$prefs=New-Object PSObject}",
+    "  $dest=[ordered]@{id=$printer;origin='local';account='';capabilities='';displayName=$printer;extensionId='';extensionName=''}",
+    "  $state=[ordered]@{version=2;recentDestinations=@($dest);isHeaderFooterEnabled=$false;marginsType=0;scaling='100';scalingType=0;isCssBackgroundEnabled=$true}",
+    "  $appState=ConvertTo-Json -InputObject $state -Compress -Depth 6",
+    "  if(-not $prefs.PSObject.Properties['printing']){$prefs | Add-Member -NotePropertyName printing -NotePropertyValue (New-Object PSObject)}",
+    "  $prefs.printing | Add-Member -NotePropertyName print_preview_sticky_settings -NotePropertyValue ([pscustomobject]@{appState=$appState}) -Force",
+    "  if(-not $prefs.PSObject.Properties['browser']){$prefs | Add-Member -NotePropertyName browser -NotePropertyValue (New-Object PSObject)}",
+    "  $prefs.browser | Add-Member -NotePropertyName has_seen_welcome_page -NotePropertyValue $true -Force",
+    "  [IO.File]::WriteAllText($file,(ConvertTo-Json -InputObject $prefs -Compress -Depth 60),(New-Object Text.UTF8Encoding $false))",
+    "  $flags='--kiosk-printing --user-data-dir=\"'+$dir+'\" --no-first-run --no-default-browser-check \"'+$Url+'&via='+$via+'\"'",
+    "  foreach($place in $places){$link=$shell.CreateShortcut((Join-Path $place ($name+'.lnk')));$link.TargetPath=$browser;$link.Arguments=$flags;$link.IconLocation=$browser+',0';$link.Description='Painel do SeuComercioAqui com impressao automatica';$link.Save()}",
+    "  return $flags",
+    "}",
+    "if($Two){",
+    "  $counter=Pick $Pattern 'do BALCAO (notinha do cliente)' ''",
+    "  $kitchen=Pick $KitchenPattern 'da COZINHA' $counter",
+    "  $f1=Setup $counter 'ImpressaoBalcao' 'balcao' 'Painel de pedidos'",
+    "  $f2=Setup $kitchen 'ImpressaoCozinha' 'cozinha' 'Painel da cozinha'",
+    "  Write-Host ''","  Write-Host 'Pronto! Criei os atalhos Painel de pedidos (balcao) e Painel da cozinha na Area de Trabalho.' -ForegroundColor Green",
+    "  Write-Host 'Vou abrir as duas janelas: entre com seu e-mail e senha em cada uma e clique em Imprimir notinha > Imprimir teste.'",
+    "  Write-Host ('Balcao: '+$counter+'  |  Cozinha: '+$kitchen)",
+    "  Start-Process -FilePath $browser -ArgumentList $f1; Start-Sleep -Seconds 2; Start-Process -FilePath $browser -ArgumentList $f2",
+    "} else {",
+    "  $printer=Pick $Pattern 'de NOTINHA (nao a de folha A4)' ''",
+    "  $f=Setup $printer 'ImpressaoAutomatica' 'tudo' 'Painel de pedidos'",
+    "  Write-Host ''","  Write-Host 'Pronto! Criei o atalho Painel de pedidos na Area de Trabalho.' -ForegroundColor Green",
+    "  Write-Host 'Vou abrir o painel: entre com seu e-mail e senha e clique em Imprimir notinha > Imprimir teste.'",
+    "  Write-Host ('As duas notinhas (cliente e cozinha) devem sair na '+$printer+' sem perguntar.')",
+    "  Start-Process -FilePath $browser -ArgumentList $f",
+    "}"
   ].join('\r\n');
   return '@echo off\r\ntitle Configurar impressora de notinha - SeuComercioAqui\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "$t=[IO.File]::ReadAllText(\'%~f0\');iex ($t.Substring($t.LastIndexOf([string][char]35+\'PS\'+[char]35)+4))"\r\necho.\r\npause\r\nexit /b\r\n#PS#\r\n'+code+'\r\n';
 }
@@ -307,6 +335,7 @@ function printPanel(){
   const chromeCmd='"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --kiosk-printing '+location.origin+'/painel';
   const settings='<section class="panel print-settings-panel" id="print-panel"><div class="section-heading"><div><span class="eyebrow">DO SEU JEITO</span><h2>Impressora de notinha</h2><p class="muted">Preferências salvas neste navegador.</p></div><span class="feature-icon">'+icon('gear')+'</span></div>'+
     '<div class="alert-row"><div><b>Imprimir automaticamente cada pedido novo</b><p class="muted">A notinha sai assim que o pedido é aceito (vai para preparo), com o painel aberto. Veja abaixo como imprimir sem a janela de confirmação.</p></div><label class="switch"><input type="checkbox" id="autoprint" '+(autoPrint()?'checked':'')+'><span>'+(autoPrint()?'Ligado':'Desligado')+'</span></label></div>'+
+    '<div class="alert-row"><div><b>Este computador imprime</b><p class="muted">Com uma impressora, deixe tudo nela. Com duas, a janela do balcão imprime a notinha do cliente e a janela da cozinha imprime só a via da cozinha (o configurador abaixo já deixa cada uma certa).</p></div><select id="print-role" aria-label="O que este computador imprime"><option value="all" '+(printRole()==='all'?'selected':'')+'>Tudo: cliente e cozinha</option><option value="counter" '+(printRole()==='counter'?'selected':'')+'>Só a notinha do balcão (cliente)</option><option value="kitchen" '+(printRole()==='kitchen'?'selected':'')+'>Só a via da cozinha</option></select></div>'+
     '<div class="alert-row"><div><b>Setor neste aparelho</b><p class="muted">Deixe vazio para a notinha completa. Informe o mesmo setor do cadastro dos produtos para imprimir apenas a produção desse setor.</p></div><input id="print-sector" aria-label="Setor de impressão automática" maxlength="60" value="'+esc(printSector())+'" placeholder="Ex.: Cozinha ou Bar"></div>'+
     '<div class="alert-row"><div><b>Papel da impressora</b><p class="muted">Escolha o mesmo tamanho configurado no driver do Windows. Para outro tamanho, use Outra largura e ajuste a área útil abaixo.</p></div><select id="paper-width" aria-label="Largura do papel">'+Object.entries(printProfiles).map(([key,p])=>'<option value="'+key+'" '+(paperWidth()===key?'selected':'')+'>'+p.label+'</option>').join('')+'</select></div>'+
     '<div class="alert-row"><div><b>Área útil de impressão</b><p class="muted">Largura ocupada pelo texto em milímetros. Se cortar nas laterais, reduza este valor e imprima outro teste.</p></div><label class="print-number"><input type="number" id="print-content-width" aria-label="Área útil de impressão em milímetros" min="32" max="'+printProfiles[paperWidth()].max+'" step="0.5" value="'+printContentWidth()+'"><span>mm</span></label></div>'+
@@ -314,9 +343,12 @@ function printPanel(){
     '<div class="alert-row"><div><b>Via da cozinha</b><p class="muted">Junto com a notinha do cliente sai uma segunda, só com os itens e as escolhas em letra grande, para quem prepara.</p></div><label class="switch"><input type="checkbox" id="kitchenslip" '+(kitchenCopy()?'checked':'')+'><span>'+(kitchenCopy()?'Ligado':'Desligado')+'</span></label></div>'+
     '<div class="alert-row"><div><b>Via do motoboy</b><p class="muted">Nos pedidos de entrega, sai uma segunda notinha com o endereço em letra grande, QR code do mapa e quanto cobrar (com o troco).</p></div><label class="switch"><input type="checkbox" id="driverslip" '+(driverCopy()?'checked':'')+'><span>'+(driverCopy()?'Ligado':'Desligado')+'</span></label></div>'+
     '</section>';
-  const installer='<section class="panel print-installer" id="print-installer"><div class="section-heading"><div><span class="eyebrow">SEM PERGUNTAR, NA IMPRESSORA CERTA</span><h2>Impressão automática no Windows</h2><p class="muted">O configurador procura a impressora de notinha pelo começo do nome e cria na Área de Trabalho o atalho <b>Painel de pedidos</b>. Esse atalho abre o painel num Chrome separado que imprime direto e só nessa impressora. A impressora padrão do Windows, a de folha A4 e o Chrome normal não mudam.</p></div><span class="feature-icon">'+icon('print')+'</span></div>'+
-    '<div class="form-grid"><label>A impressora de notinha começa com<input id="printer-pattern" maxlength="40" value="'+esc(pref('printer-pattern','MP-'))+'" placeholder="Ex.: MP-, ELGIN, EPSON TM"></label><label class="check-row installer-startup"><span><input type="checkbox" id="printer-startup" checked> Abrir o painel sozinho quando ligar o computador</span></label></div>'+
-    '<ol class="steps"><li>Clique em <b>Baixar configurador</b> e abra o arquivo baixado (se o Windows avisar, clique em <b>Mais informações → Executar assim mesmo</b>).</li><li>Se houver mais de uma impressora com esse nome, ou nenhuma, ele mostra a lista para escolher pelo número. Escolha a de <b>notinha</b>, não a de folha.</li><li>No painel que abrir, entre com seu e-mail e senha uma vez e clique em <b>Imprimir teste</b>: deve sair na impressora de notinha, sem perguntar.</li><li>Use sempre o atalho <b>Painel de pedidos</b> para receber pedidos.</li></ol>'+
+  const two=pref('printer-count','1')==='2';
+  const installer='<section class="panel print-installer" id="print-installer"><div class="section-heading"><div><span class="eyebrow">SEM PERGUNTAR, NA IMPRESSORA CERTA</span><h2>Impressão automática no Windows</h2><p class="muted">Escolha quantas impressoras de notinha este computador tem e o começo do nome de cada uma. O configurador acha cada impressora e cria um atalho preso a ela, que imprime direto, sem perguntar. A impressora padrão do Windows, a de folha A4 e o Chrome normal não mudam.</p></div><span class="feature-icon">'+icon('print')+'</span></div>'+
+    '<div class="choice-row printer-count" role="radiogroup" aria-label="Quantas impressoras de notinha"><label><input type="radio" name="printer-count" value="1" '+(two?'':'checked')+'> Uma impressora: sai a notinha do cliente e a da cozinha nela</label><label><input type="radio" name="printer-count" value="2" '+(two?'checked':'')+'> Duas impressoras: cliente no balcão e cozinha na cozinha</label></div>'+
+    '<div class="form-grid"><label><span id="printer-pattern-label">'+(two?'Impressora do balcão começa com':'A impressora de notinha começa com')+'</span><input id="printer-pattern" maxlength="40" value="'+esc(pref('printer-pattern','MP-'))+'" placeholder="Ex.: MP-, ELGIN, EPSON TM"></label><label id="kitchen-pattern-field" '+(two?'':'hidden')+'>Impressora da cozinha começa com<input id="printer-pattern-kitchen" maxlength="40" value="'+esc(pref('printer-pattern-kitchen',''))+'" placeholder="Ex.: ELGIN i9"></label></div>'+
+    '<label class="check-row installer-startup"><span><input type="checkbox" id="printer-startup" checked> Abrir o painel sozinho quando ligar o computador</span></label>'+
+    '<ol class="steps"><li>Clique em <b>Baixar configurador</b> e abra o arquivo baixado (se o Windows avisar, clique em <b>Mais informações → Executar assim mesmo</b>).</li><li>Se o nome não bater com uma impressora só, ele mostra a lista para escolher pelo número. Escolha a de <b>notinha</b>, não a de folha.</li><li>Com uma impressora, abre o atalho <b>Painel de pedidos</b>. Com duas, abre também o <b>Painel da cozinha</b>. Entre com seu e-mail e senha em cada janela uma vez e clique em <b>Imprimir teste</b>.</li><li>Deixe as janelas abertas para receber pedidos. Elas abrem sozinhas quando o computador liga.</li></ol>'+
     '<button type="button" class="btn" id="download-installer">'+icon('print')+' Baixar configurador</button></section>';
   const help='<section class="panel print-help-panel">'+
     '<details class="help print-help"><summary>Como configurar a impressora de notinha</summary>'+
@@ -355,6 +387,7 @@ function bindPrintPanel(){
   });
   $('#print-sector').onchange=e=>{try{localStorage.setItem('sca.print-sector.'+store.id,e.target.value.trim());toast('Setor de impressão atualizado neste aparelho.');}catch{toast('Não consegui salvar a preferência neste navegador.');}};
   $('#autoprint').onchange=e=>{setPref('autoprint',e.target.checked?'1':'0');e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';if(e.target.checked){printSeen=null;watchOrders();toast('Pedidos novos serão impressos com o painel aberto. Confira as pendências anteriores no histórico.');}};
+  $('#print-role').onchange=e=>{setPref('print-role',e.target.value);toast({all:'Este computador imprime tudo.',counter:'Este computador imprime só a notinha do balcão.',kitchen:'Este computador imprime só a via da cozinha.'}[e.target.value]);};
   $('#kitchenslip').onchange=e=>{setPref('kitchenslip',e.target.checked?'1':'0');e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';};
   $('#driverslip').onchange=e=>{setPref('driverslip',e.target.checked?'1':'0');e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';};
   $('#paper-width').onchange=e=>{setPref('paper',e.target.value);const input=$('#print-content-width');input.max=printProfiles[paperWidth()].max;input.value=printContentWidth();$('#print-font').value=printFont();toast(printProfiles[paperWidth()].label+' neste aparelho.');};
@@ -364,8 +397,12 @@ function bindPrintPanel(){
   $('#print-test').onclick=()=>printTicket(sampleOrder(),'all',true);
   $('#copy-kiosk').onclick=()=>copy($('#kiosk-cmd').textContent);
   $('#printer-pattern').onchange=e=>setPref('printer-pattern',e.target.value.trim()||'MP-');
-  $('#download-installer').onclick=()=>{const pattern=$('#printer-pattern').value.trim()||'MP-';setPref('printer-pattern',pattern);
-    const blob=new Blob([printerInstaller(pattern,$('#printer-startup').checked)],{type:'application/octet-stream'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='Configurar-impressora-notinha.bat';document.body.append(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
+  $('#printer-pattern-kitchen').onchange=e=>setPref('printer-pattern-kitchen',e.target.value.trim());
+  $$('[name=printer-count]').forEach(r=>r.onchange=()=>{const two=r.value==='2'&&r.checked;setPref('printer-count',two?'2':'1');$('#kitchen-pattern-field').hidden=!two;$('#printer-pattern-label').textContent=two?'Impressora do balcão começa com':'A impressora de notinha começa com';});
+  $('#download-installer').onclick=()=>{const pattern=$('#printer-pattern').value.trim()||'MP-',kitchen=$('#printer-pattern-kitchen').value.trim(),two=$('[name=printer-count][value="2"]').checked;
+    if(two&&!kitchen){toast('Informe o começo do nome da impressora da cozinha.');$('#printer-pattern-kitchen').focus();return;}
+    setPref('printer-pattern',pattern);setPref('printer-pattern-kitchen',kitchen);setPref('printer-count',two?'2':'1');
+    const blob=new Blob([printerInstaller(pattern,$('#printer-startup').checked,two?kitchen:'')],{type:'application/octet-stream'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='Configurar-impressora-notinha.bat';document.body.append(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
     toast('Configurador baixado. Abra o arquivo no computador da impressora.');};
   $$('#print-panel input,#print-panel select').forEach(input=>input.addEventListener('change',updatePrintPreview));
 }
