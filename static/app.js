@@ -3,6 +3,8 @@ import { $, icon, brand, auth, bootstrap, api, bindForm, esc, toast } from './ui
 async function start(){
   try{
     await bootstrap();
+    // Atalho do configurador de impressão: guarda a marca antes de qualquer ida para o login.
+    try{if(new URLSearchParams(location.search).get('impressao')==='automatica')localStorage.setItem('sca.kiosk-autoprint','1');}catch{}
     const path=location.pathname.split('/').filter(Boolean);
     if(path[0]==='rede')return await (await import('./network.js')).networkPage(path[1]||'');
     if(path[0]==='entregador')return await (await import('./delivery.js')).driverPage();

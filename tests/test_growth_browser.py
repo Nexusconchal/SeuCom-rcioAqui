@@ -90,6 +90,8 @@ def test_recipes_suggestions_checkout_consent_and_campaign_preview(live, tmp_pat
         customer.get_by_role('button', name='Adicionar •').click()
         customer.get_by_role('button', name='Ver minha sacola').click()
         customer.get_by_role('button', name='Continuar pedido').click()
+        # Quem já pediu vê os dados lembrados em resumo; Editar abre os campos para outro cliente.
+        customer.locator('#edit-saved').click()
         customer.get_by_label('Seu nome', exact=True).fill('Cliente Sacola Salva')
         customer.get_by_label('WhatsApp com DDD').fill('11988887777')
         with customer.expect_response(lambda r: r.url.endswith('/shopping') and r.request.post_data_json.get('recovery_consent') is True):
@@ -112,6 +114,9 @@ def test_recipes_suggestions_checkout_consent_and_campaign_preview(live, tmp_pat
         recovered.get_by_role('button', name='Continuar com a sacola salva', exact=True).click()
         expect(recovered.locator('.cart-line')).to_contain_text('Burger da casa')
         recovered.get_by_role('button', name='Continuar pedido').click()
+        expect(recovered.locator('#checkout-form')).to_be_visible()
+        if recovered.locator('#edit-saved').is_visible():
+            recovered.locator('#edit-saved').click()
         recovered.get_by_label('Seu nome', exact=True).fill('Cliente Sacola Salva')
         recovered.get_by_label('WhatsApp com DDD').fill('11988887777')
         recovered.get_by_label('Endereço completo').fill('Rua de Teste, 15, Centro')
