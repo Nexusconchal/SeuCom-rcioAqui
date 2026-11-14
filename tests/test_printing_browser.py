@@ -48,7 +48,7 @@ def test_printer_profiles_layout_queue_and_cancel(live):
             assert page.evaluate('window.printJobs.at(-1).width') == str(width)+'mm'
             page.emulate_media(media='print')
             assert page.locator('#app').evaluate('(e)=>getComputedStyle(e).display') == 'none'
-            assert page.locator('#print-area .ticket').count() == 2
+            assert page.locator('#print-area .ticket').count() == 3  # cliente, cozinha e motoboy
             assert page.locator('#print-area').evaluate("""root=>[...root.querySelectorAll('.ticket,.t-calibration')].every(ticket=>{
                 const box=ticket.getBoundingClientRect();return [...ticket.querySelectorAll('*')].every(e=>{
                     const b=e.getBoundingClientRect();return b.right<=box.right+1&&b.left>=box.left-1;

@@ -24,7 +24,7 @@ export async function renderDashboard(){
   bindQuickNavigation(switchTab,store.id+'.'+auth.user.id);
   $('#logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'});location.href='/entrar';}catch(e){toast(e.message);}};
   $('#store-toggle').onclick=async()=>{try{const result=await api('/api/admin/store/open',{method:'POST',body:JSON.stringify({open:!store.open})});store=result.store;updateStoreButton();toast(store.open?'Loja aberta para pedidos.':'Loja fechada.');platformNotices();}catch(e){toast(e.message);}};
-  updateStoreButton();updateSoundButton();installConnectionNotice();
+  applyKioskPrinting();updateStoreButton();updateSoundButton();installConnectionNotice();
   document.addEventListener('pointerdown',unlockAudio,{once:true});
   $('#sound-toggle').onclick=()=>{try{localStorage.setItem('sca.sound',soundOn()?'0':'1');}catch{}unlockAudio();updateSoundButton();
     if(soundOn()){chime();if('Notification' in window&&Notification.permission==='default')Notification.requestPermission().catch(()=>{});}
@@ -62,6 +62,8 @@ function setAlarm(waiting){
   const sound=$('[data-alarm-sound]',bar);if(sound)sound.onclick=()=>{unlockAudio();setTimeout(()=>{chime();setAlarm(alarmOrders);},150);};
   if(!alarmTimer){chime();alarmTimer=setInterval(()=>{if(alarmOrders.length)chime();},2500);}
 }
+// Apita algumas vezes seguidas (pedido aceito sozinho não espera clique, então o aviso precisa chamar atenção).
+function ring(times){chime();for(let i=1;i<times;i++)setTimeout(chime,i*1600);}
 function tone(notes,type='sine'){
   if(!soundOn()||!audio)return;
   notes.forEach(([freq,delay])=>{const o=audio.createOscillator(),g=audio.createGain();o.type=type;o.frequency.value=freq;
@@ -113,8 +115,8 @@ async function watchOrders(){
     setAlarm(list.filter(o=>!onlineMethod(o)||o.paid||o.total===0));
     const moved=motojaWatch(active);
     if(moved&&['overview','orders','drivers'].includes(tab))switchTab(tab,true);
-    if(seen){const fresh=list.filter(o=>!seen.has(o.id));if(fresh.length){
-      if(!alarmTimer)chime();const first=fresh[0];toast(fresh.length>1?fresh.length+' novos pedidos chegaram!':'Novo pedido #'+first.number+' • '+money(first.total));
+    if(seen){const fresh=active.filter(o=>!seen.has(o.id)&&['new','preparing'].includes(o.status));if(fresh.length){
+      if(!alarmTimer)ring(fresh.some(o=>o.status==='preparing')?4:1);const first=fresh[0];toast(fresh.length>1?fresh.length+' novos pedidos chegaram!':'Novo pedido #'+first.number+' • '+money(first.total));
       if('Notification' in window&&Notification.permission==='granted'&&document.hidden){try{new Notification('Novo pedido #'+first.number,{body:first.customer+' • '+money(first.total),icon:'/static/icon-192.png',tag:'pedido-'+first.id});}catch{}}
       if(['overview','orders','kitchen'].includes(tab))switchTab(tab,true);
     }}
@@ -132,6 +134,11 @@ async function watchOrders(){
     seen=new Set(active.map(o=>o.id));document.title=(list.length?'('+list.length+') ':'')+'Painel • '+store.name;
   }catch(e){if(e.status===401){location.href='/entrar';return;}}finally{watchBusy=false;}
   watchTimer=setTimeout(watchOrders,alarmOrders.length?4000:15000);
+}
+function applyKioskPrinting(){
+  try{const q=new URLSearchParams(location.search);if(q.get('impressao')==='automatica')localStorage.setItem('sca.kiosk-autoprint','1');
+    if(localStorage.getItem('sca.kiosk-autoprint')==='1'&&store){localStorage.setItem('sca.autoprint.'+store.id,'1');}
+    if(q.has('impressao')){q.delete('impressao');history.replaceState(null,'',location.pathname+(q.toString()?'?'+q:''));}}catch{}
 }
 const autoPrint=()=>{try{return (localStorage.getItem('sca.autoprint.'+store.id)??localStorage.getItem('sca.autoprint'))==='1';}catch{return false;}};
 const b64=s=>{const p='='.repeat((4-s.length%4)%4);const raw=atob((s+p).replace(/-/g,'+').replace(/_/g,'/'));return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));};
@@ -206,16 +213,26 @@ function styleTicketArea(area,settings={paper:paperWidth(),width:printContentWid
 }
 const driverCopy=()=>pref('driverslip','0')==='1';
 // what: 'all' = notinha da loja (+ via do motoboy, se ligada e for entrega); 'driver' = só a via do motoboy.
+const kitchenCopy=()=>pref('kitchenslip','1')==='1';
+// Via da cozinha: só o que a produção precisa, em letra grande, com as escolhas agrupadas.
 function kitchenSlipHTML(o,sector){
  const items=o.items.filter(i=>!sector||(i.production_sector||'Cozinha')===sector);if(!items.length)return '';
- return '<div class="ticket"><p class="t-tag">PRODUÇÃO • '+esc(sector||'Todos os setores')+'</p><h1>'+esc(store.name)+'</h1><p class="t-center t-big">PEDIDO #'+o.number+'</p><p>'+esc(o.customer)+' • '+date(o.created_at)+'</p>'+items.map(i=>'<div class="t-item"><b>'+i.quantity+' × '+esc(i.name)+'</b></div>'+i.extras.map(x=>'<div class="t-sub">'+esc(x.name)+'</div>').join('')+(i.notes?'<p class="t-box">'+esc(i.notes)+'</p>':'')).join('')+(o.notes?'<p class="t-box">'+esc(o.notes)+'</p>':'')+'</div>';
+ const kind=o.source==='counter'&&o.mode!=='delivery'?'BALCÃO':o.mode==='delivery'?'DELIVERY - ENTREGA':'DELIVERY - RETIRADA BALCÃO';
+ const printed=new Date().toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}).replace(',','');
+ return '<div class="ticket t-receipt t-kitchen"><p class="t-center t-head">'+kind+(sector?' • '+esc(sector.toLocaleUpperCase('pt-BR')):' (COZINHA)')+'<br>'+esc(o.customer)+'<br>Pedido Nº: '+o.number+'<br>Impresso: '+printed+'</p>'+
+   (o.scheduled_for?'<p class="t-box t-center">AGENDADO: '+new Date(o.scheduled_for).toLocaleString('pt-BR',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})+'</p>':'')+
+   '<div class="t-dots"></div>'+items.map(i=>'<div class="t-kitem">'+i.quantity+' x '+esc(i.name.toLocaleUpperCase('pt-BR'))+'</div>'+ticketChoices(i.extras)+(i.notes?'<p class="t-box">OBS: '+esc(i.notes)+'</p>':'')).join('')+
+   (o.notes?'<p class="t-box">OBS. DO PEDIDO: '+esc(o.notes)+'</p>':'')+'<div class="t-dots"></div></div>';
 }
 const printSector=()=>{try{return localStorage.getItem('sca.print-sector.'+store.id)||'';}catch{return '';}};
 function autoPrintTicket(o){const sector=printSector();if(!sector)return printTicket(o,'all',false,true);if(o.items.some(i=>(i.production_sector||'Cozinha')===sector))printTicket(o,'sector:'+sector,false,true);}
 function printJobHTML(o,what='all'){
   const sector=typeof what==='string'&&what.startsWith('sector:')?what.slice(7):null;
   const slip=sector===null&&o.mode==='delivery'&&(what==='driver'||driverCopy());
-  return sector!==null?kitchenSlipHTML(o,sector):(what==='driver'?'':ticketHTML(o))+(slip?(what==='driver'?'':'<div class="t-cut"></div>')+driverSlipHTML(o):'');
+  if(sector!==null)return kitchenSlipHTML(o,sector);
+  if(what==='driver')return driverSlipHTML(o);
+  const kitchen=kitchenCopy()?kitchenSlipHTML(o,null):'';
+  return ticketHTML(o)+(kitchen?'<div class="t-cut"></div>'+kitchen:'')+(slip?'<div class="t-cut"></div>'+driverSlipHTML(o):'');
 }
 function calibrationHTML(){return '<div class="t-calibration"><b>TESTE DE IMPRESSÃO</b><p>Acentos: pão, ação, açúcar, café.<br>Valores: R$ 12,34 • 2 × produto.</p><div class="t-ruler">20 mm</div><p>Confira a linha com uma régua. Se cortar texto, reduza a área útil; se a linha mudar de tamanho, confira a escala de 100% no navegador.</p></div>';}
 function printTicket(o,what='all',calibration=false,automatic=false){
@@ -235,6 +252,57 @@ function alertsPanel(){
     '<div class="alert-row"><div><b>Aviso de pedido novo, mesmo com o painel fechado</b><p class="muted" id="push-status">Verificando…</p></div><div class="row-actions"><button type="button" class="btn" id="push-toggle">Ativar avisos</button><button type="button" class="btn secondary" id="push-test" hidden>Testar</button></div></div>'+
     '<div class="alert-row"><div><b>Impressora de notinha</b><p class="muted">A impressão agora tem uma página só dela no menu.</p></div><button type="button" class="btn secondary" data-goto="printing">'+icon('print')+' Imprimir notinha</button></div></section>';
 }
+// Configurador do Windows: escolhe a impressora pelo nome e grava como destino do Chrome de impressão (perfil separado).
+function printerInstaller(pattern,startup){
+  const ps=s=>String(s).replace(/'/g,"''");
+  const url=location.origin+'/painel?impressao=automatica';
+  const code=[
+    "$ErrorActionPreference='Stop'",
+    "$Pattern='"+ps(pattern)+"'","$Url='"+ps(url)+"'","$Startup="+(startup?'$true':'$false'),
+    "Write-Host ''","Write-Host 'SeuComercioAqui - configurar impressao automatica da notinha' -ForegroundColor Green","Write-Host ''",
+    "$printers=@(Get-Printer | Select-Object -ExpandProperty Name | Sort-Object)",
+    "if($printers.Count -eq 0){Write-Host 'Nenhuma impressora instalada. Instale o driver da impressora de notinha e rode de novo.' -ForegroundColor Red; exit 1}",
+    "$match=@($printers | Where-Object { $_ -like ($Pattern+'*') })",
+    "if($match.Count -eq 0){$match=@($printers | Where-Object { $_ -like ('*'+$Pattern+'*') })}",
+    "if($match.Count -eq 1){$printer=$match[0]} else {",
+    "  if($match.Count -gt 1){Write-Host ('Achei mais de uma impressora com '+$Pattern+'.') -ForegroundColor Yellow} else {Write-Host ('Nao achei impressora que comece com '+$Pattern+'.') -ForegroundColor Yellow}",
+    "  Write-Host 'Escolha a impressora de NOTINHA (nao a de folha A4):'",
+    "  for($i=0;$i -lt $printers.Count;$i++){Write-Host ('  '+($i+1)+' - '+$printers[$i])}",
+    "  do{$n=Read-Host 'Digite o numero e aperte Enter'}until($n -match '^[0-9]+$' -and [int]$n -ge 1 -and [int]$n -le $printers.Count)",
+    "  $printer=$printers[[int]$n-1]",
+    "}",
+    "Write-Host ('Impressora de notinha: '+$printer) -ForegroundColor Green",
+    "$roots=@($env:ProgramFiles,${env:ProgramFiles(x86)},$env:LOCALAPPDATA) | Where-Object { $_ }",
+    "$browsers=@(foreach($r in $roots){(Join-Path $r 'Google\\Chrome\\Application\\chrome.exe')}; foreach($r in $roots){(Join-Path $r 'Microsoft\\Edge\\Application\\msedge.exe')})",
+    "$browser=$browsers | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1",
+    "if(-not $browser){Write-Host 'Nao achei o Google Chrome nem o Microsoft Edge. Instale o Chrome e rode de novo.' -ForegroundColor Red; exit 1}",
+    "$dir=Join-Path $env:LOCALAPPDATA 'SeuComercioAqui\\ImpressaoAutomatica'",
+    "$def=Join-Path $dir 'Default'",
+    "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -like ('*'+$dir+'*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+    "Start-Sleep -Seconds 1",
+    "New-Item -ItemType Directory -Force -Path $def | Out-Null",
+    "$file=Join-Path $def 'Preferences'",
+    "$prefs=$null; if(Test-Path $file){try{$prefs=Get-Content -Raw -LiteralPath $file | ConvertFrom-Json}catch{$prefs=$null}}",
+    "if(-not $prefs){$prefs=New-Object PSObject}",
+    "$dest=[ordered]@{id=$printer;origin='local';account='';capabilities='';displayName=$printer;extensionId='';extensionName=''}",
+    "$state=[ordered]@{version=2;recentDestinations=@($dest);isHeaderFooterEnabled=$false;marginsType=0;scaling='100';scalingType=0;isCssBackgroundEnabled=$true}",
+    "$appState=ConvertTo-Json -InputObject $state -Compress -Depth 6",
+    "if(-not $prefs.PSObject.Properties['printing']){$prefs | Add-Member -NotePropertyName printing -NotePropertyValue (New-Object PSObject)}",
+    "$prefs.printing | Add-Member -NotePropertyName print_preview_sticky_settings -NotePropertyValue ([pscustomobject]@{appState=$appState}) -Force",
+    "if(-not $prefs.PSObject.Properties['browser']){$prefs | Add-Member -NotePropertyName browser -NotePropertyValue (New-Object PSObject)}",
+    "$prefs.browser | Add-Member -NotePropertyName has_seen_welcome_page -NotePropertyValue $true -Force",
+    "[IO.File]::WriteAllText($file,(ConvertTo-Json -InputObject $prefs -Compress -Depth 60),(New-Object Text.UTF8Encoding $false))",
+    "$flags='--kiosk-printing --user-data-dir=\"'+$dir+'\" --no-first-run --no-default-browser-check \"'+$Url+'\"'",
+    "$shell=New-Object -ComObject WScript.Shell",
+    "$places=@([Environment]::GetFolderPath('Desktop')); if($Startup){$places+=[Environment]::GetFolderPath('Startup')}",
+    "foreach($place in $places){$link=$shell.CreateShortcut((Join-Path $place 'Painel de pedidos.lnk'));$link.TargetPath=$browser;$link.Arguments=$flags;$link.IconLocation=$browser+',0';$link.Description='Painel do SeuComercioAqui com impressao automatica';$link.Save()}",
+    "Write-Host ''","Write-Host 'Pronto! Criei o atalho Painel de pedidos na Area de Trabalho.' -ForegroundColor Green",
+    "Write-Host 'Agora vou abrir o painel: entre com seu e-mail e senha e clique em Imprimir notinha > Imprimir teste.'",
+    "Write-Host ('A notinha deve sair na '+$printer+' sem perguntar.')",
+    "Start-Process -FilePath $browser -ArgumentList $flags"
+  ].join('\r\n');
+  return '@echo off\r\ntitle Configurar impressora de notinha - SeuComercioAqui\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "$t=[IO.File]::ReadAllText(\'%~f0\');iex ($t.Substring($t.LastIndexOf([string][char]35+\'PS\'+[char]35)+4))"\r\necho.\r\npause\r\nexit /b\r\n#PS#\r\n'+code+'\r\n';
+}
 function printPanel(){
   const chromeCmd='"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --kiosk-printing '+location.origin+'/painel';
   const settings='<section class="panel print-settings-panel" id="print-panel"><div class="section-heading"><div><span class="eyebrow">DO SEU JEITO</span><h2>Impressora de notinha</h2><p class="muted">Preferências salvas neste navegador.</p></div><span class="feature-icon">'+icon('gear')+'</span></div>'+
@@ -243,11 +311,17 @@ function printPanel(){
     '<div class="alert-row"><div><b>Papel da impressora</b><p class="muted">Escolha o mesmo tamanho configurado no driver do Windows. Para outro tamanho, use Outra largura e ajuste a área útil abaixo.</p></div><select id="paper-width" aria-label="Largura do papel">'+Object.entries(printProfiles).map(([key,p])=>'<option value="'+key+'" '+(paperWidth()===key?'selected':'')+'>'+p.label+'</option>').join('')+'</select></div>'+
     '<div class="alert-row"><div><b>Área útil de impressão</b><p class="muted">Largura ocupada pelo texto em milímetros. Se cortar nas laterais, reduza este valor e imprima outro teste.</p></div><label class="print-number"><input type="number" id="print-content-width" aria-label="Área útil de impressão em milímetros" min="32" max="'+printProfiles[paperWidth()].max+'" step="0.5" value="'+printContentWidth()+'"><span>mm</span></label></div>'+
     '<div class="alert-row"><div><b>Tamanho das letras</b><p class="muted">Aumente para facilitar a leitura ou diminua para caber mais conteúdo.</p></div><select id="print-font" aria-label="Tamanho das letras na notinha">'+[[11,'Pequena'],[12,'Padrão'],[14,'Grande'],[16,'Muito grande']].map(([size,label])=>'<option value="'+size+'" '+(printFont()===size?'selected':'')+'>'+label+'</option>').join('')+'</select></div>'+
+    '<div class="alert-row"><div><b>Via da cozinha</b><p class="muted">Junto com a notinha do cliente sai uma segunda, só com os itens e as escolhas em letra grande, para quem prepara.</p></div><label class="switch"><input type="checkbox" id="kitchenslip" '+(kitchenCopy()?'checked':'')+'><span>'+(kitchenCopy()?'Ligado':'Desligado')+'</span></label></div>'+
     '<div class="alert-row"><div><b>Via do motoboy</b><p class="muted">Nos pedidos de entrega, sai uma segunda notinha com o endereço em letra grande, QR code do mapa e quanto cobrar (com o troco).</p></div><label class="switch"><input type="checkbox" id="driverslip" '+(driverCopy()?'checked':'')+'><span>'+(driverCopy()?'Ligado':'Desligado')+'</span></label></div>'+
     '</section>';
+  const installer='<section class="panel print-installer" id="print-installer"><div class="section-heading"><div><span class="eyebrow">SEM PERGUNTAR, NA IMPRESSORA CERTA</span><h2>Impressão automática no Windows</h2><p class="muted">O configurador procura a impressora de notinha pelo começo do nome e cria na Área de Trabalho o atalho <b>Painel de pedidos</b>. Esse atalho abre o painel num Chrome separado que imprime direto e só nessa impressora. A impressora padrão do Windows, a de folha A4 e o Chrome normal não mudam.</p></div><span class="feature-icon">'+icon('print')+'</span></div>'+
+    '<div class="form-grid"><label>A impressora de notinha começa com<input id="printer-pattern" maxlength="40" value="'+esc(pref('printer-pattern','MP-'))+'" placeholder="Ex.: MP-, ELGIN, EPSON TM"></label><label class="check-row installer-startup"><span><input type="checkbox" id="printer-startup" checked> Abrir o painel sozinho quando ligar o computador</span></label></div>'+
+    '<ol class="steps"><li>Clique em <b>Baixar configurador</b> e abra o arquivo baixado (se o Windows avisar, clique em <b>Mais informações → Executar assim mesmo</b>).</li><li>Se houver mais de uma impressora com esse nome, ou nenhuma, ele mostra a lista para escolher pelo número. Escolha a de <b>notinha</b>, não a de folha.</li><li>No painel que abrir, entre com seu e-mail e senha uma vez e clique em <b>Imprimir teste</b>: deve sair na impressora de notinha, sem perguntar.</li><li>Use sempre o atalho <b>Painel de pedidos</b> para receber pedidos.</li></ol>'+
+    '<button type="button" class="btn" id="download-installer">'+icon('print')+' Baixar configurador</button></section>';
   const help='<section class="panel print-help-panel">'+
     '<details class="help print-help"><summary>Como configurar a impressora de notinha</summary>'+
       '<h3>Windows: qualquer marca com driver de impressão compatível</h3><ol><li>Instale o driver oficial do seu modelo. Em <b>Configurações do Windows → Impressoras e scanners</b>, confirme se a impressora aparece e imprime a página de teste do Windows. Se usar USB, prefira o driver de impressão do Windows; apenas instalar uma porta COM virtual pode não criar uma impressora na lista.</li><li>Configure no driver o tamanho real da bobina ou A4. Aqui, selecione o mesmo tamanho e clique em <b>Imprimir teste</b>. No Chrome ou Edge, escolha a impressora em <b>Destino</b>, use <b>escala 100%</b>, orientação retrato e desative <b>Cabeçalhos e rodapés</b>. Use margens mínimas ou nenhuma, conforme o driver. Se cortar nas laterais, reduza a área útil aqui.</li><li>Se sair muito papel em branco, confira o comprimento da bobina no driver. Guilhotina e avanço são configurados no driver, quando o modelo oferece essas opções. O site não envia comandos de corte ou de abertura de gaveta.</li>'+
+      '<li><b>Jeito recomendado:</b> use o botão <b>Baixar configurador</b> no quadro “Impressão automática no Windows”. Ele acha a impressora de notinha pelo nome e cria o atalho que imprime só nela. Se preferir fazer à mão, siga os passos abaixo.</li>'+
       '<li>Deixe a impressora de notinha como <b>padrão</b>: em <b>Configurações do Windows → Impressoras e scanners</b>, desligue “Permitir que o Windows gerencie minha impressora padrão”, clique na impressora de notinha (por exemplo, a que começa com <b>MP-</b>, como MP-4200 TH) e escolha <b>Definir como padrão</b>. Na primeira impressão pelo Chrome, escolha essa mesma impressora no destino; o Chrome lembra dela nas próximas.</li>'+
       '<li>Para imprimir <b>sem perguntar nada</b>: clique com o botão direito na Área de Trabalho → <b>Novo → Atalho</b>, cole o comando abaixo, avance e dê o nome <b>Painel de pedidos</b>. Feche todas as janelas do Chrome e abra o painel sempre por esse atalho.<div class="copy-line"><code id="kiosk-cmd">'+esc(chromeCmd)+'</code><button type="button" class="btn secondary small" id="copy-kiosk">'+icon('copy')+' Copiar</button></div></li></ol>'+
       '<p class="muted">Para Bematech e Elgin, consulte os <a class="text-link" href="https://github.com/ElginDeveloperCommunity/Impressoras" target="_blank" rel="noopener">drivers oficiais</a>. Para outras marcas, use o site do fabricante.</p>'+
@@ -255,7 +329,7 @@ function printPanel(){
       '<h3>Notinha de pedido e outros equipamentos</h3><p class="muted">Esta impressão é um comprovante de pedido, sem emissão de NFC-e/NF-e. Impressoras fiscais ECF, etiquetadoras, conexões apenas por comandos e impressoras embutidas em maquininhas precisam de integração específica. Android e iPhone dependem do serviço de impressão disponível no aparelho e do suporte do modelo.</p></details></section>';
   return '<section class="workspace-hero"><div class="workspace-hero-copy"><span class="workspace-kicker">DO PEDIDO AO PAPEL</span><h2>Uma notinha clara.<br>Uma operação mais leve.</h2><p>Ajuste o papel, confira a leitura e deixe cada pedido pronto para a cozinha ou para a entrega.</p><div class="workspace-hero-actions"><button type="button" class="btn" id="print-test">'+icon('print')+' Imprimir teste</button><button type="button" class="btn secondary" id="print-preview">'+icon('eye')+' Ver prévia</button></div><div class="workspace-summary"><span>'+icon('print')+' <span id="print-paper-summary">'+esc(printProfiles[paperWidth()].label)+'</span></span><span>'+icon('clock')+' <span id="print-auto-summary">'+(autoPrint()?'Impressão automática ligada':'Impressão manual')+'</span></span></div></div><div class="print-hero-symbol" aria-hidden="true">'+icon('print')+'<span>Feito para o seu caixa</span></div></section>'+
     '<div class="print-workspace">'+settings+'<aside class="print-preview-panel"><span class="eyebrow">PRÉVIA AO VIVO</span><h3>Como sua notinha vai sair</h3><p class="muted">Um pedido de exemplo, com os ajustes deste aparelho.</p><div class="print-preview-stage" tabindex="0" aria-label="Prévia da notinha com rolagem"><div id="print-live-sheet"></div></div><p class="print-preview-caption">'+icon('eye')+' A prévia acompanha o papel e o tamanho das letras.</p><div class="print-guidance"><b>Escolha sua impressora na janela de impressão</b><p>Bematech, Elgin e outras marcas dependem do driver instalado no Windows. Escolha o destino no Chrome ou Edge e confira a escala de 100%.</p></div></aside></div>'+
-    '<section class="panel" id="print-history"></section><div class="print-guidance"><b>Confira antes de atender</b><p>O teste não cria pedidos nem movimenta o caixa. Confira acentos, valores e a linha de 20 mm. A prévia não confirma conexão com a impressora ou saída do papel.</p></div>'+help;
+    installer+'<section class="panel" id="print-history"></section><div class="print-guidance"><b>Confira antes de atender</b><p>O teste não cria pedidos nem movimenta o caixa. Confira acentos, valores e a linha de 20 mm. A prévia não confirma conexão com a impressora ou saída do papel.</p></div>'+help;
 }
 function updatePrintPreview(){
   const sheet=$('#print-live-sheet');if(!sheet)return;
@@ -281,6 +355,7 @@ function bindPrintPanel(){
   });
   $('#print-sector').onchange=e=>{try{localStorage.setItem('sca.print-sector.'+store.id,e.target.value.trim());toast('Setor de impressão atualizado neste aparelho.');}catch{toast('Não consegui salvar a preferência neste navegador.');}};
   $('#autoprint').onchange=e=>{setPref('autoprint',e.target.checked?'1':'0');e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';if(e.target.checked){printSeen=null;watchOrders();toast('Pedidos novos serão impressos com o painel aberto. Confira as pendências anteriores no histórico.');}};
+  $('#kitchenslip').onchange=e=>{setPref('kitchenslip',e.target.checked?'1':'0');e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';};
   $('#driverslip').onchange=e=>{setPref('driverslip',e.target.checked?'1':'0');e.target.nextElementSibling.textContent=e.target.checked?'Ligado':'Desligado';};
   $('#paper-width').onchange=e=>{setPref('paper',e.target.value);const input=$('#print-content-width');input.max=printProfiles[paperWidth()].max;input.value=printContentWidth();$('#print-font').value=printFont();toast(printProfiles[paperWidth()].label+' neste aparelho.');};
   $('#print-content-width').onchange=e=>{const value=Number(e.target.value),max=printProfiles[paperWidth()].max;if(!Number.isFinite(value)||value<32||value>max){e.target.value=printContentWidth();toast('Informe uma área útil entre 32 e '+max+' mm.');return;}setPref('print-width.'+paperWidth(),String(value));toast('Área útil salva neste navegador.');};
@@ -288,6 +363,10 @@ function bindPrintPanel(){
   $('#print-preview').onclick=previewTicket;
   $('#print-test').onclick=()=>printTicket(sampleOrder(),'all',true);
   $('#copy-kiosk').onclick=()=>copy($('#kiosk-cmd').textContent);
+  $('#printer-pattern').onchange=e=>setPref('printer-pattern',e.target.value.trim()||'MP-');
+  $('#download-installer').onclick=()=>{const pattern=$('#printer-pattern').value.trim()||'MP-';setPref('printer-pattern',pattern);
+    const blob=new Blob([printerInstaller(pattern,$('#printer-startup').checked)],{type:'application/octet-stream'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='Configurar-impressora-notinha.bat';document.body.append(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
+    toast('Configurador baixado. Abra o arquivo no computador da impressora.');};
   $$('#print-panel input,#print-panel select').forEach(input=>input.addEventListener('change',updatePrintPreview));
 }
 async function platformNotices(){
