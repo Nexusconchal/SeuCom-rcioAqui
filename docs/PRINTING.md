@@ -21,6 +21,10 @@ Em **Imprimir notinha → Impressão automática no Windows**, o lojista informa
 
 A impressora padrão do Windows, outras impressoras (como a de folha A4) e o Chrome normal da pessoa não são alterados. O destino gravado vale só para o perfil separado. Confirme sempre com **Imprimir teste** depois de configurar: o site não consegue ler qual impressora o Windows usou.
 
+### Uma ou duas impressoras
+
+Na mesma tela, o lojista escolhe **Uma impressora** (cliente e cozinha saem nela) ou **Duas impressoras** (balcão e cozinha) e informa o começo do nome de cada uma. Com duas, o configurador cria dois perfis separados, cada um preso à sua impressora: **Painel de pedidos** (`via=balcao`, imprime só a notinha do cliente e, se ligada, a via do motoboy) e **Painel da cozinha** (`via=cozinha`, imprime só a via da cozinha e fica sem som para não apitar em dobro). A opção **Este computador imprime** mostra e permite trocar o papel de cada janela; o setor de produção, quando preenchido, continua tendo prioridade.
+
 ## Vias impressas
 
 A notinha completa sai com a via do cliente e, por padrão, a **via da cozinha** (itens e escolhas em letra grande), separadas por corte de página. A via do motoboy continua opcional. Com **aceitar pedidos automaticamente** ligado, o pedido entra direto em preparo, o painel apita quatro vezes e as vias saem sozinhas.

@@ -4,7 +4,7 @@ async function start(){
   try{
     await bootstrap();
     // Atalho do configurador de impressão: guarda a marca antes de qualquer ida para o login.
-    try{if(new URLSearchParams(location.search).get('impressao')==='automatica')localStorage.setItem('sca.kiosk-autoprint','1');}catch{}
+    try{const q=new URLSearchParams(location.search);if(q.get('impressao')==='automatica')localStorage.setItem('sca.kiosk-autoprint','1');if(['tudo','balcao','cozinha'].includes(q.get('via'))){localStorage.setItem('sca.kiosk-via',q.get('via'));if(q.get('via')==='cozinha')localStorage.setItem('sca.sound','0');}}catch{}
     const path=location.pathname.split('/').filter(Boolean);
     if(path[0]==='rede')return await (await import('./network.js')).networkPage(path[1]||'');
     if(path[0]==='entregador')return await (await import('./delivery.js')).driverPage();
