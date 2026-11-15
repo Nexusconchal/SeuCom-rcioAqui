@@ -279,6 +279,23 @@ def test_paused_assigned_driver_does_not_block_order_progress(shop):
     assert send(client, "PATCH", f"/api/admin/orders/{other}", {"driver_id": driver}).status_code == 400
 
 
+def test_delete_removes_unsold_product_and_only_pauses_sold_one(shop):
+    client, sold = shop
+    assert send(client, "POST", "/api/store/minha-loja/orders", payload(sold), "delete-sold-key-1").status_code == 201
+    unsold = send(client, "POST", "/api/admin/products", {"name": "Açaí do teste", "price": 100, "stock": 3, "active": True})
+    assert unsold.status_code == 201
+    unsold = unsold.json["id"]
+    removed = send(client, "DELETE", f"/api/admin/products/{unsold}", {})
+    assert removed.status_code == 200 and removed.json["deleted"] is True
+    kept = send(client, "DELETE", f"/api/admin/products/{sold}", {})
+    assert kept.status_code == 200 and kept.json["deleted"] is False
+    products = {p["id"]: p for p in client.get("/api/admin/products").json["products"]}
+    assert unsold not in products
+    assert products[sold]["active"] is False
+    assert send(client, "DELETE", f"/api/admin/products/{unsold}", {}).status_code == 404
+    assert client.get("/api/admin/orders").json["orders"][0]["items"][0]["name"] == "Burger"
+
+
 def test_product_with_choice_groups_can_be_saved_again_unchanged(shop):
     client, _ = shop
     group = {"id": "mix", "name": "Mistura", "min": 1, "max": 2, "options": [

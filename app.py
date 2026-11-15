@@ -1549,9 +1549,18 @@ def create_app(test_config=None):
     @app.delete("/api/admin/products/<int:pid>")
     @owner
     def archive_product(pid):
-        owned("products", pid)
-        db().execute("UPDATE products SET active=0 WHERE id=? AND store_id=?", (pid, g.store["id"]))
-        return jsonify(ok=True)
+        # Produto que nunca foi vendido some de vez; o que já está em pedido só é pausado,
+        # para não quebrar o histórico de vendas.
+        sid = g.store["id"]
+        with transaction() as conn:
+            owned("products", pid)
+            if conn.execute("SELECT 1 FROM order_items WHERE product_id=? LIMIT 1", (pid,)).fetchone():
+                conn.execute("UPDATE products SET active=0 WHERE id=? AND store_id=?", (pid, sid))
+                return jsonify(ok=True, deleted=False)
+            for table in ("recipes", "option_recipes", "catalog_rules", "stock_movements"):
+                conn.execute(f"DELETE FROM {table} WHERE product_id=? AND store_id=?", (pid, sid))
+            conn.execute("DELETE FROM products WHERE id=? AND store_id=?", (pid, sid))
+        return jsonify(ok=True, deleted=True)
 
     @app.get("/api/admin/orders")
     @owner
