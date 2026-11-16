@@ -1,11 +1,14 @@
 """SQLite local e PostgreSQL para hospedagem sem disco persistente."""
 import re
 import sqlite3
+import threading
+import time
 from decimal import Decimal
 from pathlib import Path
 
 import psycopg
 from psycopg import sql
+from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 from migrations import upgrade
 
@@ -81,9 +84,99 @@ class Postgres:
         self.connection.close()
 
 
+# Reaproveita conexões PostgreSQL entre requisições e rodadas do robô.
+# Abrir uma conexão nova custa handshake TLS, autenticação e três SETs no
+# pooler do Supabase; com o loop do WhatsApp isso passava de 80 mil conexões
+# por dia e estourou a cota de egress do plano gratuito.
+POOL_IDLE_MAX = 4          # conexões ociosas guardadas por processo
+POOL_PING_AFTER = 60       # segundos parada antes de conferir com SELECT 1
+POOL_MAX_AGE = 1800        # renova a conexão a cada 30 minutos
+_pool = {}
+_pool_lock = threading.Lock()
+
+
+def _pool_key(config):
+    return (config["DATABASE_URL"], config["DATABASE_SCHEMA"], config.get("DATABASE_SSLMODE", ""))
+
+
+class Lease:
+    """Empréstimo de uma conexão do pool; fechar devolve (uma única vez)."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, query, params=()):
+        if self._conn is None:
+            raise psycopg.InterfaceError("Conexão já devolvida ao pool.")
+        return self._conn.execute(query, params)
+
+    @property
+    def connection(self):
+        return self._conn.connection if self._conn is not None else None
+
+    def close(self):
+        conn, self._conn = self._conn, None
+        if conn is not None and not _release(conn):
+            _discard(conn)
+
+
+def _release(conn):
+    """Devolve ao pool uma conexão saudável e sem transação aberta."""
+    raw = conn.connection
+    now = time.monotonic()
+    if raw.closed or raw.info.transaction_status != TransactionStatus.IDLE or now - conn._born > POOL_MAX_AGE:
+        return False
+    with _pool_lock:
+        idle = _pool.setdefault(conn._pool_key, [])
+        if len(idle) >= POOL_IDLE_MAX:
+            return False
+        conn._last_used = now
+        idle.append(conn)
+    return True
+
+
+def _borrow(config):
+    key = _pool_key(config)
+    while True:
+        with _pool_lock:
+            idle = _pool.get(key)
+            conn = idle.pop() if idle else None
+        if conn is None:
+            conn = Postgres(config)
+            conn._pool_key, conn._born = key, time.monotonic()
+            return Lease(conn)
+        now = time.monotonic()
+        if conn.connection.closed or now - conn._born > POOL_MAX_AGE:
+            _discard(conn)
+            continue
+        if now - conn._last_used > POOL_PING_AFTER:
+            try:
+                conn.connection.execute("SELECT 1")
+            except psycopg.Error:
+                _discard(conn)
+                continue
+        return Lease(conn)
+
+
+def _discard(conn):
+    try:
+        conn.connection.close()
+    except Exception:
+        pass
+
+
+def close_pool():
+    """Fecha as conexões ociosas (testes e encerramento do processo)."""
+    with _pool_lock:
+        idle = [conn for conns in _pool.values() for conn in conns]
+        _pool.clear()
+    for conn in idle:
+        _discard(conn)
+
+
 def connect(config):
     if config["DATABASE_URL"]:
-        return Postgres(config)
+        return _borrow(config)
     connection = sqlite3.connect(config["DATABASE_PATH"], timeout=15, isolation_level=None)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")

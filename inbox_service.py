@@ -5,6 +5,8 @@ import threading
 import unicodedata
 from datetime import datetime, timezone
 
+from flask import request
+
 VARIABLES = {'nome', 'loja', 'link', 'horario', 'pix', 'entrega', 'minimo'}
 DEFAULTS = {
     'closed_enabled': True,
@@ -144,8 +146,9 @@ def delivery_tick(app, limit=5, stop_event=None):
     from database import connect
     from inbox import dispatch_inbox
     from chat_orders import process_chat_orders
-    process_chat_orders(app, stop_event=stop_event)
+    orders = process_chat_orders(app, stop_event=stop_event)
     result = dispatch_inbox(app, limit, stop_event=stop_event)
+    result['orders'] = orders or 0
     conn = connect(app.config)
     try:
         write_value(conn, 'inbox.dispatcher', json.dumps({'at': stamp(), 'error': False}))
@@ -154,16 +157,39 @@ def delivery_tick(app, limit=5, stop_event=None):
     return result
 
 
+BUSY_WAIT = 3     # segundos entre rodadas enquanto há fila
+IDLE_WAIT = 20    # segundos entre rodadas sem nada para enviar
+
+
+def wait_for_work(stopped, wake, seconds):
+    """Espera em fatias de 1 s para acordar logo com trabalho novo ou parada."""
+    for _ in range(max(1, int(seconds))):
+        if stopped.is_set() or wake.wait(1):
+            break
+    wake.clear()
+
+
 def install_dispatcher(app):
-    """Embedded mode shares the web service. Stores opt in; no historical queue is swept."""
+    """Embedded mode shares the web service. Stores opt in; no historical queue is swept.
+
+    Sem fila, a rodada acontece a cada IDLE_WAIT segundos; uma mensagem nova
+    (webhook ou envio pelo painel) acorda o loop na hora, então a resposta do
+    robô continua imediata sem consultar o banco a cada 3 segundos.
+    """
     lock = threading.Lock()
     stopped = threading.Event()
+    wake = threading.Event()
     app.extensions['inbox_dispatch_stop'] = stopped
+    app.extensions['inbox_dispatch_wake'] = wake
+    busy_wait = app.config.get('INBOX_BUSY_SECONDS', BUSY_WAIT)
+    idle_wait = app.config.get('INBOX_IDLE_SECONDS', IDLE_WAIT)
 
     def loop():
         while not stopped.is_set():
+            busy = False
             try:
-                delivery_tick(app, stop_event=stopped)
+                result = delivery_tick(app, stop_event=stopped)
+                busy = bool(result.get('sent') or result.get('uncertain') or result.get('orders'))
             except Exception:
                 # Do not log provider payloads, contacts or credentials.
                 app.logger.error('Falha ao processar a fila de atendimento.')
@@ -177,7 +203,14 @@ def install_dispatcher(app):
                 finally:
                     if conn is not None:
                         conn.close()
-            stopped.wait(3)
+            wait_for_work(stopped, wake, busy_wait if busy else idle_wait)
+
+    @app.after_request
+    def wake_dispatcher(response):
+        if (request.method in ('POST', 'PUT') and response.status_code < 400
+                and (request.path.startswith('/webhooks/inbox/') or request.path.startswith('/api/admin/inbox/'))):
+            wake.set()
+        return response
 
     @app.before_request
     def ensure_dispatcher():

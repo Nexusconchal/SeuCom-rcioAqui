@@ -30,6 +30,8 @@ Além das regras e do pedido assistido, há uma opção separada de [pedido guia
 
 `INBOX_DISPATCH_MODE=embedded` é o padrão. Um loop por processo da aplicação web começa na primeira requisição, sem criar um recurso de hospedagem. Lê apenas lojas com autorização explícita em `inbox.sending.<id>`. O modo `external` desliga o loop web para usar `marketing_worker.py`; `off` também desliga o loop web. O worker externo continua sendo responsável pelas campanhas agendadas: o loop embutido envia apenas atendimento.
 
+Para economizar a cota de tráfego do Supabase, o loop roda a cada 3 s só enquanto há fila; sem nada para enviar, espera 20 s (`INBOX_BUSY_SECONDS`/`INBOX_IDLE_SECONDS` na configuração do app). Uma mensagem nova pelo webhook ou um envio pelo painel acorda o loop na hora, então a resposta continua imediata. As conexões PostgreSQL do loop e das requisições são reaproveitadas (até 4 ociosas por processo, conferidas com `SELECT 1` após 60 s paradas e renovadas a cada 30 min) em vez de abrir uma conexão TLS nova a cada consulta.
+
 Cada tentativa é reivindicada em transação antes do HTTP, com alteração condicional de estado; SQLite serializa escrita e o adaptador PostgreSQL usa o bloqueio transacional já existente. O envio ocorre fora da transação. Um resultado HTTP 200/201 significa **aceite pelo serviço**, sem comprovar entrega ou leitura no aparelho do cliente.
 
 - `queued`: aguardando tentativa; `processing`: tentativa em andamento.

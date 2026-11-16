@@ -173,3 +173,15 @@ def test_cashier_cannot_enable_delivery_edit_bot_or_assign_foreign_staff(shop):
     assert send(cashier,'POST',f'/api/admin/inbox/{tid}/assign',{'user_id':1}).status_code==403
     assert send(cashier,'POST',f'/api/admin/inbox/{tid}/claim',{'claim':True}).status_code==200
     assert send(cashier,'POST',f'/api/admin/inbox/{tid}/reply',{'message':'Resposta autorizada do caixa'},uuid.uuid4().hex).status_code==202
+
+
+def test_new_message_wakes_the_idle_delivery_loop(shop):
+    from inbox_service import wait_for_work
+    c,_=shop;fake=connect(c,True)
+    wake=c.application.extensions['inbox_dispatch_wake'];wake.clear()
+    assert c.get('/api/admin/inbox').status_code==200 and not wake.is_set()
+    incoming(c,fake)
+    assert wake.is_set()
+    stopped=threading.Event();started=__import__('time').monotonic()
+    wait_for_work(stopped,wake,20)
+    assert __import__('time').monotonic()-started<2 and not wake.is_set()
