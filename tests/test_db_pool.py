@@ -97,3 +97,15 @@ def test_pool_keeps_a_bounded_number_of_idle_sessions(opened):
     for lease in leases:
         lease.close()
     assert sum(not c.closed for c in opened) == database.POOL_IDLE_MAX
+
+
+def test_idle_limit_is_per_process_and_evicts_other_schemas(opened):
+    # Um esquema por teste (CI) não pode acumular conexões ociosas sem fim.
+    for n in range(database.POOL_IDLE_MAX * 3):
+        database.connect({**CONFIG, 'DATABASE_SCHEMA': 'synthetic_%d' % n}).close()
+    assert sum(not c.closed for c in opened) == database.POOL_IDLE_MAX
+    assert sum(len(conns) for conns in database._pool.values()) == database.POOL_IDLE_MAX
+    # O esquema mais recente continua reaproveitado.
+    before = len(opened)
+    database.connect({**CONFIG, 'DATABASE_SCHEMA': 'synthetic_%d' % (database.POOL_IDLE_MAX * 3 - 1)}).close()
+    assert len(opened) == before
