@@ -107,6 +107,8 @@ def test_print_recovery_simulation_diagnostics_and_local_load(operational_live):
         page.locator('[data-journal-print]').first.click()
         page.wait_for_function('()=>window.printCalls===1')
         page.evaluate("window.dispatchEvent(new Event('afterprint'))")
+        page.wait_for_function('()=>window.printCalls===2')  # a via da cozinha sai numa impressão separada (corte)
+        page.evaluate("window.dispatchEvent(new Event('afterprint'))")
         expect(page.locator('#print-history')).to_contain_text('Confira se saiu no papel')
         saved=page.evaluate("Object.entries(localStorage).find(([k])=>k.startsWith('sca.print-journal.'))[1]")
         assert 'Cliente Impressão' not in saved and '11999999999' not in saved
