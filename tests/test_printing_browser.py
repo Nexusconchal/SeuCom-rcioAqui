@@ -48,7 +48,7 @@ def test_printer_profiles_layout_queue_and_cancel(live):
             assert page.evaluate('window.printJobs.at(-1).width') == str(width)+'mm'
             page.emulate_media(media='print')
             assert page.locator('#app').evaluate('(e)=>getComputedStyle(e).display') == 'none'
-            assert page.locator('#print-area .ticket').count() == 3  # cliente, cozinha e motoboy
+            assert page.locator('#print-area .ticket').count() == 1  # cada via é uma impressão: a térmica corta entre elas
             assert page.locator('#print-area').evaluate("""root=>[...root.querySelectorAll('.ticket,.t-calibration')].every(ticket=>{
                 const box=ticket.getBoundingClientRect();return [...ticket.querySelectorAll('*')].every(e=>{
                     const b=e.getBoundingClientRect();return b.right<=box.right+1&&b.left>=box.left-1;
@@ -57,6 +57,10 @@ def test_printer_profiles_layout_queue_and_cancel(live):
             pdf = page.pdf(path=str(artifacts / ('impressao-'+profile+'.pdf')), print_background=False, display_header_footer=False, **params)
             assert pdf.startswith(b'%PDF-') and len(pdf)>1000
             page.emulate_media(media='screen')
+            for step, part in ((2, '.t-kitchen'), (3, '.t-qr')):  # depois saem a cozinha e o motoboy, cada um sozinho
+                page.evaluate("window.dispatchEvent(new Event('afterprint'))")
+                page.wait_for_function('(n)=>window.printJobs.length===n', arg=previous+step)
+                assert page.locator('#print-area .ticket').count() == 1 and page.locator('#print-area '+part).count() == 1
             page.evaluate("window.dispatchEvent(new Event('afterprint'))")
             expect(page.locator('#print-area')).to_be_empty()
         page.get_by_label('Largura do papel', exact=True).select_option('58')
@@ -75,8 +79,9 @@ def test_printer_profiles_layout_queue_and_cancel(live):
         page.wait_for_function('()=>window.printJobs.length===1')
         page.get_by_role('button', name='Imprimir teste', exact=True).click()
         assert page.evaluate('window.printJobs.length') == 1
-        page.evaluate("window.dispatchEvent(new Event('afterprint'))")
-        page.wait_for_function('()=>window.printJobs.length===2')
+        for n in range(2, 7):  # 2 testes x 3 vias, uma impressão por vez
+            page.evaluate("window.dispatchEvent(new Event('afterprint'))")
+            page.wait_for_function('(n)=>window.printJobs.length===n', arg=n)
         page.evaluate("window.dispatchEvent(new Event('afterprint'))")
         expect(page.locator('#print-area')).to_be_empty()
         page.evaluate("()=>{window.print=()=>{throw new Error('printer unavailable')};}")

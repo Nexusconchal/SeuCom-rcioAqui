@@ -126,12 +126,25 @@ def _release(conn):
     now = time.monotonic()
     if raw.closed or raw.info.transaction_status != TransactionStatus.IDLE or now - conn._born > POOL_MAX_AGE:
         return False
+    evicted = None
     with _pool_lock:
         idle = _pool.setdefault(conn._pool_key, [])
         if len(idle) >= POOL_IDLE_MAX:
             return False
+        # O limite vale para o processo inteiro: conexões de outro banco/esquema
+        # (ex.: um esquema por teste) não podem ficar abertas para sempre.
+        if sum(len(conns) for conns in _pool.values()) >= POOL_IDLE_MAX:
+            others = [(c._last_used, key, c) for key, conns in _pool.items() if key != conn._pool_key for c in conns]
+            if not others:
+                return False
+            _, key, evicted = min(others, key=lambda item: item[0])
+            _pool[key].remove(evicted)
+            if not _pool[key]:
+                del _pool[key]
         conn._last_used = now
         idle.append(conn)
+    if evicted is not None:
+        _discard(evicted)
     return True
 
 
