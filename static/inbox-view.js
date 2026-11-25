@@ -133,7 +133,7 @@ export async function inboxPage(root){
   async function checkConnection(){connectionCheckedAt=Date.now();try{const result=await api('/api/admin/inbox/connection');if(alive()){connection=result;drawStatus();if(result.activated){while(busy&&alive())await new Promise(r=>setTimeout(r,100));await load();toast('Robô ligado: ele já responde os clientes e envia o cardápio sozinho.');}}}catch{if(alive()){connection={connected:false,state:'unknown'};drawStatus();}}}
   async function connectionAction(){
     if(data.linked&&!data.configured){try{await send('/api/admin/inbox/connect',{});await load();await checkConnection();toast('Recebimento de conversas ativado.');}catch(e){toast(e.message);}return;}
-    const d=modal('Conectar o WhatsApp da loja','<div class="inbox-pairing-intro"><span class="eyebrow">SEU NÚMERO NO PAINEL</span><p>Use o WhatsApp Business da loja para vincular este atendimento.</p></div><ol class="inbox-pairing-steps"><li>Abra o WhatsApp no celular da loja.</li><li>Toque em <b>Aparelhos conectados → Conectar aparelho</b>.</li><li>Aponte a câmera para o QR Code abaixo.</li></ol><div id="inbox-qr" class="inbox-qr-placeholder"><p>Gere o código quando estiver com o celular em mãos.</p></div><p id="inbox-pairing-status" class="notice" role="status">A conexão será conferida automaticamente.</p><button type="button" class="btn secondary full" id="inbox-create-qr">Gerar QR Code</button><button type="button" class="btn full" id="inbox-confirm-qr">Já conectei, verificar</button><p class="muted">Se o código vencer, gere outro. Assim que conectar, o robô já responde os clientes e envia o link do cardápio sozinho.</p>');
+    const d=modal('Conectar o WhatsApp da loja','<div class="inbox-pairing-intro"><span class="eyebrow">SEU NÚMERO NO PAINEL</span><p>Use o WhatsApp Business da loja para vincular este atendimento.</p></div><ol class="inbox-pairing-steps"><li>Abra o WhatsApp no celular da loja.</li><li>Toque em <b>Aparelhos conectados → Conectar aparelho</b>.</li><li>Aponte a câmera para o QR Code abaixo.</li></ol><div id="inbox-qr" class="inbox-qr-placeholder"><p>Gere o código quando estiver com o celular em mãos.</p></div><p id="inbox-pairing-status" class="notice" role="status">A conexão será conferida automaticamente.</p><button type="button" class="btn secondary full" id="inbox-create-qr">Gerar QR Code</button><details class="inbox-phone-pairing"><summary>O QR Code não aparece ou não lê? Conectar pelo número</summary><p class="muted">No celular: <b>Aparelhos conectados → Conectar aparelho → Conectar com número de telefone</b>. Depois digite o código que aparecer aqui.</p><div class="inline-input"><input id="inbox-pair-phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="WhatsApp da loja com DDD" aria-label="WhatsApp da loja com DDD"><button type="button" class="btn secondary" id="inbox-pair-code">Gerar código</button></div><p id="inbox-pair-result" class="inbox-pair-code" hidden></p></details><button type="button" class="btn full" id="inbox-confirm-qr">Já conectei, verificar</button><p class="muted">Se o código vencer, gere outro. Assim que conectar, o robô já responde os clientes e envia o link do cardápio sozinho.</p>');
     const attempt=Symbol('pairing');d._inboxPairing=attempt;
     const valid=()=>alive()&&d.open&&d._inboxPairing===attempt&&!!$('#inbox-pairing-status',d);
     const status=message=>{if(valid())$('#inbox-pairing-status',d).textContent=message;};
@@ -150,8 +150,31 @@ export async function inboxPage(root){
         }
         status(manual?'Ainda não conectou. Confira a leitura do QR Code no celular.':'Aguardando a leitura no celular. A verificação continua automaticamente.');
       }catch{status('Não foi possível verificar agora. Confira a internet; vamos tentar novamente.');}
-      finally{checking=false;if(valid()){clearTimeout(qrTimer);qrTimer=setTimeout(()=>verify(),4000);}}
+      finally{checking=false;if(valid()&&!holding){clearTimeout(qrTimer);qrTimer=setTimeout(()=>verify(),4000);}}
     }
+    // Muitas tentativas (429): trava os botões com contagem, para ninguém insistir e piorar.
+    let waitTimer,holding=false;
+    const holdOff=(seconds=180)=>{
+      holding=true;clearTimeout(qrTimer);
+      const buttons=[$('#inbox-create-qr',d),$('#inbox-pair-code',d)].filter(Boolean);clearInterval(waitTimer);
+      const labels=buttons.map(b=>b.textContent);let left=seconds;
+      const tick=()=>{if(!valid()){clearInterval(waitTimer);return;}if(left<=0){clearInterval(waitTimer);holding=false;buttons.forEach((b,i)=>{b.disabled=false;b.textContent=labels[i];});status('Pode tentar de novo agora.');return;}
+        buttons.forEach(b=>{b.disabled=true;b.textContent='Aguarde '+Math.floor(left/60)+':'+String(left%60).padStart(2,'0');});left--;};
+      tick();waitTimer=setInterval(tick,1000);
+    };
+    d.addEventListener('close',()=>clearInterval(waitTimer),{once:true});
+    $('#inbox-pair-code',d).onclick=async e=>{
+      const button=e.currentTarget,phone=$('#inbox-pair-phone',d).value.trim();
+      if(phone.replace(/\D/g,'').length<10){status('Digite o WhatsApp da loja com DDD.');$('#inbox-pair-phone',d).focus();return;}
+      button.disabled=true;status('Pedindo o código ao WhatsApp…');
+      try{
+        const r=await send('/api/admin/whatsapp/connect',{phone});if(!valid())return;
+        const code=String(r.pairing_code||'');
+        const out=$('#inbox-pair-result',d);out.hidden=false;
+        out.innerHTML=code?'<span>Digite no celular:</span><b>'+esc(code.length===8?code.slice(0,4)+'-'+code.slice(4):code)+'</b>':'Não recebemos o código. Tente o QR Code ou gere de novo.';
+        await verify();
+      }catch(err){status(err.message);if(err.status===429)return holdOff();}finally{if(valid()&&!waitTimer)button.disabled=false;}
+    };
     $('#inbox-create-qr',d).onclick=async e=>{
       const button=e.currentTarget;button.disabled=true;status('Preparando um QR Code para a loja…');
       try{
@@ -160,7 +183,7 @@ export async function inboxPage(root){
         const safeQR=typeof r.qr==='string'&&/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=\s]+$/.test(r.qr)&&r.qr.length<300000;
         $('#inbox-qr',d).innerHTML=safeQR?'<img class="wa-qr" alt="QR Code para conectar WhatsApp" src="'+esc(r.qr)+'" width="240" height="240">':'<p>Não recebemos um QR Code. Vamos conferir se o número já está conectado.</p>';
         button.textContent='Gerar outro QR Code';await verify();
-      }catch(err){status(err.message);}finally{if(valid())button.disabled=false;}
+      }catch(err){status(err.message);if(err.status===429){holdOff();return;}}finally{if(valid()&&!$('#inbox-create-qr',d).textContent.startsWith('Aguarde'))button.disabled=false;}
     };
     $('#inbox-confirm-qr',d).onclick=()=>verify(true);
     d.addEventListener('close',()=>{if(d._inboxPairing===attempt)clearTimeout(qrTimer);},{once:true});

@@ -635,7 +635,7 @@ class FakeEvolution:
     def create(self, instance):
         return 201, {"qrcode": {"base64": "iVBORw0KGgo="}}
 
-    def connect(self, instance):
+    def connect(self, instance, number=""):
         return 200, {}
 
     def state(self, instance):

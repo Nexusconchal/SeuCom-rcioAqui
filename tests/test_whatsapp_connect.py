@@ -14,8 +14,8 @@ class Evo:
     def create(self, instance):
         self.calls.append(("create", instance)); return self._create
 
-    def connect(self, instance):
-        self.calls.append(("connect", instance)); return self._connect
+    def connect(self, instance, number=""):
+        self.calls.append(("connect", instance) if not number else ("connect", instance, number)); return self._connect
 
     def state(self, instance):
         return 200, {"instance": {"state": "close"}}
@@ -92,3 +92,24 @@ def test_provider_error_message_shows_code(app, shop):  # noqa: F811
     set_instance(app, "")
     r = send(client, "POST", "/api/admin/whatsapp/connect", {})
     assert r.status_code == 502 and "código 500" in r.json["error"]
+
+
+def test_pairing_code_by_phone_number(app, shop):  # noqa: F811
+    client, _ = shop
+    evo = Evo(connect=(200, {"pairingCode": "WZYEH1YY", "code": "2@abc", "count": 1}))
+    app.extensions["evolution"] = evo
+    set_instance(app, "sca-1-abc")
+    r = send(client, "POST", "/api/admin/whatsapp/connect", {"phone": "(19) 99933-8422"})
+    assert r.status_code == 200 and r.json["pairing_code"] == "WZYEH1YY"
+    assert evo.calls == [("connect", "sca-1-abc", "5519999338422")]
+    assert send(client, "POST", "/api/admin/whatsapp/connect", {"phone": "123"}).status_code == 400
+
+
+def test_too_many_attempts_waits_without_touching_the_connection(app, shop):  # noqa: F811
+    client, _ = shop
+    evo = Evo(connect=(429, {}))
+    app.extensions["evolution"] = evo
+    set_instance(app, "sca-1-abc")
+    r = send(client, "POST", "/api/admin/whatsapp/connect", {})
+    assert r.status_code == 429 and "Aguarde 3 minutos" in r.json["error"]
+    assert evo.calls == [("connect", "sca-1-abc")]  # sem apagar nem recriar

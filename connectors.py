@@ -85,8 +85,10 @@ class Evolution:
     def create(self, instance):
         return self._call("POST", "/instance/create", {"instanceName": instance, "qrcode": True, "integration": "WHATSAPP-BAILEYS"})
 
-    def connect(self, instance):
-        return self._call("GET", "/instance/connect/" + urllib.parse.quote(instance, safe=""))
+    def connect(self, instance, number=""):
+        # Com o número, a Evolution devolve também um código de 8 letras (conectar pelo telefone, sem QR).
+        query = "?number=" + urllib.parse.quote(number, safe="") if number else ""
+        return self._call("GET", "/instance/connect/" + urllib.parse.quote(instance, safe="") + query)
 
     def state(self, instance):
         return self._call("GET", "/instance/connectionState/" + urllib.parse.quote(instance, safe=""))

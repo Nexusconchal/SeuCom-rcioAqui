@@ -19,7 +19,7 @@ let store, products=[], categories=[], drivers=[], orders=[], tab='overview', pe
 const ROLE_TABS={kitchen:['kitchen','orders','settings','printing','support'],cashier:['overview','pos','cash','dining','reports','inbox','deliverymap','orders','kitchen','customers','drivers','sales','settings','printing','support'],manager:null,owner:null};
 export async function renderDashboard(){
   const me=await api('/api/admin/store');store=me.store;useTimeZone(store.timezone);role=me.role;roleLabel=me.role_label;initPrintJournal(store.id,auth.user.id);document.title='Painel • '+store.name;
-  $('#app').innerHTML='<div class="dashboard"><header class="dashboard-head">'+brand()+'<nav class="dashboard-nav">'+[['overview','Visão geral'],['orders','Pedidos'],['pos','PDV / Balcão'],['cash','Caixa por turno'],['dining','Mesas e comandas'],['kitchen','Cozinha'],['products','Cardápio'],['stock','Estoque'],['ingredients','Insumos e fichas'],['customers','Clientes'],['inbox','Atendimento WhatsApp'],['marketing','Marketing'],['promotions','Promoções e horários'],['drivers','Entregas'],['deliverymap','Mapa de entregas'],['sales','Vendas e caixa'],['finance','Lucro e custos'],['receivables','Recebíveis online'],['diagnostics','Diagnóstico da loja'],['purchasing','Contas e fornecedores'],['reports','Gerar relatório'],['fiscal','Fiscal'],['integrations','Integrações'],['network','Minha rede'],['printing','Imprimir notinha'],['support','Suporte']].filter(([id])=>role==='owner'||(role==='manager'?!['integrations','network'].includes(id):ROLE_TABS[role].includes(id))).map(([id,label])=>'<button data-tab="'+id+'">'+label+'</button>').join('')+'</nav>'+'<div class="head-actions"><button id="sound-toggle" class="icon-btn sound-toggle" aria-label="Som de novos pedidos">'+icon('bell')+'</button><button class="icon-btn" data-tab="settings" aria-label="Configurações">'+icon('gear')+'</button><button id="logout" class="icon-btn" aria-label="Sair">'+icon('logout')+'</button></div></header><main id="main" class="dashboard-main"><section class="dashboard-title"><div><span class="eyebrow" id="page-kicker">SEU COMÉRCIO EM MOVIMENTO</span><h1 id="page-title">Seu dia em um olhar</h1><p id="page-subtitle">Tudo pronto para vender mais.</p></div><div class="title-actions"><button id="store-toggle" class="badge gray"><i></i>Loja fechada</button><a class="btn" href="/loja/'+esc(store.slug)+'" target="_blank" rel="noopener">Ver minha loja '+icon('eye')+'</a></div></section><section id="platform-notices"></section><section id="operation-notices"></section><section id="dashboard-content" aria-live="polite"></section></main><footer class="dashboard-footer"><span>SeuComércioAqui</span><span>'+esc(store.name)+' • '+esc(auth.user.name)+' ('+esc(roleLabel)+')</span></footer></div>';
+  $('#app').innerHTML='<div class="dashboard"><header class="dashboard-head">'+brand()+'<nav class="dashboard-nav">'+[['overview','Visão geral'],['orders','Pedidos'],['pos','PDV / Balcão'],['cash','Caixa por turno'],['dining','Mesas e comandas'],['kitchen','Cozinha'],['products','Cardápio'],['stock','Estoque'],['ingredients','Insumos e fichas'],['customers','Clientes'],['inbox','Atendimento WhatsApp'],['marketing','Marketing'],['promotions','Promoções e horários'],['drivers','Entregas'],['deliverymap','Mapa de entregas'],['sales','Vendas e caixa'],['finance','Lucro e custos'],['receivables','Recebíveis online'],['diagnostics','Diagnóstico da loja'],['purchasing','Contas e fornecedores'],['reports','Gerar relatório'],['fiscal','Fiscal'],['integrations','Integrações'],['network','Minha rede'],['printing','Imprimir notinha'],['support','Suporte']].filter(([id])=>role==='owner'||(role==='manager'?!['integrations','network'].includes(id):ROLE_TABS[role].includes(id))).map(([id,label])=>'<button data-tab="'+id+'">'+label+'</button>').join('')+'</nav>'+'<div class="head-actions"><button id="sound-toggle" class="icon-btn sound-toggle" aria-label="Som de novos pedidos">'+icon('bell')+'</button><button class="icon-btn" data-tab="settings" aria-label="Configurações">'+icon('gear')+'</button><button id="logout" class="icon-btn" aria-label="Sair">'+icon('logout')+'</button></div></header><main id="main" class="dashboard-main"><section class="dashboard-title"><div><span class="eyebrow" id="page-kicker">SEU COMÉRCIO EM MOVIMENTO</span><h1 id="page-title">Seu dia em um olhar</h1><p id="page-subtitle">Tudo pronto para vender mais.</p></div><div class="title-actions"><button id="store-toggle" class="badge gray"><i></i>Loja fechada</button><a class="btn" href="/loja/'+esc(store.slug)+'" target="_blank" rel="noopener">Ver minha loja '+icon('eye')+'</a></div></section><section id="whatsapp-notice"></section><section id="platform-notices"></section><section id="operation-notices"></section><section id="dashboard-content" aria-live="polite"></section></main><footer class="dashboard-footer"><span>SeuComércioAqui</span><span>'+esc(store.name)+' • '+esc(auth.user.name)+' ('+esc(roleLabel)+')</span></footer></div>';
   $$('[data-tab]').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
   bindQuickNavigation(switchTab,store.id+'.'+auth.user.id);
   $('#logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'});location.href='/entrar';}catch(e){toast(e.message);}};
@@ -30,7 +30,7 @@ export async function renderDashboard(){
     if(soundOn()){chime();if('Notification' in window&&Notification.permission==='default')Notification.requestPermission().catch(()=>{});}
     toast(soundOn()?'Som de novos pedidos ligado.':'Som de novos pedidos desligado.');};
   if(new URLSearchParams(location.search).has('assinatura')){history.replaceState(null,'','/painel');refreshBilling();}else platformNotices();
-  watchOrders();
+  watchOrders();whatsappWatch();
   const startTab=new URLSearchParams(location.search).get('aba')==='suporte'?'support':role==='kitchen'?'kitchen':'overview';
   if(startTab==='support')history.replaceState(null,'','/painel');
   await switchTab(startTab);
@@ -107,6 +107,19 @@ function motojaWatch(list){
   motojaSeen=now;return moved;
 }
 function updateSoundButton(){const b=$('#sound-toggle');if(!b)return;b.classList.toggle('active',soundOn());b.setAttribute('aria-pressed',String(soundOn()));b.title=soundOn()?'Som de novos pedidos ligado':'Som de novos pedidos desligado';}
+// WhatsApp caiu (celular desconectou o aparelho): mostra na hora, em vez de o cliente ficar sem mensagem.
+let whatsappTimer;
+async function whatsappWatch(){
+  clearTimeout(whatsappTimer);
+  const box=$('#whatsapp-notice');if(!box)return;
+  if(store.wa_instance&&store.wa_enabled&&['owner','manager'].includes(role)){
+    try{const r=await api('/api/admin/whatsapp/status');
+      box.innerHTML=r.connected?'':'<div class="platform-notice alert"><div><b>WhatsApp da loja desconectado: as mensagens não estão chegando aos clientes.</b><p>Reconecte lendo o QR Code (ou pelo número) em Atendimento WhatsApp.</p></div><button class="btn small" id="whatsapp-reconnect">Reconectar</button></div>';
+      if($('#whatsapp-reconnect'))$('#whatsapp-reconnect').onclick=()=>switchTab('inbox');
+    }catch{}
+  }else box.innerHTML='';
+  whatsappTimer=setTimeout(whatsappWatch,180000);
+}
 async function watchOrders(){
   if(watchBusy)return;watchBusy=true;
   clearTimeout(watchTimer);
