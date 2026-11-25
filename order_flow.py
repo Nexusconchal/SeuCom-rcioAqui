@@ -100,7 +100,7 @@ def whatsapp_error(code):
         return "O servidor do WhatsApp não respondeu. Espere 1 minuto e clique em Gerar QR Code de novo."
     if code in (401, 403):
         return "O servidor do WhatsApp recusou a conexão. Avise o suporte do SeuComércioAqui."
-    return "Não consegui iniciar a conexão do WhatsApp agora. Tente de novo em instantes."
+    return f"Não consegui iniciar a conexão do WhatsApp agora (código {code}). Tente de novo em instantes."
 
 
 def register_order_flow(app, helpers):
@@ -324,6 +324,11 @@ def register_order_flow(app, helpers):
         info = json.loads(h.one("SELECT motoja_info FROM orders WHERE id=?", (oid,))["motoja_info"] or "{}")
         return jsonify(status=status, label=MOTOJA_LABEL.get(status, ""), message=info.get("message", ""))
 
+    def connected_state(instance):
+        code, data = evolution().state(instance)
+        state = (data.get("instance") or {}).get("state") or data.get("state") or ""
+        return code == 200 and state in ("open", "connected")
+
     @app.post("/api/admin/whatsapp/connect")
     @h.owner
     def whatsapp_connect():
@@ -335,6 +340,12 @@ def register_order_flow(app, helpers):
         if instance:
             # Conexão já criada antes: pede um QR novo para ela, sem tentar criar de novo.
             code, data = evolution().connect(instance)
+            if code in (401, 403):
+                abort(502, description=whatsapp_error(code))
+            if (code >= 400 and code != 404) or (200 <= code < 300 and not qr_image(data) and not connected_state(instance)):
+                # Conexão travada no servidor (ex.: o celular desconectou o aparelho): apaga e cria outra.
+                evolution().logout(instance)
+                instance, code = "", 404
         if not instance or code == 404:
             instance = instance or f"sca-{g.store['id']}-{secrets.token_hex(3)}"
             code, data = evolution().create(instance)
@@ -347,7 +358,11 @@ def register_order_flow(app, helpers):
         if code == 0 or code >= 500 or code in (401, 403):
             abort(503 if code == 0 else 502, description=whatsapp_error(code))
         image = qr_image(data)
-        h.db().execute("UPDATE stores SET wa_instance=? WHERE id=?", (instance, g.store["id"]))
+        if instance != g.store["wa_instance"]:
+            # Conexão nova: o endereço de recebimento das mensagens é registrado de novo ao conectar.
+            h.db().execute("UPDATE stores SET wa_instance=?,inbox_hook_hash='' WHERE id=?", (instance, g.store["id"]))
+        else:
+            h.db().execute("UPDATE stores SET wa_instance=? WHERE id=?", (instance, g.store["id"]))
         return jsonify(qr=image, pairing_code=data.get("pairingCode") or (data.get("qrcode") or {}).get("pairingCode") or "")
 
     @app.get("/api/admin/whatsapp/status")

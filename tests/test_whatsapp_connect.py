@@ -20,6 +20,9 @@ class Evo:
     def state(self, instance):
         return 200, {"instance": {"state": "close"}}
 
+    def logout(self, instance):
+        self.calls.append(("logout", instance)); return 200, {}
+
 
 def set_instance(app, value):  # noqa: F811
     conn = connect(app.config)
@@ -63,3 +66,29 @@ def test_provider_offline_explains_what_to_do(app, shop):  # noqa: F811
     set_instance(app, "sca-1-abc")
     r = send(client, "POST", "/api/admin/whatsapp/connect", {})
     assert r.status_code == 503 and "não respondeu" in r.json["error"]
+
+
+def test_stuck_instance_is_recreated_and_webhook_registered_again(app, shop):  # noqa: F811
+    client, _ = shop
+    evo = Evo(create=(201, {"qrcode": QR}), connect=(500, {"error": "Internal Server Error"}))
+    app.extensions["evolution"] = evo
+    conn = connect(app.config)
+    conn.execute("UPDATE stores SET wa_instance='sca-1-old',inbox_hook_hash='abc'")
+    conn.close()
+    r = send(client, "POST", "/api/admin/whatsapp/connect", {})
+    assert r.status_code == 200 and r.json["qr"]
+    assert evo.calls[0] == ("connect", "sca-1-old") and evo.calls[1] == ("logout", "sca-1-old")
+    created = evo.calls[2]
+    assert created[0] == "create" and created[1] != "sca-1-old"
+    conn = connect(app.config)
+    row = conn.execute("SELECT wa_instance,inbox_hook_hash FROM stores").fetchone()
+    conn.close()
+    assert row[0] == created[1] and row[1] == ""
+
+
+def test_provider_error_message_shows_code(app, shop):  # noqa: F811
+    client, _ = shop
+    app.extensions["evolution"] = Evo(create=(500, {}), connect=(500, {}))
+    set_instance(app, "")
+    r = send(client, "POST", "/api/admin/whatsapp/connect", {})
+    assert r.status_code == 502 and "código 500" in r.json["error"]
